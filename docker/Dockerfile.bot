@@ -1,0 +1,27 @@
+# docker/Dockerfile.bot
+FROM python:3.12-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    DEBIAN_FRONTEND=noninteractive
+
+# System deps (matplotlib runtime libs + tz/certs)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    tzdata \
+    ca-certificates \
+    libfreetype6 \
+    libpng16-16 \
+    libjpeg62-turbo \
+  && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Python deps
+COPY requirements/bot.txt ./requirements.txt
+RUN pip install -r requirements.txt
+
+# Bot code (bot.py + templates рядом)
+COPY src/bot/ ./
+
+CMD ["python", "-u", "bot.py"]

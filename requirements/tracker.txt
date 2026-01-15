@@ -1,0 +1,6 @@
+requests
+urllib3
+APScheduler
+SQLAlchemy
+psycopg2-binary
+tzdata
