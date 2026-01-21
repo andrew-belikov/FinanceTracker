@@ -110,11 +110,12 @@ MONTHS_RU = {
 
 # ==========================================
 
-logging.basicConfig(
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    level=logging.INFO,
-)
-logger = logging.getLogger("iis_tracker_bot")
+# Structured logging configuration
+from common.logging_setup import configure_logging, get_logger
+
+# Configure logging once at module load
+configure_logging()
+logger = get_logger("iis_tracker_bot")
 
 engine = create_engine(DB_DSN, future=True)
 SessionLocal = sessionmaker(bind=engine, expire_on_commit=False)
@@ -127,7 +128,6 @@ def db_session():
         yield session
     finally:
         session.close()
-
 
 
 async def safe_send_message(bot, chat_id: int, text: str, parse_mode: str = "Markdown"):
@@ -379,7 +379,6 @@ def get_deposits_raw(session):
         .all()
     )
     return rows
-
 
 
 def get_max_value_before_date(session, d: date | None):
@@ -897,6 +896,7 @@ def build_history_chart(path: str) -> str | None:
 
     return path
 
+
 def compute_twr_timeseries(session):
     ts = get_portfolio_timeseries_agg_by_date(session)
     if len(ts) < 2:
@@ -966,7 +966,6 @@ def render_twr_chart(path: str, dates: list[date], values: list[float | None], t
     plt.close(fig)
 
     return path
-
 
 
 def build_triggers_messages() -> list[str]:
@@ -1173,7 +1172,6 @@ async def cmd_twr(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ============ DAILY JOB (JOBQUEUE) ========
 
 
-
 async def daily_job(context: ContextTypes.DEFAULT_TYPE):
     """
     Авто-рассылки по расписанию (по TIMEZONE):
@@ -1240,6 +1238,7 @@ async def daily_job(context: ContextTypes.DEFAULT_TYPE):
                 await safe_send_message(context.bot, chat_id, msg, parse_mode="Markdown")
             except Exception as e:
                 logger.error("Error sending trigger to chat %s: %s", chat_id, e)
+
 
 def main():
     if not TELEGRAM_BOT_TOKEN:

@@ -39,11 +39,24 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import declarative_base, sessionmaker, relationship
 
+# Import unified JSON logging setup
+from common.logging_setup import configure_logging, get_logger
+
+# Configure logging once at import
+configure_logging()
+
+logger = get_logger(__name__)
+
 # ============ CONFIG из окружения ============
 
 # Токен T-Invest. Лучше передавать через ENV, но можно и захардкодить здесь.
 API_TOKEN = os.getenv("TINVEST_API_TOKEN", "").strip()
 if not API_TOKEN:
+    # Логируем ошибку и падаем, как и раньше.
+    logger.error(
+        "missing_api_token",
+        "TINVEST_API_TOKEN не задан. Передай его через переменную окружения.",
+    )
     raise RuntimeError("TINVEST_API_TOKEN не задан. Передай его через переменную окружения.")
 
 BASE_URL = os.getenv(
@@ -58,8 +71,6 @@ PORTFOLIO_CURRENCY = os.getenv("TINVEST_PORTFOLIO_CURRENCY", "RUB")
 TINKOFF_ACCOUNT_ID = os.getenv("TINKOFF_ACCOUNT_ID", "")
 
 # Время снапшота (по таймзоне SCHED_TZ).
-# Параметры SNAPSHOT_HOUR / SNAPSHOT_MINUTE оставлены для обратной совместимости,
-# но в режиме "раз в минуту" они не используются планировщиком.
 SNAPSHOT_HOUR = int(os.getenv("SNAPSHOT_HOUR", "23"))   # раньше было 23:30 по Москве
 SNAPSHOT_MINUTE = int(os.getenv("SNAPSHOT_MINUTE", "30"))
 SCHED_TZ = os.getenv("SCHED_TZ", "Europe/Moscow")
@@ -72,7 +83,6 @@ except Exception:
 
 
 # Интервал обновления снапшота в минутах (по умолчанию: каждые 5 минут)
-# Сделано через env, чтобы не править код при смене частоты.
 SNAPSHOT_INTERVAL_MINUTES = int(os.getenv("SNAPSHOT_INTERVAL_MINUTES", "5"))
 
 # interval | cron
@@ -84,6 +94,12 @@ VERIFY_SSL = VERIFY_SSL_ENV in ("1", "true", "yes")
 
 if not VERIFY_SSL:
     urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+    # Сообщаем в лог, что SSL-проверка отключена
+    logger.warning(
+        "ssl_verification_disabled",
+        "VERIFY_SSL=false — SSL-проверка отключена. Используй только в доверенной сети.",
+    )
 
 # Настройки Postgres
 DB_HOST = os.getenv("DB_HOST", "db")
@@ -100,7 +116,6 @@ DB_DSN = os.getenv(
 Base = declarative_base()
 
 # ============ МОДЕЛИ БД ============
-
 
 class Instrument(Base):
     __tablename__ = "instruments"
@@ -214,7 +229,6 @@ def init_db():
 
 # ============ HELPERS ============
 
-
 def _to_int(v, default=0):
     if v is None:
         return default
@@ -257,30 +271,36 @@ def post_api(method_path: str, payload: dict) -> dict:
             verify=VERIFY_SSL,
         )
     except requests.exceptions.SSLError as e:
-        print("❌ SSL error:", e, file=sys.stderr)
+        # Логируем, но не логируем тело/заголовки
+        logger.error("ssl_error", f"SSL error: {e}", exc_info=True)
         raise
     except requests.exceptions.RequestException as e:
-        print("❌ HTTP error:", e, file=sys.stderr)
+        logger.error("http_error", f"HTTP error: {e}", exc_info=True)
         raise
 
     if resp.status_code != 200:
-        print("❌ API HTTP error:", resp.status_code, file=sys.stderr)
+        logger.error(
+            "api_http_error",
+            f"API HTTP error: {resp.status_code}",
+            extra={"ctx": {"url_host": url.split('//')[1].split('/')[0], "path": '/' + '/'.join(url.split('/')[3:]), "status_code": resp.status_code}},
+        )
+        # Пытаемся вывести тело для отладки, но через stderr — оставляем прежнее поведение
         try:
-            print(resp.json(), file=sys.stderr)
+            sys.stderr.write(json.dumps(resp.json(), ensure_ascii=False) + "\n")
         except Exception:
-            print(resp.text, file=sys.stderr)
+            sys.stderr.write(resp.text + "\n")
         raise RuntimeError(f"API HTTP {resp.status_code}")
 
     try:
         return resp.json()
     except json.JSONDecodeError:
-        print("❌ JSON decode error", file=sys.stderr)
-        print(resp.text, file=sys.stderr)
+        logger.error("json_decode_error", "JSON decode error")
+        # выводим текст в stderr для диагностики
+        sys.stderr.write(resp.text + "\n")
         raise
 
 
 # ============ API WRAPPERS ============
-
 
 def api_get_accounts() -> dict:
     return post_api(
@@ -327,7 +347,10 @@ def api_get_operations_by_cursor(account_id: str, opened_iso: Optional[str]):
     page_i = 0
     while True:
         if cursor and cursor in seen_cursors:
-            print("❌ Operations cursor повторился — прерываю цикл, чтобы не зависнуть.", file=sys.stderr)
+            logger.warning(
+                "operations_cursor_repeated",
+                "Operations cursor повторился — прерываю цикл, чтобы не зависнуть.",
+            )
             break
         if cursor:
             seen_cursors.add(cursor)
@@ -356,14 +379,16 @@ def api_get_operations_by_cursor(account_id: str, opened_iso: Optional[str]):
 
         page_i += 1
         if page_i >= max_pages:
-            print("⚠️ OPERATIONS_MAX_PAGES достигнут — прерываю синхронизацию операций.", file=sys.stderr)
+            logger.warning(
+                "operations_max_pages_reached",
+                "OPERATIONS_MAX_PAGES достигнут — прерываю синхронизацию операций.",
+            )
             break
 
         cursor = next_cursor
 
 
 # ============ ЛОГИКА СЕРВИСА ============
-
 
 def parse_iso_dt(value: Optional[str]) -> Optional[datetime]:
     if not value:
@@ -568,9 +593,11 @@ def take_snapshot_for_account(db, acc_data: dict):
 
     db.flush()
 
-    print(
-        f"[{utc_now.isoformat()}] Snapshot saved "
-        f"for account {acc_name} ({acc_id}), positions: {len(positions)}"
+    # Структурированное сообщение о сохранении снапшота
+    logger.info(
+        "snapshot_saved",
+        f"Snapshot saved for account {acc_name} ({acc_id}), positions: {len(positions)}",
+        extra={"ctx": {"account_id": acc_id, "positions": len(positions)}},
     )
 
 
@@ -672,9 +699,18 @@ def sync_deposits_for_account(db, acc_data: dict):
     if currency_seen is None:
         currency_seen = PORTFOLIO_CURRENCY.upper()
 
-    print(
-        f"Deposits sync for account {acc_id}: "
-        f"new records={count_new}, sum={total_amount:.2f} {currency_seen}"
+    # Логируем результаты синхронизации
+    logger.info(
+        "deposits_sync",
+        f"Deposits sync for account {acc_id}: new records={count_new}, sum={total_amount:.2f} {currency_seen}",
+        extra={
+            "ctx": {
+                "account_id": acc_id,
+                "new_records": count_new,
+                "sum": round(total_amount, 2),
+                "currency": currency_seen,
+            }
+        },
     )
 
 
@@ -693,8 +729,7 @@ def run_snapshot_and_deposits_once():
             db.commit()
         except Exception:
             db.rollback()
-            print("❌ Deposits sync failed (snapshot сохранён).", file=sys.stderr)
-            traceback.print_exc()
+            logger.exception("deposits_sync_failed", "Deposits sync failed (snapshot сохранён).")
 
 
 def job_with_retry():
@@ -705,36 +740,15 @@ def job_with_retry():
     - при ошибке всё сделает следующий запуск по расписанию.
     """
     try:
-        print(
-            f"=== Snapshot job at {datetime.utcnow().isoformat()} UTC ==="
-        )
+        logger.info("snapshot_job_start", "Snapshot job started.")
         run_snapshot_and_deposits_once()
-        print("=== Snapshot job completed successfully ===")
+        logger.info("snapshot_job_completed", "Snapshot job completed successfully.")
     except Exception as e:
-        print(f"❌ Snapshot job failed: {e}", file=sys.stderr)
-        traceback.print_exc()
+        logger.exception("snapshot_job_failed", f"Snapshot job failed: {e}")
 
 
 def main():
-    if not API_TOKEN:
-        msg = """
-        TINVEST_API_TOKEN is not set.
-
-        1) Создай T-Invest API токен.
-        2) Передай его через env var TINVEST_API_TOKEN
-           (или захардкоди в app.py, если это чисто домашний pet-проект).
-        """
-        print(textwrap.dedent(msg).strip(), file=sys.stderr)
-        sys.exit(1)
-
     init_db()
-
-    if not VERIFY_SSL:
-        print(
-            "⚠️ VERIFY_SSL=false — SSL-проверка отключена. "
-            "Используй только в доверенной сети.",
-            file=sys.stderr,
-        )
 
     # Разовый запуск при старте — перезаписываем текущий день
     job_with_retry()
@@ -751,8 +765,9 @@ def main():
             misfire_grace_time=3600,
             replace_existing=True,
         )
-        print(
-            f"Scheduler started. Daily snapshot at {SNAPSHOT_HOUR:02d}:{SNAPSHOT_MINUTE:02d} ({SCHED_TZ})."
+        logger.info(
+            "scheduler_started",
+            f"Scheduler started. Daily snapshot at {SNAPSHOT_HOUR:02d}:{SNAPSHOT_MINUTE:02d} ({SCHED_TZ}).",
         )
     else:
         trigger = IntervalTrigger(minutes=SNAPSHOT_INTERVAL_MINUTES)
@@ -763,14 +778,15 @@ def main():
             misfire_grace_time=SNAPSHOT_INTERVAL_MINUTES * 60,
             replace_existing=True,
         )
-        print(
-            f"Scheduler started. Snapshot every {SNAPSHOT_INTERVAL_MINUTES} minutes ({SCHED_TZ})."
+        logger.info(
+            "scheduler_started",
+            f"Scheduler started. Snapshot every {SNAPSHOT_INTERVAL_MINUTES} minutes ({SCHED_TZ}).",
         )
 
     try:
         scheduler.start()
     except (KeyboardInterrupt, SystemExit):
-        print("Service stopped.")
+        logger.info("service_stopped", "Service stopped.")
 
 
 if __name__ == "__main__":

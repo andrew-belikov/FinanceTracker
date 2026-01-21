@@ -20,6 +20,9 @@ WORKDIR /app
 COPY requirements/tracker.txt ./requirements.txt
 RUN pip install -r requirements.txt
 
+# Common code (logging, helpers)
+COPY src/common/ ./common/
+
 # App code
 COPY src/tracker/app.py ./app.py
 

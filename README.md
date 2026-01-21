@@ -53,21 +53,21 @@ docker volume create financetracker_fintracker-db
 4) Запустите стек:
 
 ```powershell
-docker compose --project-directory . -f .\docker\compose.yml up -d --build
+docker compose up -d --build
 ```
 
 Проверка статуса и логов:
 
 ```powershell
-docker compose --project-directory . -f .\docker\compose.yml ps
-docker compose --project-directory . -f .\docker\compose.yml logs --tail=200 bot
-docker compose --project-directory . -f .\docker\compose.yml logs --tail=200 tracker
+docker compose ps
+docker compose logs --tail=200 bot
+docker compose logs --tail=200 tracker
 ```
 
 ## Обновление (пересборка без потери данных)
 
 ```powershell
-docker compose --project-directory . -f .\docker\compose.yml up -d --build --force-recreate --remove-orphans
+docker compose up -d --build --force-recreate --remove-orphans
 ```
 
 ## Данные и бэкап
