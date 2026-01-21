@@ -21,6 +21,9 @@ WORKDIR /app
 COPY requirements/bot.txt ./requirements.txt
 RUN pip install -r requirements.txt
 
+# Common code (logging, helpers)
+COPY src/common/ ./common/
+
 # Bot code (bot.py + templates рядом)
 COPY src/bot/ ./
 

@@ -1,7 +1,9 @@
-﻿# docker/compose.yml
-# Р—Р°РїСѓСЃРє РёР· РєРѕСЂРЅСЏ РїСЂРѕРµРєС‚Р°:
-#   docker compose --project-directory . --env-file .\.env -f .\docker\compose.yml up -d --build
-
+# docker/compose.yml (compat)
+# ВНИМАНИЕ: основной compose перенесён в корень проекта: ./compose.yml
+# Рекомендуемый запуск из корня проекта:
+#   docker compose up -d --build
+# Этот файл оставлен для совместимости. Запуск из корня проекта:
+#   docker compose -f .\docker\compose.yml up -d --build
 services:
   db:
     image: postgres:16
@@ -23,7 +25,7 @@ services:
 
   tracker:
     build:
-      context: .
+      context: ..
       dockerfile: docker/Dockerfile.tracker
     image: financetracker-tracker
     container_name: financetracker-tracker-1
@@ -31,8 +33,10 @@ services:
       db:
         condition: service_healthy
     env_file:
-      - .env
+      - ../.env
     environment:
+      APP_ENV: ${APP_ENV:-dev}
+      APP_SERVICE: ${APP_SERVICE_TRACKER:-iis_tracker}
       DB_HOST: db
       DB_PORT: "5432"
       DB_NAME: ${POSTGRES_DB}
@@ -42,7 +46,7 @@ services:
 
   bot:
     build:
-      context: .
+      context: ..
       dockerfile: docker/Dockerfile.bot
     image: financetracker-bot
     container_name: financetracker-bot-1
@@ -50,8 +54,10 @@ services:
       db:
         condition: service_healthy
     env_file:
-      - .env
+      - ../.env
     environment:
+      APP_ENV: ${APP_ENV:-dev}
+      APP_SERVICE: ${APP_SERVICE_BOT:-iis_tracker_bot}
       DB_HOST: db
       DB_PORT: "5432"
       DB_NAME: ${POSTGRES_DB}

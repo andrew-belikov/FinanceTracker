@@ -32,3 +32,8 @@ archive/
 
 # Optional local overrides
 docker-compose.override.yml
+
+# Backups
+*.bak
+*.bak*
+
