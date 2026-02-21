@@ -93,13 +93,40 @@ python -m compileall src
 docker compose config
 ```
 
+
+## SQL-миграции
+
+В репозитории есть SQL-миграция `migrations/20260221_operations_from_deposits.sql`.
+
+Она:
+- создаёт таблицу `operations`;
+- сохраняет старую таблицу как `deposits_legacy`;
+- создаёт view `deposits` для обратной совместимости старых SQL-запросов;
+- не копирует данные напрямую из `deposits_legacy`: исторические операции догружаются tracker-сервисом из API.
+
+Применение вручную:
+
+```powershell
+Get-Content .\migrations\20260221_operations_from_deposits.sql | docker compose exec -T db psql -U $env:POSTGRES_USER -d $env:POSTGRES_DB
+```
+
+Откат (с ограничениями) — `migrations/20260221_operations_from_deposits.rollback.sql`:
+
+- view `deposits` удаляется;
+- если есть `deposits_legacy`, она возвращается как таблица `deposits`;
+- таблица `operations` не удаляется.
+
+```powershell
+Get-Content .\migrations\20260221_operations_from_deposits.rollback.sql | docker compose exec -T db psql -U $env:POSTGRES_USER -d $env:POSTGRES_DB
+```
+
 ## Конфигурация
 
 Список переменных окружения — в `.env.example` и в `docs/CONFIG.md`.
 
 Ежедневный JobQueue в боте теперь также делает health-check данных:
 - проверяет актуальность `portfolio_snapshots` и предупреждает при отставании больше 1 дня;
-- выполняет sanity-check по `deposits` (как временному источнику по операциям) и сообщает, если таблица пустая.
+- выполняет sanity-check по `deposits` (совместимое view на `operations`) и сообщает, если таблица пустая.
 
 ## Безопасность
 
