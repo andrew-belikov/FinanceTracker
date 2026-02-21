@@ -97,6 +97,10 @@ docker compose config
 
 Список переменных окружения — в `.env.example` и в `docs/CONFIG.md`.
 
+Ежедневный JobQueue в боте теперь также делает health-check данных:
+- проверяет актуальность `portfolio_snapshots` и предупреждает при отставании больше 1 дня;
+- выполняет sanity-check по `deposits` (как временному источнику по операциям) и сообщает, если таблица пустая.
+
 ## Безопасность
 
 - Никогда не коммитьте `.env`.
@@ -105,3 +109,14 @@ docker compose config
 ## Лицензия
 
 MIT — см. `LICENSE`.
+
+### Проверка JobQueue после запуска (опционально)
+
+Чтобы один раз проверить, что JobQueue реально отправляет сообщения, включите в `.env`:
+
+```env
+JOBQUEUE_SMOKE_TEST_ON_START=true
+JOBQUEUE_SMOKE_TEST_DELAY_SECONDS=20
+```
+
+После старта контейнера `bot` в логе появятся события планирования и результата smoke-test.
