@@ -70,6 +70,36 @@ docker compose logs --tail=200 tracker
 docker compose up -d --build --force-recreate --remove-orphans
 ```
 
+## Деплой с перезапуском всех сервисов без потери данных
+
+Надёжный порядок (перезапуск всех сервисов + сохранность БД):
+
+```powershell
+# 1) (Опционально, но рекомендуется) бэкап текущей БД
+docker compose exec -T db pg_dump -U $env:POSTGRES_USER $env:POSTGRES_DB > backup_before_redeploy.sql
+
+# 2) Обновить код
+# (внутри репозитория)
+git pull --ff-only
+
+# 3) Пересобрать и перезапустить весь стек
+# ВАЖНО: не использовать down -v (это удалит volume с данными)
+docker compose up -d --build --force-recreate --remove-orphans
+
+# 4) Проверить, что все сервисы поднялись
+docker compose ps
+
+# 5) Проверить логи приложений
+docker compose logs --tail=200 tracker
+docker compose logs --tail=200 bot
+```
+
+Критично для сохранности данных:
+- данные Postgres живут в Docker volume `financetracker_fintracker-db`;
+- команда `docker compose down` сама по себе данные не удаляет;
+- **не запускать** `docker compose down -v`, если нужна сохранность БД.
+
+
 ## Данные и бэкап
 
 Данные Postgres хранятся в Docker volume `financetracker_fintracker-db`. Не выполняйте `docker compose down -v`, если не хотите удалить БД.
