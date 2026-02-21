@@ -110,6 +110,48 @@ docker compose config
 Get-Content .\migrations\20260221_operations_from_deposits.sql | docker compose exec -T db psql -U $env:POSTGRES_USER -d $env:POSTGRES_DB
 ```
 
+### Как применить миграцию без потери данных (рекомендуемый порядок)
+
+1) Остановить запись в БД со стороны приложений (короткое окно на миграцию):
+
+```powershell
+docker compose stop tracker bot
+```
+
+2) Сделать бэкап БД перед изменениями:
+
+```powershell
+docker compose exec -T db pg_dump -U $env:POSTGRES_USER $env:POSTGRES_DB > pre_operations_migration_backup.sql
+```
+
+3) Применить миграцию:
+
+```powershell
+Get-Content .\migrations\20260221_operations_from_deposits.sql | docker compose exec -T db psql -U $env:POSTGRES_USER -d $env:POSTGRES_DB
+```
+
+4) Проверить, что совместимость сохранена (данные по пополнениям читаются через `deposits`):
+
+```powershell
+docker compose exec -T db psql -U $env:POSTGRES_USER -d $env:POSTGRES_DB -c "SELECT COUNT(*) AS operations_input FROM operations WHERE operation_type='OPERATION_TYPE_INPUT';"
+docker compose exec -T db psql -U $env:POSTGRES_USER -d $env:POSTGRES_DB -c "SELECT COUNT(*) AS deposits_rows FROM deposits;"
+docker compose exec -T db psql -U $env:POSTGRES_USER -d $env:POSTGRES_DB -c "SELECT date, amount, currency, description, source FROM deposits ORDER BY date DESC LIMIT 10;"
+```
+
+5) Запустить сервисы обратно и дать tracker догрузить историю операций из API:
+
+```powershell
+docker compose up -d tracker bot
+docker compose logs --tail=200 tracker
+```
+
+6) После стабилизации проверить, что в `operations` появились операции и бот продолжает читать `deposits`:
+
+```powershell
+docker compose exec -T db psql -U $env:POSTGRES_USER -d $env:POSTGRES_DB -c "SELECT operation_type, COUNT(*) FROM operations GROUP BY operation_type ORDER BY operation_type;"
+docker compose logs --tail=200 bot
+```
+
 Откат (с ограничениями) — `migrations/20260221_operations_from_deposits.rollback.sql`:
 
 - view `deposits` удаляется;
