@@ -8,7 +8,7 @@ iis_tracker: ежедневные снапшоты портфеля + табли
 - для каждого дня:
     * сохраняем агрегаты по портфелю;
     * сохраняем состав портфеля (позиции);
-    * синхронизируем все пополнения (OPERATION_TYPE_INPUT) в таблицу deposits.
+    * синхронизируем операции в таблицу operations (для совместимости deposits читается через view).
 """
 
 import os
@@ -213,6 +213,31 @@ class Deposit(Base):
 
     description = Column(String, nullable=True)
     source = Column(String, nullable=True)  # простая попытка классифицировать
+
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class Operation(Base):
+    __tablename__ = "operations"
+    __table_args__ = (
+        UniqueConstraint(
+            "account_id",
+            "operation_id",
+            name="uq_operations_account_operation",
+        ),
+    )
+
+    id = Column(Integer, primary_key=True)
+    account_id = Column(String, nullable=False)
+
+    operation_id = Column(String, nullable=False)
+    operation_type = Column(String, nullable=False)
+    date = Column(DateTime, nullable=False)
+    amount = Column(Numeric(18, 2), nullable=False)
+    currency = Column(String, nullable=False)
+
+    description = Column(String, nullable=True)
+    source = Column(String, nullable=True)
 
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
@@ -621,7 +646,8 @@ def guess_deposit_source(description: Optional[str]) -> Optional[str]:
 
 def sync_deposits_for_account(db, acc_data: dict):
     """
-    Тянем все операции и кладём пополнения в deposits (без дублей).
+    Тянем все операции и кладём их в operations (без дублей).
+    Для обратной совместимости старые SQL-запросы читают пополнения через view deposits.
     """
     acc_id = str(acc_data.get("id"))
     opened_iso = acc_data.get("openedDate") or acc_data.get("opened_date")
@@ -629,8 +655,11 @@ def sync_deposits_for_account(db, acc_data: dict):
     # Инкрементальная синхронизация: начинаем не с открытия счёта, а с последней
     # сохранённой операции (минус 1 день для страховки от задержек/часовых поясов).
     last_dt: Optional[datetime] = (
-        db.query(func.max(Deposit.date))
-        .filter(Deposit.account_id == acc_id)
+        db.query(func.max(Operation.date))
+        .filter(
+            Operation.account_id == acc_id,
+            Operation.operation_type == "OPERATION_TYPE_INPUT",
+        )
         .scalar()
     )
 
@@ -645,9 +674,6 @@ def sync_deposits_for_account(db, acc_data: dict):
 
     for op in api_get_operations_by_cursor(acc_id, from_iso):
         op_type = op.get("operationType") or op.get("type")
-        if op_type != "OPERATION_TYPE_INPUT":
-            continue
-
         payment = op.get("payment")
         val = money_to_float(payment)
         if val is None or val <= 0:
@@ -669,10 +695,10 @@ def sync_deposits_for_account(db, acc_data: dict):
         desc = op.get("description") or op.get("assetUid") or ""
 
         exists = (
-            db.query(Deposit)
+            db.query(Operation)
             .filter(
-                Deposit.account_id == acc_id,
-                Deposit.operation_id == op_id,
+                Operation.account_id == acc_id,
+                Operation.operation_id == op_id,
             )
             .one_or_none()
         )
@@ -681,9 +707,10 @@ def sync_deposits_for_account(db, acc_data: dict):
 
         src = guess_deposit_source(desc)
 
-        dep = Deposit(
+        dep = Operation(
             account_id=acc_id,
             operation_id=op_id,
+            operation_type=op_type or "OPERATION_TYPE_UNSPECIFIED",
             date=op_dt,
             amount=val,
             currency=op_currency,
