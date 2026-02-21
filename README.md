@@ -80,6 +80,19 @@ docker compose up -d --build --force-recreate --remove-orphans
 docker exec -i financetracker-db-1 pg_dump -U $env:POSTGRES_USER $env:POSTGRES_DB > backup.sql
 ```
 
+
+## Подготовка к AI coding
+
+- Базовые правила для AI-агентов: `AGENTS.md`.
+- Требования к PR и проверкам: `CONTRIBUTING.md`.
+
+Перед коммитом рекомендуется выполнить:
+
+```bash
+python -m compileall src
+docker compose config
+```
+
 ## Конфигурация
 
 Список переменных окружения — в `.env.example` и в `docs/CONFIG.md`.
