@@ -74,6 +74,16 @@ TZ = ZoneInfo(TZ_NAME)
 DAILY_SUMMARY_HOUR = int(os.getenv("DAILY_SUMMARY_HOUR", "18"))
 DAILY_SUMMARY_MINUTE = int(os.getenv("DAILY_SUMMARY_MINUTE", "0"))
 
+# Health-check актуальности данных:
+# по согласованию держим простой общий порог в коде (> 1 дня).
+MAX_DATA_AGE_DAYS = 1
+
+# Одноразовый тест JobQueue при старте (для валидации отправки).
+JOBQUEUE_SMOKE_TEST_ON_START = (
+    os.getenv("JOBQUEUE_SMOKE_TEST_ON_START", "false").strip().lower() in {"1", "true", "yes", "on"}
+)
+JOBQUEUE_SMOKE_TEST_DELAY_SECONDS = int(os.getenv("JOBQUEUE_SMOKE_TEST_DELAY_SECONDS", "20"))
+
 # Годовой план пополнений
 PLAN_ANNUAL_CONTRIB_RUB = float(os.getenv("PLAN_ANNUAL_CONTRIB_RUB", "400000"))
 
@@ -190,6 +200,18 @@ def get_latest_snapshots(session, limit: int = 2):
         .all()
     )
     return list(rows)
+
+
+def get_latest_snapshot_date(session):
+    return session.execute(
+        text("SELECT MAX(snapshot_date) FROM portfolio_snapshots")
+    ).scalar_one()
+
+
+def get_latest_deposit_date(session):
+    return session.execute(
+        text("SELECT MAX(date::date) FROM deposits")
+    ).scalar_one()
 
 
 def get_total_deposits(session) -> float:
@@ -1059,6 +1081,89 @@ def build_triggers_messages() -> list[str]:
     return messages
 
 
+def build_data_health_messages(today: date) -> list[str]:
+    """
+    Проверка «живости» данных:
+    - snapshots: обязательно алертим при отставании > 1 дня;
+    - deposits: как прокси операций, только базовая sanity-проверка (пустая таблица).
+      Для редких операций жёсткий age-порог может давать ложные тревоги.
+    """
+    messages: list[str] = []
+
+    with db_session() as session:
+        last_snapshot_date = get_latest_snapshot_date(session)
+        last_deposit_date = get_latest_deposit_date(session)
+
+    if last_snapshot_date is None:
+        messages.append("⚠️ Снапшоты не найдены в БД: tracker, возможно, не записывает данные.")
+    else:
+        lag_days = (today - last_snapshot_date).days
+        if lag_days > MAX_DATA_AGE_DAYS:
+            messages.append(
+                "⚠️ Снапшоты не обновляются: "
+                f"последний снимок — {last_snapshot_date:%d.%m}, "
+                f"сегодня {today:%d.%m} (отставание {lag_days} дн.)."
+            )
+
+    if last_deposit_date is None:
+        messages.append(
+            "ℹ️ В таблице deposits пока нет данных. "
+            "Проверка операций выполняется по deposits как временный источник."
+        )
+    elif last_deposit_date > today:
+        messages.append(
+            "⚠️ Обнаружена аномалия в deposits: "
+            f"последняя дата операции {last_deposit_date:%d.%m} позже сегодняшней {today:%d.%m}."
+        )
+
+    logger.info(
+        "Data health-check completed",
+        extra={
+            "ctx": {
+                "today": today.isoformat(),
+                "max_data_age_days": MAX_DATA_AGE_DAYS,
+                "last_snapshot_date": last_snapshot_date.isoformat() if last_snapshot_date else None,
+                "last_deposit_date": last_deposit_date.isoformat() if last_deposit_date else None,
+                "alerts_count": len(messages),
+            }
+        },
+    )
+    return messages
+
+
+async def jobqueue_smoke_test_job(context: ContextTypes.DEFAULT_TYPE):
+    sent = 0
+    failed = 0
+    now_local = datetime.now(TZ)
+    text_msg = (
+        "🧪 JobQueue smoke-test\n"
+        f"Время (локальное): {now_local.strftime('%d.%m.%Y %H:%M:%S %Z')}\n"
+        "Отправка из одноразового тестового джоба при старте."
+    )
+
+    for chat_id in TARGET_CHAT_IDS:
+        try:
+            await safe_send_message(context.bot, chat_id, text_msg, parse_mode="Markdown")
+            sent += 1
+        except Exception:
+            failed += 1
+            logger.exception(
+                "JobQueue smoke-test failed",
+                extra={"ctx": {"chat_id": chat_id}},
+            )
+
+    logger.info(
+        "JobQueue smoke-test completed",
+        extra={
+            "ctx": {
+                "sent": sent,
+                "failed": failed,
+                "target_chat_ids": sorted(TARGET_CHAT_IDS),
+            }
+        },
+    )
+
+
 # =============== HANDLERS =================
 
 
@@ -1185,17 +1290,27 @@ async def daily_job(context: ContextTypes.DEFAULT_TYPE):
     today = now_local.date()
     is_month_end = today == last_day_of_month(today)
     is_friday = today.weekday() == 4  # Monday=0 ... Friday=4
+    started_at = datetime.now(TZ)
+    started_monotonic = datetime.now(timezone.utc)
+    scheduled_for = f"{DAILY_SUMMARY_HOUR:02d}:{DAILY_SUMMARY_MINUTE:02d} {TZ_NAME}"
 
     logger.info(
-        "Running scheduled reports for %s (month_end=%s, friday=%s)",
-        today.isoformat(),
-        is_month_end,
-        is_friday,
+        "Daily job started",
+        extra={
+            "ctx": {
+                "today": today.isoformat(),
+                "scheduled_for": scheduled_for,
+                "started_at": started_at.isoformat(),
+                "is_month_end": is_month_end,
+                "is_friday": is_friday,
+            }
+        },
     )
 
     month_text = None
     week_text = None
     triggers: list[str] = []
+    health_messages: list[str] = []
 
     try:
         if is_month_end:
@@ -1214,30 +1329,85 @@ async def daily_job(context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.exception("Failed to build triggers: %s", e)
 
+    try:
+        health_messages = build_data_health_messages(today)
+    except Exception as e:
+        logger.exception("Failed to build data health messages: %s", e)
+
+    logger.info(
+        "Daily job prepared messages",
+        extra={
+            "ctx": {
+                "month_report_ready": bool(month_text),
+                "week_report_ready": bool(week_text),
+                "triggers_count": len(triggers),
+                "health_messages_count": len(health_messages),
+            }
+        },
+    )
+
     # Нечего отправлять — выходим тихо.
-    if not month_text and not week_text and not triggers:
+    if not month_text and not week_text and not triggers and not health_messages:
         logger.info("No messages to send for %s", today.isoformat())
         return
+
+    sent_total = 0
+    failed_total = 0
 
     for chat_id in TARGET_CHAT_IDS:
         # Отдельные try/except на каждое сообщение: чтобы одно падение не глушило всё.
         if is_month_end and month_text:
             try:
                 await safe_send_message(context.bot, chat_id, month_text, parse_mode="Markdown")
+                sent_total += 1
+                logger.info("Message sent", extra={"ctx": {"chat_id": chat_id, "message_type": "month_report", "status": "sent"}})
             except Exception as e:
+                failed_total += 1
                 logger.error("Error sending month report to chat %s: %s", chat_id, e)
+                logger.exception("Message failed", extra={"ctx": {"chat_id": chat_id, "message_type": "month_report", "status": "failed"}})
 
         if is_friday and week_text:
             try:
                 await safe_send_message(context.bot, chat_id, week_text, parse_mode="Markdown")
+                sent_total += 1
+                logger.info("Message sent", extra={"ctx": {"chat_id": chat_id, "message_type": "week_report", "status": "sent"}})
             except Exception as e:
+                failed_total += 1
                 logger.error("Error sending week report to chat %s: %s", chat_id, e)
+                logger.exception("Message failed", extra={"ctx": {"chat_id": chat_id, "message_type": "week_report", "status": "failed"}})
 
         for msg in triggers:
             try:
                 await safe_send_message(context.bot, chat_id, msg, parse_mode="Markdown")
+                sent_total += 1
+                logger.info("Message sent", extra={"ctx": {"chat_id": chat_id, "message_type": "trigger", "status": "sent"}})
             except Exception as e:
+                failed_total += 1
                 logger.error("Error sending trigger to chat %s: %s", chat_id, e)
+                logger.exception("Message failed", extra={"ctx": {"chat_id": chat_id, "message_type": "trigger", "status": "failed"}})
+
+        for msg in health_messages:
+            try:
+                await safe_send_message(context.bot, chat_id, msg, parse_mode="Markdown")
+                sent_total += 1
+                logger.info("Message sent", extra={"ctx": {"chat_id": chat_id, "message_type": "health_check", "status": "sent"}})
+            except Exception as e:
+                failed_total += 1
+                logger.error("Error sending health-check message to chat %s: %s", chat_id, e)
+                logger.exception("Message failed", extra={"ctx": {"chat_id": chat_id, "message_type": "health_check", "status": "failed"}})
+
+    duration_ms = int((datetime.now(timezone.utc) - started_monotonic).total_seconds() * 1000)
+    logger.info(
+        "Daily job completed",
+        extra={
+            "ctx": {
+                "today": today.isoformat(),
+                "duration_ms": duration_ms,
+                "sent_total": sent_total,
+                "failed_total": failed_total,
+            }
+        },
+    )
 
 
 def main():
@@ -1270,6 +1440,22 @@ def main():
         )
 
     app.job_queue.run_daily(daily_job, time=job_time, name="daily_summary")
+
+    if JOBQUEUE_SMOKE_TEST_ON_START:
+        app.job_queue.run_once(
+            jobqueue_smoke_test_job,
+            when=JOBQUEUE_SMOKE_TEST_DELAY_SECONDS,
+            name="jobqueue_smoke_test",
+        )
+        logger.info(
+            "Scheduled JobQueue smoke-test",
+            extra={
+                "ctx": {
+                    "delay_seconds": JOBQUEUE_SMOKE_TEST_DELAY_SECONDS,
+                    "target_chat_ids": sorted(TARGET_CHAT_IDS),
+                }
+            },
+        )
 
     logger.info(
         "Bot started. Daily job at %02d:%02d %s",
