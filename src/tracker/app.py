@@ -644,7 +644,7 @@ def guess_deposit_source(description: Optional[str]) -> Optional[str]:
     return None
 
 
-def sync_deposits_for_account(db, acc_data: dict):
+def sync_operations_for_account(db, acc_data: dict):
     """
     Тянем все операции и кладём их в operations (без дублей).
     Для обратной совместимости старые SQL-запросы читают пополнения через view deposits.
@@ -671,15 +671,16 @@ def sync_deposits_for_account(db, acc_data: dict):
     count_new = 0
     total_amount = 0.0
     currency_seen: Optional[str] = None
+    type_breakdown: dict[str, dict[str, float | int]] = {}
 
     for op in api_get_operations_by_cursor(acc_id, from_iso):
         op_type = op.get("operationType") or op.get("type")
         payment = op.get("payment")
         val = money_to_float(payment)
-        if val is None or val <= 0:
+        if val is None:
             continue
 
-        op_currency = (payment.get("currency") or "").upper()
+        op_currency = (payment.get("currency") or PORTFOLIO_CURRENCY).upper()
         currency_seen = currency_seen or op_currency
 
         op_id = op.get("id")
@@ -707,7 +708,7 @@ def sync_deposits_for_account(db, acc_data: dict):
 
         src = guess_deposit_source(desc)
 
-        dep = Operation(
+        operation = Operation(
             account_id=acc_id,
             operation_id=op_id,
             operation_type=op_type or "OPERATION_TYPE_UNSPECIFIED",
@@ -717,9 +718,14 @@ def sync_deposits_for_account(db, acc_data: dict):
             description=desc,
             source=src,
         )
-        db.add(dep)
+        db.add(operation)
         count_new += 1
         total_amount += val
+        operation_type = operation.operation_type
+        if operation_type not in type_breakdown:
+            type_breakdown[operation_type] = {"count": 0, "sum": 0.0}
+        type_breakdown[operation_type]["count"] += 1
+        type_breakdown[operation_type]["sum"] += val
 
     db.flush()
 
@@ -728,20 +734,29 @@ def sync_deposits_for_account(db, acc_data: dict):
 
     # Логируем результаты синхронизации
     logger.info(
-        "deposits_sync",
-        f"Deposits sync for account {acc_id}: new records={count_new}, sum={total_amount:.2f} {currency_seen}",
+        "operations_sync",
+        f"Operations sync for account {acc_id}: new records={count_new}, sum={total_amount:.2f} {currency_seen}",
         extra={
             "ctx": {
                 "account_id": acc_id,
                 "new_records": count_new,
                 "sum": round(total_amount, 2),
                 "currency": currency_seen,
+                "type_breakdown": {
+                    k: {"count": v["count"], "sum": round(v["sum"], 2)}
+                    for k, v in type_breakdown.items()
+                },
             }
         },
     )
 
 
-def run_snapshot_and_deposits_once():
+def sync_deposits_for_account(db, acc_data: dict):
+    """Deprecated wrapper for backward compatibility."""
+    return sync_operations_for_account(db, acc_data)
+
+
+def run_snapshot_and_operations_once():
     accounts_data = api_get_accounts()
     acc = choose_account(accounts_data)
 
@@ -750,13 +765,13 @@ def run_snapshot_and_deposits_once():
         take_snapshot_for_account(db, acc)
         db.commit()
 
-        # 2) Пополнения — вторым шагом (если упадёт, снапшот всё равно останется актуальным).
+        # 2) Операции — вторым шагом (если упадёт, снапшот всё равно останется актуальным).
         try:
-            sync_deposits_for_account(db, acc)
+            sync_operations_for_account(db, acc)
             db.commit()
         except Exception:
             db.rollback()
-            logger.exception("deposits_sync_failed", "Deposits sync failed (snapshot сохранён).")
+            logger.exception("operations_sync_failed", "Operations sync failed (snapshot сохранён).")
 
 
 def job_with_retry():
@@ -768,7 +783,7 @@ def job_with_retry():
     """
     try:
         logger.info("snapshot_job_start", "Snapshot job started.")
-        run_snapshot_and_deposits_once()
+        run_snapshot_and_operations_once()
         logger.info("snapshot_job_completed", "Snapshot job completed successfully.")
     except Exception as e:
         logger.exception("snapshot_job_failed", f"Snapshot job failed: {e}")
