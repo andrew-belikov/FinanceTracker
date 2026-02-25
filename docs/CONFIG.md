@@ -47,8 +47,33 @@
 
 - Бот в ежедневном джобе проверяет дату последнего снапшота (`portfolio_snapshots.snapshot_date`).
 - Алерт отправляется, если отставание больше 1 дня (порог зафиксирован в коде бота).
-- Для операций используется проверка через `operations` (sanity-check) по типам пополнений (`operation_type IN (...)`):
-  - по умолчанию используется `OPERATION_TYPE_INPUT`;
-  - `operations` заполняется tracker-сервисом из API операций (включая историю);
-  - если по выбранным типам в `operations` нет данных, бот отправляет информационное сообщение;
-  - жёсткий age-порог для операций **не** применяется, так как пополнения могут быть редкими.
+- Для операций используется sanity-check по таблице `operations`.
+- В проверках учитываются типы пополнений (`operation_type`) из списка:
+  - `OPERATION_TYPE_INPUT` (значение по умолчанию);
+  - при расширении логики — дополнительные incoming-типы, явно заданные в коде бота.
+- `operations` заполняется tracker-сервисом из API операций (включая историю).
+- Если по учитываемым `operation_type` в `operations` нет данных, бот отправляет информационное сообщение.
+- Жёсткий age-порог для операций **не** применяется, так как пополнения могут быть редкими.
+
+### Совместимость `deposits`
+
+- View `deposits` сохраняется только для legacy/backward compatibility старых SQL-запросов.
+- Новый код и проверки должны читать данные операций из `operations`.
+
+### Миграция на новую схему (кратко)
+
+```bash
+# 1) Остановить сервисы, пишущие/читающие БД
+docker compose stop tracker bot
+
+# 2) Применить миграцию
+docker compose exec -T db psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -f migrations/20260221_operations_from_deposits.sql
+
+# 3) Запустить сервисы обратно
+docker compose up -d tracker bot
+
+# 4) Проверить, что операции читаются из operations
+docker compose exec -T db psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "SELECT operation_type, COUNT(*) FROM operations GROUP BY operation_type ORDER BY operation_type;"
+```
+
+Ожидаемый результат: в `operations` есть записи по типам пополнений; `deposits` используется только как совместимый legacy-view.
