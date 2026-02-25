@@ -200,6 +200,47 @@ Get-Content .\migrations\20260221_operations_from_deposits.rollback.sql | docker
 - проверяет актуальность `portfolio_snapshots` и предупреждает при отставании больше 1 дня;
 - выполняет sanity-check по `operations` (для типов пополнений) и сообщает, если подходящих операций нет.
 
+
+## Чек-лист проверки бота после обновления
+
+Ниже — минимальный практический smoke-check, чтобы убедиться, что обновление прошло корректно.
+
+1) Проверить, что контейнеры запущены:
+
+```powershell
+docker compose ps
+```
+
+2) Проверить логи на старте (без traceback/DB errors):
+
+```powershell
+docker compose logs --tail=200 bot
+docker compose logs --tail=200 tracker
+```
+
+3) Проверить данные операций в БД (по умолчанию бот считает пополнениями `OPERATION_TYPE_INPUT`):
+
+```powershell
+docker compose exec -T db psql -U $env:POSTGRES_USER -d $env:POSTGRES_DB -c "SELECT operation_type, COUNT(*) FROM operations GROUP BY operation_type ORDER BY operation_type;"
+docker compose exec -T db psql -U $env:POSTGRES_USER -d $env:POSTGRES_DB -c "SELECT MAX(date)::date AS latest_input_date FROM operations WHERE operation_type='OPERATION_TYPE_INPUT';"
+```
+
+4) В Telegram вручную проверить команды бота:
+
+- `/today` — приходит сводка и корректный PnL относительно суммы пополнений.
+- `/week` — есть недельная динамика и сумма пополнений за неделю.
+- `/month` — есть сумма пополнений за месяц и прогресс годового плана.
+- `/history` — строится график стоимости и пополнений (без ошибок отправки файла).
+- `/structure` — корректно отрисовывается структура портфеля.
+
+5) Проверить health-check в ежедневном джобе:
+
+- в логах `bot` нет ошибок SQL;
+- при отсутствии операций нужного типа приходит информирующее сообщение про `operations`;
+- при нормальных данных алерты о будущей дате операции не появляются.
+
+Рекомендуется после деплоя выполнить команды из этого чек-листа и сохранить короткий отчёт: время проверки, какие команды Telegram протестированы, и результат.
+
 ## Безопасность
 
 - Никогда не коммитьте `.env`.
