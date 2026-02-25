@@ -1152,28 +1152,28 @@ async def cmd_today(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_authorized(update):
         return
     text = build_today_summary()
-    await update.message.reply_text(text, parse_mode="Markdown")
+    await safe_send_message(context.bot, update.effective_chat.id, text, parse_mode="Markdown")
 
 
 async def cmd_week(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_authorized(update):
         return
     text = build_week_summary()
-    await update.message.reply_text(text, parse_mode="Markdown")
+    await safe_send_message(context.bot, update.effective_chat.id, text, parse_mode="Markdown")
 
 
 async def cmd_month(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_authorized(update):
         return
     text = build_month_summary()
-    await update.message.reply_text(text, parse_mode="Markdown")
+    await safe_send_message(context.bot, update.effective_chat.id, text, parse_mode="Markdown")
 
 
 async def cmd_structure(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_authorized(update):
         return
     text = build_structure_text()
-    await update.message.reply_text(text, parse_mode="Markdown")
+    await safe_send_message(context.bot, update.effective_chat.id, text, parse_mode="Markdown")
 
 
 async def cmd_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
