@@ -212,6 +212,17 @@ docker compose logs --tail=200 bot
 Get-Content .\migrations\20260221_operations_from_deposits.rollback.sql | docker compose exec -T db psql -U $env:POSTGRES_USER -d $env:POSTGRES_DB
 ```
 
+Дополнительная миграция `migrations/20260225_operations_add_instrument_columns.sql` добавляет в `operations`
+поля `instrument_uid` и `figi`.
+
+```powershell
+Get-Content .\migrations\20260225_operations_add_instrument_columns.sql | docker compose exec -T db psql -U $env:POSTGRES_USER -d $env:POSTGRES_DB
+```
+
+После применения tracker при очередной синхронизации:
+- заполняет новые поля для новых операций;
+- делает backfill для уже существующих операций (обновляет строки, где `instrument_uid`/`figi` ещё `NULL`).
+
 ## Конфигурация
 
 Список переменных окружения — в `.env.example` и в `docs/CONFIG.md`.

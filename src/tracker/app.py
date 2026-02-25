@@ -232,6 +232,8 @@ class Operation(Base):
 
     operation_id = Column(String, nullable=False)
     operation_type = Column(String, nullable=False)
+    instrument_uid = Column(String, nullable=True)
+    figi = Column(String, nullable=True)
     date = Column(DateTime, nullable=False)
     amount = Column(Numeric(18, 2), nullable=False)
     currency = Column(String, nullable=False)
@@ -669,6 +671,7 @@ def sync_operations_for_account(db, acc_data: dict):
         from_iso = dt_to_iso_z(from_dt)
 
     count_new = 0
+    count_updated = 0
     total_amount = 0.0
     currency_seen: Optional[str] = None
     type_breakdown: dict[str, dict[str, float | int]] = {}
@@ -684,6 +687,8 @@ def sync_operations_for_account(db, acc_data: dict):
         currency_seen = currency_seen or op_currency
 
         op_id = op.get("id")
+        op_instrument_uid = op.get("instrumentUid") or op.get("assetUid")
+        op_figi = op.get("figi")
         op_date_str = op.get("date")
         op_dt_raw = parse_iso_dt(op_date_str)
         if op_dt_raw is None:
@@ -704,6 +709,15 @@ def sync_operations_for_account(db, acc_data: dict):
             .one_or_none()
         )
         if exists:
+            changed = False
+            if op_instrument_uid and not exists.instrument_uid:
+                exists.instrument_uid = op_instrument_uid
+                changed = True
+            if op_figi and not exists.figi:
+                exists.figi = op_figi
+                changed = True
+            if changed:
+                count_updated += 1
             continue
 
         src = guess_deposit_source(desc)
@@ -712,6 +726,8 @@ def sync_operations_for_account(db, acc_data: dict):
             account_id=acc_id,
             operation_id=op_id,
             operation_type=op_type or "OPERATION_TYPE_UNSPECIFIED",
+            instrument_uid=op_instrument_uid,
+            figi=op_figi,
             date=op_dt,
             amount=val,
             currency=op_currency,
@@ -735,11 +751,12 @@ def sync_operations_for_account(db, acc_data: dict):
     # Логируем результаты синхронизации
     logger.info(
         "operations_sync",
-        f"Operations sync for account {acc_id}: new records={count_new}, sum={total_amount:.2f} {currency_seen}",
+        f"Operations sync for account {acc_id}: new records={count_new}, updated records={count_updated}, sum={total_amount:.2f} {currency_seen}",
         extra={
             "ctx": {
                 "account_id": acc_id,
                 "new_records": count_new,
+                "updated_records": count_updated,
                 "sum": round(total_amount, 2),
                 "currency": currency_seen,
                 "type_breakdown": {
