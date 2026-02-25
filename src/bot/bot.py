@@ -10,11 +10,11 @@ Telegram-бот для проекта iis_tracker.
     /history    — график стоимости портфеля и суммы пополнений
     /help       — список команд
 
-- Ежедневная задача (18:00 МСК, через JobQueue):
+- Ежедневная задача (18:00 по времени хоста, через JobQueue):
+    * по пятницам — недельный отчёт (/week)
     * в последний день месяца — отчёт за месяц (/month)
     * триггеры:
         - новый максимум портфеля
-        - просадка от максимума больше порога
         - годовой план по пополнениям выполнен (400k за год)
     * (ежедневная сводка /today автоматически НЕ отправляется)
 
@@ -66,17 +66,12 @@ TARGET_CHAT_IDS = ALLOWED_USER_IDS
 # Название счёта в текстах
 ACCOUNT_FRIENDLY_NAME = os.getenv("ACCOUNT_FRIENDLY_NAME", "Семейный капитал")
 
-# Таймзона
+# Таймзона для отображения дат в тексте
 TZ_NAME = os.getenv("TIMEZONE", "Europe/Moscow")
 TZ = ZoneInfo(TZ_NAME)
 
-# Время ежедневного джоба
-DAILY_SUMMARY_HOUR = int(os.getenv("DAILY_SUMMARY_HOUR", "18"))
-DAILY_SUMMARY_MINUTE = int(os.getenv("DAILY_SUMMARY_MINUTE", "0"))
-
-# Health-check актуальности данных:
-# по согласованию держим простой общий порог в коде (> 1 дня).
-MAX_DATA_AGE_DAYS = 1
+# Таймзона хоста для расписания JobQueue
+HOST_TZ = datetime.now().astimezone().tzinfo
 
 # Одноразовый тест JobQueue при старте (для валидации отправки).
 JOBQUEUE_SMOKE_TEST_ON_START = (
@@ -86,9 +81,6 @@ JOBQUEUE_SMOKE_TEST_DELAY_SECONDS = int(os.getenv("JOBQUEUE_SMOKE_TEST_DELAY_SEC
 
 # Годовой план пополнений
 PLAN_ANNUAL_CONTRIB_RUB = float(os.getenv("PLAN_ANNUAL_CONTRIB_RUB", "400000"))
-
-# Порог просадки от максимума (в процентах, например 5 = -5%)
-DRAWDOWN_ALERT_PCT = float(os.getenv("DRAWDOWN_ALERT_PCT", "5.0"))
 
 # Подключение к БД (та же, что у сервиса снапшотов)
 DB_HOST = os.getenv("DB_HOST", "db")
@@ -1032,7 +1024,6 @@ def build_triggers_messages() -> list[str]:
     """
     Ежедневные триггеры:
     - новый максимум (реальное обновление исторического максимума)
-    - просадка от максимума > DRAWDOWN_ALERT_PCT
     - годовой план выполнен
     """
     now_local = datetime.now(TZ)
@@ -1061,14 +1052,6 @@ def build_triggers_messages() -> list[str]:
         # Если его нет, значит это самый первый день — "новый максимум" не шлём, чтобы не спамить.
         max_before_last = get_max_value_before_date(session, last_date)
 
-        # Максимум стоимости портфеля на все даты ДО и ВКЛЮЧАЯ текущую дату.
-        max_to_last = get_max_value_to_date(session, last_date)
-
-        # Максимум стоимости портфеля на все даты ДО и ВКЛЮЧАЯ предыдущий день.
-        max_to_prev = (
-            get_max_value_to_date(session, prev_date) if prev_date is not None else None
-        )
-
         # Для годового плана — сравниваем сумму пополнений до вчера и до сегодня
         year_start = datetime(year, 1, 1)
         today_start = datetime(year, today.month, today.day)
@@ -1086,27 +1069,6 @@ def build_triggers_messages() -> list[str]:
             f"Предыдущий максимум: {fmt_rub(max_before_last)}."
         )
 
-    # Просадка от максимума
-    if max_to_last and max_to_last > 0:
-        drawdown_curr = (last_value / max_to_last - 1.0) * 100.0
-        drawdown_prev = None
-
-        # Для предыдущего дня считаем просадку от максимума на тот момент (max_to_prev),
-        # чтобы не было ситуации, когда максимум на самом prev_date не учитывается.
-        if prev_value is not None and max_to_prev and max_to_prev > 0:
-            drawdown_prev = (prev_value / max_to_prev - 1.0) * 100.0
-
-        threshold = -abs(DRAWDOWN_ALERT_PCT)
-        if (
-            drawdown_prev is not None
-            and drawdown_prev > threshold
-            and drawdown_curr <= threshold
-        ):
-            messages.append(
-                f"⚠️ Просадка от максимума достигла примерно {drawdown_curr:.1f} %.\n"
-                "Это нормальная часть пути, но полезно быть к этому готовыми психологически."
-            )
-
     # Годовой план выполнен (считаем по дню пересечения)
     if PLAN_ANNUAL_CONTRIB_RUB > 0:
         plan = PLAN_ANNUAL_CONTRIB_RUB
@@ -1116,56 +1078,6 @@ def build_triggers_messages() -> list[str]:
                 f"по пополнениям ({fmt_rub(plan)}) выполнен! 👏"
             )
 
-    return messages
-
-
-def build_data_health_messages(today: date) -> list[str]:
-    """
-    Проверка «живости» данных:
-    - snapshots: обязательно алертим при отставании > 1 дня;
-    - operations (типы пополнений): только базовая sanity-проверка (пустая таблица).
-      Для редких операций жёсткий age-порог может давать ложные тревоги.
-    """
-    messages: list[str] = []
-
-    with db_session() as session:
-        last_snapshot_date = get_latest_snapshot_date(session)
-        last_deposit_date = get_latest_deposit_date(session)
-
-    if last_snapshot_date is None:
-        messages.append("⚠️ Снапшоты не найдены в БД: tracker, возможно, не записывает данные.")
-    else:
-        lag_days = (today - last_snapshot_date).days
-        if lag_days > MAX_DATA_AGE_DAYS:
-            messages.append(
-                "⚠️ Снапшоты не обновляются: "
-                f"последний снимок — {last_snapshot_date:%d.%m}, "
-                f"сегодня {today:%d.%m} (отставание {lag_days} дн.)."
-            )
-
-    if last_deposit_date is None:
-        messages.append(
-            "ℹ️ В таблице operations пока нет данных по типам пополнений. "
-            "Проверка операций выполняется по operation_type (IN)."
-        )
-    elif last_deposit_date > today:
-        messages.append(
-            "⚠️ Обнаружена аномалия в operations: "
-            f"последняя дата операции {last_deposit_date:%d.%m} позже сегодняшней {today:%d.%m}."
-        )
-
-    logger.info(
-        "Data health-check completed",
-        extra={
-            "ctx": {
-                "today": today.isoformat(),
-                "max_data_age_days": MAX_DATA_AGE_DAYS,
-                "last_snapshot_date": last_snapshot_date.isoformat() if last_snapshot_date else None,
-                "last_deposit_date": last_deposit_date.isoformat() if last_deposit_date else None,
-                "alerts_count": len(messages),
-            }
-        },
-    )
     return messages
 
 
@@ -1229,8 +1141,9 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/twr — TWR (time-weighted return) и график по дням\n"
         "/help — эта подсказка\n\n"
         "Автоматически:\n"
-        "• каждый день в 19:00 — проверка триггеров (максимумы, просадки)\n"
-        "• в последний день месяца — дополнительный отчёт за месяц."
+        "• каждый день в 18:00 (по времени хоста) — проверка триггеров (максимум, годовой план)\n"
+        "• по пятницам в 18:00 (по времени хоста) — недельный отчёт\n"
+        "• в последний день месяца в 18:00 (по времени хоста) — дополнительный отчёт за месяц."
     )
     await update.message.reply_text(text)
 
@@ -1317,10 +1230,10 @@ async def cmd_twr(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def daily_job(context: ContextTypes.DEFAULT_TYPE):
     """
-    Авто-рассылки по расписанию (по TIMEZONE):
-    - каждый день в 18:00: проверка триггеров (новый максимум / просадка / годовой план)
-    - каждую пятницу в 18:00: недельный отчёт (/week)
-    - в последний день месяца в 18:00: месячный отчёт (/month)
+    Авто-рассылки по расписанию (по времени хоста):
+    - каждый день в 18:00 (по времени хоста): проверка триггеров (новый максимум / годовой план)
+    - каждую пятницу в 18:00 (по времени хоста): недельный отчёт (/week)
+    - в последний день месяца в 18:00 (по времени хоста): месячный отчёт (/month)
 
     Важно: если Markdown сломается из-за динамических данных — отправляем тем же текстом без разметки.
     """
@@ -1330,7 +1243,7 @@ async def daily_job(context: ContextTypes.DEFAULT_TYPE):
     is_friday = today.weekday() == 4  # Monday=0 ... Friday=4
     started_at = datetime.now(TZ)
     started_monotonic = datetime.now(timezone.utc)
-    scheduled_for = f"{DAILY_SUMMARY_HOUR:02d}:{DAILY_SUMMARY_MINUTE:02d} {TZ_NAME}"
+    scheduled_for = f"18:00 {HOST_TZ}"
 
     logger.info(
         "Daily job started",
@@ -1348,7 +1261,6 @@ async def daily_job(context: ContextTypes.DEFAULT_TYPE):
     month_text = None
     week_text = None
     triggers: list[str] = []
-    health_messages: list[str] = []
 
     try:
         if is_month_end:
@@ -1367,11 +1279,6 @@ async def daily_job(context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.exception("Failed to build triggers: %s", e)
 
-    try:
-        health_messages = build_data_health_messages(today)
-    except Exception as e:
-        logger.exception("Failed to build data health messages: %s", e)
-
     logger.info(
         "Daily job prepared messages",
         extra={
@@ -1379,13 +1286,12 @@ async def daily_job(context: ContextTypes.DEFAULT_TYPE):
                 "month_report_ready": bool(month_text),
                 "week_report_ready": bool(week_text),
                 "triggers_count": len(triggers),
-                "health_messages_count": len(health_messages),
             }
         },
     )
 
     # Нечего отправлять — выходим тихо.
-    if not month_text and not week_text and not triggers and not health_messages:
+    if not month_text and not week_text and not triggers:
         logger.info("No messages to send for %s", today.isoformat())
         return
 
@@ -1424,16 +1330,6 @@ async def daily_job(context: ContextTypes.DEFAULT_TYPE):
                 logger.error("Error sending trigger to chat %s: %s", chat_id, e)
                 logger.exception("Message failed", extra={"ctx": {"chat_id": chat_id, "message_type": "trigger", "status": "failed"}})
 
-        for msg in health_messages:
-            try:
-                await safe_send_message(context.bot, chat_id, msg, parse_mode="Markdown")
-                sent_total += 1
-                logger.info("Message sent", extra={"ctx": {"chat_id": chat_id, "message_type": "health_check", "status": "sent"}})
-            except Exception as e:
-                failed_total += 1
-                logger.error("Error sending health-check message to chat %s: %s", chat_id, e)
-                logger.exception("Message failed", extra={"ctx": {"chat_id": chat_id, "message_type": "health_check", "status": "failed"}})
-
     duration_ms = int((datetime.now(timezone.utc) - started_monotonic).total_seconds() * 1000)
     logger.info(
         "Daily job completed",
@@ -1467,9 +1363,9 @@ def main():
 
     # Ежедневный джоб
     job_time = time(
-        hour=DAILY_SUMMARY_HOUR,
-        minute=DAILY_SUMMARY_MINUTE,
-        tzinfo=TZ,
+        hour=18,
+        minute=0,
+        tzinfo=HOST_TZ,
     )
     if app.job_queue is None:
         raise RuntimeError(
@@ -1496,10 +1392,8 @@ def main():
         )
 
     logger.info(
-        "Bot started. Daily job at %02d:%02d %s",
-        DAILY_SUMMARY_HOUR,
-        DAILY_SUMMARY_MINUTE,
-        TZ_NAME,
+        "Bot started. Daily job at 18:00 %s",
+        HOST_TZ,
     )
     app.run_polling()
 
