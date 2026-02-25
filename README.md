@@ -116,19 +116,19 @@ docker compose ps
 docker compose logs --tail=200 tracker
 
 # 4) Проверить, что в operations появляются записи
-docker compose exec -T db sh -lc "psql -U \"$POSTGRES_USER\" -d \"$POSTGRES_DB\" -c \"SELECT COUNT(*) AS operations_total FROM operations;\""
-docker compose exec -T db sh -lc "psql -U \"$POSTGRES_USER\" -d \"$POSTGRES_DB\" -c \"SELECT operation_type, COUNT(*) AS cnt, COALESCE(SUM(amount),0) AS amount_sum FROM operations GROUP BY operation_type ORDER BY cnt DESC;\""
+docker compose exec -T db sh -lc 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "SELECT COUNT(*) AS operations_total FROM operations;"'
+docker compose exec -T db sh -lc 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "SELECT operation_type, COUNT(*) AS cnt, COALESCE(SUM(amount),0) AS amount_sum FROM operations GROUP BY operation_type ORDER BY cnt DESC;"'
 
 # 5) Проверить последние операции
-docker compose exec -T db sh -lc "psql -U \"$POSTGRES_USER\" -d \"$POSTGRES_DB\" -c \"SELECT date, operation_type, amount, currency, description FROM operations ORDER BY date DESC LIMIT 20;\""
+docker compose exec -T db sh -lc 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "SELECT date, operation_type, amount, currency, description FROM operations ORDER BY date DESC LIMIT 20;"'
 
 # 6) Проверить обратную совместимость представления deposits
-docker compose exec -T db sh -lc "psql -U \"$POSTGRES_USER\" -d \"$POSTGRES_DB\" -c \"SELECT COUNT(*) AS deposits_rows FROM deposits;\""
-docker compose exec -T db sh -lc "psql -U \"$POSTGRES_USER\" -d \"$POSTGRES_DB\" -c \"SELECT date, amount, currency, description FROM deposits ORDER BY date DESC LIMIT 20;\""
+docker compose exec -T db sh -lc 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "SELECT COUNT(*) AS deposits_rows FROM deposits;"'
+docker compose exec -T db sh -lc 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "SELECT date, amount, currency, description FROM deposits ORDER BY date DESC LIMIT 20;"'
 ```
 
 
-Если видите ошибку `FATAL:  role "-d" does not exist`, значит переменные PowerShell `$env:POSTGRES_USER/$env:POSTGRES_DB` пустые. Команды выше запускают `psql` через `sh -lc` и берут переменные окружения уже **внутри контейнера db**, что снимает проблему.
+Если видите ошибки PowerShell вида `Имя "*" не распознано`/`Unterminated quoted string` или `FATAL: role "-d" does not exist`, проблема в хостовом парсинге кавычек/переменных. Команды выше используют одинарные кавычки вокруг `sh -lc` и берут `$POSTGRES_USER/$POSTGRES_DB` уже **внутри контейнера db**, что снимает эти проблемы.
 
 Ожидаемый результат:
 - в логах `tracker` есть событие `operations_sync`;
