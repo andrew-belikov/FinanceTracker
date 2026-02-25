@@ -30,7 +30,7 @@ from contextlib import contextmanager
 from datetime import datetime, date, time, timedelta, timezone
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import create_engine, text
+from sqlalchemy import bindparam, create_engine, text
 from sqlalchemy.orm import sessionmaker
 
 import matplotlib
@@ -130,6 +130,8 @@ logger = get_logger("iis_tracker_bot")
 engine = create_engine(DB_DSN, future=True)
 SessionLocal = sessionmaker(bind=engine, expire_on_commit=False)
 
+DEPOSIT_OPERATION_TYPES: tuple[str, ...] = ("OPERATION_TYPE_INPUT",)
+
 
 @contextmanager
 def db_session():
@@ -208,15 +210,35 @@ def get_latest_snapshot_date(session):
     ).scalar_one()
 
 
-def get_latest_deposit_date(session):
+def get_latest_deposit_date(
+    session,
+    operation_types: tuple[str, ...] = DEPOSIT_OPERATION_TYPES,
+):
     return session.execute(
-        text("SELECT MAX(date::date) FROM deposits")
+        text(
+            """
+            SELECT MAX(date::date)
+            FROM operations
+            WHERE operation_type IN :operation_types
+            """
+        ).bindparams(bindparam("operation_types", expanding=True)),
+        {"operation_types": operation_types},
     ).scalar_one()
 
 
-def get_total_deposits(session) -> float:
+def get_total_deposits(
+    session,
+    operation_types: tuple[str, ...] = DEPOSIT_OPERATION_TYPES,
+) -> float:
     row = session.execute(
-        text("SELECT COALESCE(SUM(amount), 0) AS s FROM deposits")
+        text(
+            """
+            SELECT COALESCE(SUM(amount), 0) AS s
+            FROM operations
+            WHERE operation_type IN :operation_types
+            """
+        ).bindparams(bindparam("operation_types", expanding=True)),
+        {"operation_types": operation_types},
     ).scalar_one()
     return float(row or 0)
 
@@ -225,16 +247,22 @@ def get_deposits_for_period(
     session,
     start_dt: datetime,
     end_dt: datetime,
+    operation_types: tuple[str, ...] = DEPOSIT_OPERATION_TYPES,
 ) -> float:
     row = session.execute(
         text(
             """
         SELECT COALESCE(SUM(amount), 0) AS s
-        FROM deposits
+        FROM operations
         WHERE date >= :start_dt AND date < :end_dt
+          AND operation_type IN :operation_types
         """
-        ),
-        {"start_dt": start_dt, "end_dt": end_dt},
+        ).bindparams(bindparam("operation_types", expanding=True)),
+        {
+            "start_dt": start_dt,
+            "end_dt": end_dt,
+            "operation_types": operation_types,
+        },
     ).scalar_one()
     return float(row or 0)
 
@@ -351,17 +379,22 @@ def get_portfolio_timeseries(session):
     return rows
 
 
-def get_deposits_by_date(session):
+def get_deposits_by_date(
+    session,
+    operation_types: tuple[str, ...] = DEPOSIT_OPERATION_TYPES,
+):
     rows = (
         session.execute(
             text(
                 """
         SELECT date::date AS d, SUM(amount) AS s
-        FROM deposits
+        FROM operations
+        WHERE operation_type IN :operation_types
         GROUP BY date::date
         ORDER BY d ASC
         """
-            )
+            ).bindparams(bindparam("operation_types", expanding=True)),
+            {"operation_types": operation_types},
         )
         .mappings()
         .all()
@@ -386,16 +419,21 @@ def get_portfolio_timeseries_agg_by_date(session):
     return rows
 
 
-def get_deposits_raw(session):
+def get_deposits_raw(
+    session,
+    operation_types: tuple[str, ...] = DEPOSIT_OPERATION_TYPES,
+):
     rows = (
         session.execute(
             text(
                 """
         SELECT date, amount
-        FROM deposits
+        FROM operations
+        WHERE operation_type IN :operation_types
         ORDER BY date ASC
         """
-            )
+            ).bindparams(bindparam("operation_types", expanding=True)),
+            {"operation_types": operation_types},
         )
         .mappings()
         .all()
@@ -1085,7 +1123,7 @@ def build_data_health_messages(today: date) -> list[str]:
     """
     Проверка «живости» данных:
     - snapshots: обязательно алертим при отставании > 1 дня;
-    - deposits: как прокси операций, только базовая sanity-проверка (пустая таблица).
+    - operations (типы пополнений): только базовая sanity-проверка (пустая таблица).
       Для редких операций жёсткий age-порог может давать ложные тревоги.
     """
     messages: list[str] = []
@@ -1107,12 +1145,12 @@ def build_data_health_messages(today: date) -> list[str]:
 
     if last_deposit_date is None:
         messages.append(
-            "ℹ️ В таблице deposits пока нет данных. "
-            "Проверка операций выполняется по deposits как временный источник."
+            "ℹ️ В таблице operations пока нет данных по типам пополнений. "
+            "Проверка операций выполняется по operation_type (IN)."
         )
     elif last_deposit_date > today:
         messages.append(
-            "⚠️ Обнаружена аномалия в deposits: "
+            "⚠️ Обнаружена аномалия в operations: "
             f"последняя дата операции {last_deposit_date:%d.%m} позже сегодняшней {today:%d.%m}."
         )
 

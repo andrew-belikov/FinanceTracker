@@ -175,7 +175,7 @@ docker compose up -d tracker bot
 docker compose logs --tail=200 tracker
 ```
 
-6) После стабилизации проверить, что в `operations` появились операции и бот продолжает читать `deposits`:
+6) После стабилизации проверить, что в `operations` появились операции и бот читает пополнения напрямую из `operations` (с фильтром по `operation_type`):
 
 ```powershell
 docker compose exec -T db psql -U $env:POSTGRES_USER -d $env:POSTGRES_DB -c "SELECT operation_type, COUNT(*) FROM operations GROUP BY operation_type ORDER BY operation_type;"
@@ -198,7 +198,7 @@ Get-Content .\migrations\20260221_operations_from_deposits.rollback.sql | docker
 
 Ежедневный JobQueue в боте теперь также делает health-check данных:
 - проверяет актуальность `portfolio_snapshots` и предупреждает при отставании больше 1 дня;
-- выполняет sanity-check по `deposits` (совместимое view на `operations`) и сообщает, если таблица пустая.
+- выполняет sanity-check по `operations` (для типов пополнений) и сообщает, если подходящих операций нет.
 
 ## Безопасность
 
