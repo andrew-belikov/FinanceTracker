@@ -658,7 +658,6 @@ def sync_operations_for_account(db, acc_data: dict):
         db.query(func.max(Operation.date))
         .filter(
             Operation.account_id == acc_id,
-            Operation.operation_type == "OPERATION_TYPE_INPUT",
         )
         .scalar()
     )
@@ -761,7 +760,7 @@ def run_snapshot_and_operations_once():
     acc = choose_account(accounts_data)
 
     with SessionLocal() as db:
-        # 1) Снапшот не должен зависеть от синка пополнений.
+        # 1) Снапшот не должен зависеть от синка операций.
         take_snapshot_for_account(db, acc)
         db.commit()
 

@@ -100,6 +100,38 @@ docker compose logs --tail=200 bot
 - **не запускать** `docker compose down -v`, если нужна сохранность БД.
 
 
+## Как проверить, что патч работает и данные пишутся (PowerShell)
+
+Запускать из `D:\FinanceTracker>`:
+
+```powershell
+# 1) Поднять/перезапустить сервисы
+cd D:\FinanceTracker
+docker compose up -d --build --force-recreate --remove-orphans
+
+# 2) Убедиться, что контейнеры в статусе Up
+docker compose ps
+
+# 3) Проверить логи tracker (ищем operations_sync и отсутствие operations_sync_failed)
+docker compose logs --tail=200 tracker
+
+# 4) Проверить, что в operations появляются записи
+docker compose exec -T db psql -U $env:POSTGRES_USER -d $env:POSTGRES_DB -c "SELECT COUNT(*) AS operations_total FROM operations;"
+docker compose exec -T db psql -U $env:POSTGRES_USER -d $env:POSTGRES_DB -c "SELECT operation_type, COUNT(*) AS cnt, COALESCE(SUM(amount),0) AS amount_sum FROM operations GROUP BY operation_type ORDER BY cnt DESC;"
+
+# 5) Проверить последние операции
+docker compose exec -T db psql -U $env:POSTGRES_USER -d $env:POSTGRES_DB -c "SELECT date, operation_type, amount, currency, description FROM operations ORDER BY date DESC LIMIT 20;"
+
+# 6) Проверить обратную совместимость представления deposits
+docker compose exec -T db psql -U $env:POSTGRES_USER -d $env:POSTGRES_DB -c "SELECT COUNT(*) AS deposits_rows FROM deposits;"
+docker compose exec -T db psql -U $env:POSTGRES_USER -d $env:POSTGRES_DB -c "SELECT date, amount, currency, description FROM deposits ORDER BY date DESC LIMIT 20;"
+```
+
+Ожидаемый результат:
+- в логах `tracker` есть событие `operations_sync`;
+- счётчик `operations_total` растёт после запусков;
+- в `deposits` есть записи (это совместимое view для пополнений).
+
 ## Данные и бэкап
 
 Данные Postgres хранятся в Docker volume `financetracker_fintracker-db`. Не выполняйте `docker compose down -v`, если не хотите удалить БД.
