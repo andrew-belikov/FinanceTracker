@@ -328,15 +328,4 @@ TODAY_TEMPLATES = [template + TODAY_INCOME_EXPENSE_LINES for template in TODAY_T
 
 def render_today_text(ctx: TodayContext) -> str:
     template = random.choice(TODAY_TEMPLATES)
-    return template.format(
-        snapshot_dt=ctx.snapshot_dt,
-        current_value=ctx.current_value,
-        delta_abs=ctx.delta_abs,
-        delta_pct=ctx.delta_pct,
-        pnl_abs=ctx.pnl_abs,
-        pnl_pct=ctx.pnl_pct,
-        coupons=ctx.coupons,
-        dividends=ctx.dividends,
-        commissions=ctx.commissions,
-        taxes=ctx.taxes,
-    )
+    return template.format(**ctx.__dict__)
