@@ -230,6 +230,74 @@ Get-Content .\migrations\20260225_operations_add_instrument_columns.sql | docker
 Get-Content .\migrations\20260226_income_events.sql | docker compose exec -T db psql -U $env:POSTGRES_USER -d $env:POSTGRES_DB
 ```
 
+### Пошагово: деплой + миграция + проверка (Windows Terminal / PowerShell)
+
+1) Откройте Windows Terminal (PowerShell) в папке репозитория и обновите код:
+
+```powershell
+git pull --ff-only
+```
+
+2) Остановите сервисы `tracker` и `bot` на время миграции (БД остаётся запущенной):
+
+```powershell
+docker compose stop tracker bot
+```
+
+3) Примените миграцию `income_events`:
+
+```powershell
+Get-Content .\migrations\20260226_income_events.sql | docker compose exec -T db psql -U $env:POSTGRES_USER -d $env:POSTGRES_DB
+```
+
+4) Пересоберите и поднимите весь стек:
+
+```powershell
+docker compose up -d --build --force-recreate --remove-orphans
+```
+
+5) Проверьте статус контейнеров:
+
+```powershell
+docker compose ps
+```
+
+6) Проверьте, что таблица создана:
+
+```powershell
+docker compose exec -T db psql -U $env:POSTGRES_USER -d $env:POSTGRES_DB -c "\d income_events"
+```
+
+7) Проверьте, что tracker создаёт события, а bot отправляет уведомления:
+
+```powershell
+docker compose logs --tail=200 tracker
+docker compose logs --tail=200 bot
+```
+
+Ожидаемо:
+- в логах tracker появляются записи `income_event_created`;
+- в логах bot появляются `income_event_notification_sent`.
+
+8) Быстрая проверка вручную (тестовое событие в БД):
+
+```powershell
+docker compose exec -T db psql -U $env:POSTGRES_USER -d $env:POSTGRES_DB -c "INSERT INTO income_events (account_id, figi, event_date, event_type, gross_amount, tax_amount, net_amount, net_yield_pct) VALUES ('manual-check', 'TESTFIGI', CURRENT_DATE, 'dividend', 100.00, -13.00, 87.00, 1.23) ON CONFLICT DO NOTHING;"
+docker compose logs --tail=200 bot
+```
+
+9) Проверка, что событие пометилось как отправленное:
+
+```powershell
+docker compose exec -T db psql -U $env:POSTGRES_USER -d $env:POSTGRES_DB -c "SELECT id, account_id, figi, event_type, net_amount, net_yield_pct, notified, created_at FROM income_events ORDER BY created_at DESC LIMIT 20;"
+```
+
+10) Если нужно откатить только миграцию `income_events`, удалите таблицу вручную (осторожно, удалит данные событий):
+
+```powershell
+docker compose exec -T db psql -U $env:POSTGRES_USER -d $env:POSTGRES_DB -c "DROP TABLE IF EXISTS income_events;"
+```
+
 После применения tracker при очередной синхронизации:
 - заполняет новые поля для новых операций;
 - делает backfill для уже существующих операций (обновляет строки, где `instrument_uid`/`figi` ещё `NULL`).
