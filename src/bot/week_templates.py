@@ -407,15 +407,4 @@ WEEK_TEMPLATES = [template + WEEK_INCOME_EXPENSE_LINES for template in WEEK_TEMP
 
 def render_week_text(ctx: WeekContext) -> str:
     template = random.choice(WEEK_TEMPLATES)
-    return template.format(
-        week_label=ctx.week_label,
-        current_value=ctx.current_value,
-        week_delta_abs=ctx.week_delta_abs,
-        week_delta_pct=ctx.week_delta_pct,
-        dep_week=ctx.dep_week,
-        plan_progress_pct=ctx.plan_progress_pct,
-        coupons=ctx.coupons,
-        dividends=ctx.dividends,
-        commissions=ctx.commissions,
-        taxes=ctx.taxes,
-    )
+    return template.format(**ctx.__dict__)

@@ -454,18 +454,4 @@ MONTH_TEMPLATES = [template + MONTH_INCOME_EXPENSE_LINES for template in MONTH_T
 
 def render_month_text(ctx: MonthContext) -> str:
     template = random.choice(MONTH_TEMPLATES)
-    return template.format(
-        month_year_label=ctx.month_year_label,
-        current_value=ctx.current_value,
-        dep_month=ctx.dep_month,
-        dep_year=ctx.dep_year,
-        year_plan=ctx.year_plan,
-        year_progress_pct=ctx.year_progress_pct,
-        delta_month_abs=ctx.delta_month_abs,
-        delta_month_pct=ctx.delta_month_pct,
-        plan_status_phrase=ctx.plan_status_phrase,
-        coupons=ctx.coupons,
-        dividends=ctx.dividends,
-        commissions=ctx.commissions,
-        taxes=ctx.taxes,
-    ).strip()
+    return template.format(**ctx.__dict__).strip()
