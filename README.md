@@ -116,15 +116,15 @@ docker compose ps
 docker compose logs --tail=200 tracker
 
 # 4) Проверить, что в operations появляются записи
-docker compose exec -T db sh -lc 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "SELECT COUNT(*) AS operations_total FROM operations;"'
-docker compose exec -T db sh -lc 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "SELECT operation_type, COUNT(*) AS cnt, COALESCE(SUM(amount),0) AS amount_sum FROM operations GROUP BY operation_type ORDER BY cnt DESC;"'
+docker compose exec -T db sh -lc 'psql -X -P pager=off -tA -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "SELECT COUNT(*) FROM operations;"'
+docker compose exec -T db sh -lc 'psql -X -P pager=off -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "SELECT operation_type, COUNT(*) AS cnt, COALESCE(SUM(amount),0) AS amount_sum FROM operations GROUP BY operation_type ORDER BY cnt DESC;"'
 
 # 5) Проверить последние операции
-docker compose exec -T db sh -lc 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "SELECT date, operation_type, amount, currency, description FROM operations ORDER BY date DESC LIMIT 20;"'
+docker compose exec -T db sh -lc 'psql -X -P pager=off -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "SELECT date, operation_type, amount, currency, description FROM operations ORDER BY date DESC LIMIT 20;"'
 
 # 6) Проверить обратную совместимость представления deposits
-docker compose exec -T db sh -lc 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "SELECT COUNT(*) AS deposits_rows FROM deposits;"'
-docker compose exec -T db sh -lc 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "SELECT date, amount, currency, description FROM deposits ORDER BY date DESC LIMIT 20;"'
+docker compose exec -T db sh -lc 'psql -X -P pager=off -tA -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "SELECT COUNT(*) FROM deposits;"'
+docker compose exec -T db sh -lc 'psql -X -P pager=off -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "SELECT date, amount, currency, description FROM deposits ORDER BY date DESC LIMIT 20;"'
 ```
 
 
@@ -132,8 +132,9 @@ docker compose exec -T db sh -lc 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c 
 
 Ожидаемый результат:
 - в логах `tracker` есть событие `operations_sync`;
-- счётчик `operations_total` растёт после запусков;
-- в `deposits` есть записи (это совместимое view для пополнений).
+- команда `SELECT COUNT(*) FROM operations;` возвращает число (желательно `> 0`);
+- команда `SELECT COUNT(*) FROM deposits;` возвращает число (для активного счёта обычно `> 0`);
+- таблицы с последними строками (`ORDER BY date DESC LIMIT 20`) показывают реальные записи.
 
 ## Данные и бэкап
 
