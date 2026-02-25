@@ -33,14 +33,17 @@ from sqlalchemy import (
     Date,
     DateTime,
     Numeric,
+    Boolean,
     ForeignKey,
     UniqueConstraint,
     func,
+    text,
 )
 from sqlalchemy.orm import declarative_base, sessionmaker, relationship
 
 # Import unified JSON logging setup
 from common.logging_setup import configure_logging, get_logger
+from income_events import compute_income_net_amount, compute_income_net_yield_pct
 
 # Configure logging once at import
 configure_logging()
@@ -241,6 +244,31 @@ class Operation(Base):
     description = Column(String, nullable=True)
     source = Column(String, nullable=True)
 
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class IncomeEvent(Base):
+    __tablename__ = "income_events"
+    __table_args__ = (
+        UniqueConstraint(
+            "account_id",
+            "figi",
+            "event_date",
+            "event_type",
+            name="uq_income_events_account_figi_date_type",
+        ),
+    )
+
+    id = Column(Integer, primary_key=True)
+    account_id = Column(String, nullable=False)
+    figi = Column(String, nullable=False)
+    event_date = Column(Date, nullable=False)
+    event_type = Column(String, nullable=False)
+    gross_amount = Column(Numeric(18, 2), nullable=False)
+    tax_amount = Column(Numeric(18, 2), nullable=False)
+    net_amount = Column(Numeric(18, 2), nullable=False)
+    net_yield_pct = Column(Numeric(9, 4), nullable=False)
+    notified = Column(Boolean, default=False, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
 
@@ -496,6 +524,22 @@ def compute_expected_yield_pct(
     return expected_yield / invested * 100.0
 
 
+def get_latest_cost_basis(db, figi: str) -> Optional[float]:
+    row = (
+        db.query(PortfolioPosition.position_value, PortfolioPosition.expected_yield)
+        .join(PortfolioSnapshot, PortfolioSnapshot.id == PortfolioPosition.snapshot_id)
+        .filter(PortfolioPosition.figi == figi)
+        .order_by(PortfolioSnapshot.snapshot_date.desc(), PortfolioSnapshot.snapshot_at.desc())
+        .first()
+    )
+    if not row:
+        return None
+    position_value, expected_yield = row
+    if position_value is None or expected_yield is None:
+        return None
+    return float(position_value) - float(expected_yield)
+
+
 def take_snapshot_for_account(db, acc_data: dict):
     """
     Делаем/перезаписываем снапшот за текущий день для одного счёта.
@@ -675,6 +719,13 @@ def sync_operations_for_account(db, acc_data: dict):
     total_amount = 0.0
     currency_seen: Optional[str] = None
     type_breakdown: dict[str, dict[str, float | int]] = {}
+    income_by_key: dict[tuple[str, date, str], dict[str, float]] = {}
+    income_type_map = {
+        "OPERATION_TYPE_COUPON": ("coupon", "gross"),
+        "OPERATION_TYPE_COUPON_TAX": ("coupon", "tax"),
+        "OPERATION_TYPE_DIVIDEND": ("dividend", "gross"),
+        "OPERATION_TYPE_DIVIDEND_TAX": ("dividend", "tax"),
+    }
 
     for op in api_get_operations_by_cursor(acc_id, from_iso):
         op_type = op.get("operationType") or op.get("type")
@@ -742,6 +793,69 @@ def sync_operations_for_account(db, acc_data: dict):
             type_breakdown[operation_type] = {"count": 0, "sum": 0.0}
         type_breakdown[operation_type]["count"] += 1
         type_breakdown[operation_type]["sum"] += val
+
+        if op_figi and operation_type in income_type_map:
+            event_type, amount_kind = income_type_map[operation_type]
+            key = (op_figi, op_dt.date(), event_type)
+            if key not in income_by_key:
+                income_by_key[key] = {"gross": 0.0, "tax": 0.0}
+            income_by_key[key][amount_kind] += val
+
+    for (figi, event_date, event_type), amounts in income_by_key.items():
+        gross_sum = amounts["gross"]
+        tax_sum = amounts["tax"]
+        net_amount = compute_income_net_amount(gross_sum, tax_sum)
+        if net_amount <= 0:
+            continue
+
+        net_yield_pct = 0.0
+        try:
+            cost_basis = get_latest_cost_basis(db, figi)
+            net_yield_pct = compute_income_net_yield_pct(net_amount, cost_basis)
+        except Exception:
+            logger.exception(
+                "income_event_yield_failed",
+                extra={"ctx": {"account_id": acc_id, "figi": figi, "event_date": event_date.isoformat(), "event_type": event_type}},
+            )
+
+        result = db.execute(
+            text(
+                """
+                INSERT INTO income_events (
+                    account_id, figi, event_date, event_type,
+                    gross_amount, tax_amount, net_amount, net_yield_pct, notified
+                ) VALUES (
+                    :account_id, :figi, :event_date, :event_type,
+                    :gross_amount, :tax_amount, :net_amount, :net_yield_pct, false
+                )
+                ON CONFLICT (account_id, figi, event_date, event_type) DO NOTHING
+                """
+            ),
+            {
+                "account_id": acc_id,
+                "figi": figi,
+                "event_date": event_date,
+                "event_type": event_type,
+                "gross_amount": round(gross_sum, 2),
+                "tax_amount": round(tax_sum, 2),
+                "net_amount": round(net_amount, 2),
+                "net_yield_pct": round(net_yield_pct, 4),
+            },
+        )
+        if result.rowcount:
+            logger.info(
+                "income_event_created",
+                extra={
+                    "ctx": {
+                        "account_id": acc_id,
+                        "figi": figi,
+                        "event_date": event_date.isoformat(),
+                        "event_type": event_type,
+                        "net_amount": round(net_amount, 2),
+                        "net_yield_pct": round(net_yield_pct, 4),
+                    }
+                },
+            )
 
     db.flush()
 

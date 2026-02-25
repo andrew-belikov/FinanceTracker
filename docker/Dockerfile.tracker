@@ -24,6 +24,6 @@ RUN pip install -r requirements.txt
 COPY src/common/ ./common/
 
 # App code
-COPY src/tracker/app.py ./app.py
+COPY src/tracker/ ./
 
 CMD ["python", "-u", "app.py"]

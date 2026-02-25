@@ -167,6 +167,20 @@ def fmt_pct(x: float | None, precision: int = 2) -> str:
     return fmt.format(x)
 
 
+def fmt_signed_amount(x: float, precision: int = 2) -> str:
+    value = f"{x:,.{precision}f}".replace(",", " ")
+    if "." in value:
+        value = value.rstrip("0").rstrip(".")
+    return f"+{value}"
+
+
+def fmt_plain_pct(x: float, precision: int = 2) -> str:
+    value = f"{x:.{precision}f}"
+    if "." in value:
+        value = value.rstrip("0").rstrip(".")
+    return value
+
+
 def last_day_of_month(d: date) -> date:
     if d.month == 12:
         return date(d.year, 12, 31)
@@ -1344,6 +1358,85 @@ async def daily_job(context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def check_income_events(context: ContextTypes.DEFAULT_TYPE):
+    rows: list[dict] = []
+    with db_session() as session:
+        rows = (
+            session.execute(
+                text(
+                    """
+                    SELECT
+                        ie.id,
+                        ie.figi,
+                        ie.event_type,
+                        ie.net_amount,
+                        ie.net_yield_pct,
+                        COALESCE(i.name, i.ticker, ie.figi) AS instrument_name
+                    FROM income_events ie
+                    LEFT JOIN instruments i ON i.figi = ie.figi
+                    WHERE ie.notified = false
+                    ORDER BY ie.created_at ASC
+                    """
+                )
+            )
+            .mappings()
+            .all()
+        )
+
+    for row in rows:
+        event_type = row["event_type"]
+        icon = "💸" if event_type == "coupon" else "💰"
+        action_line = "Купон зачислен" if event_type == "coupon" else "Дивиденды зачислены"
+        net_amount = float(row["net_amount"])
+        net_yield_pct = float(row["net_yield_pct"])
+        instrument_name = row["instrument_name"]
+
+        text_msg = (
+            f"{icon} {instrument_name}\n"
+            f"{action_line}\n"
+            f"{fmt_signed_amount(net_amount)} ₽ ({fmt_plain_pct(net_yield_pct)} %)"
+        )
+
+        sent_ok = True
+        for chat_id in TARGET_CHAT_IDS:
+            try:
+                await safe_send_message(context.bot, chat_id, text_msg, parse_mode="Markdown")
+                logger.info(
+                    "income_event_notification_sent",
+                    extra={
+                        "ctx": {
+                            "income_event_id": row["id"],
+                            "chat_id": chat_id,
+                            "event_type": event_type,
+                            "figi": row["figi"],
+                        }
+                    },
+                )
+            except Exception:
+                sent_ok = False
+                logger.exception(
+                    "income_event_notification_failed",
+                    extra={
+                        "ctx": {
+                            "income_event_id": row["id"],
+                            "chat_id": chat_id,
+                            "event_type": event_type,
+                            "figi": row["figi"],
+                        }
+                    },
+                )
+
+        if not sent_ok:
+            continue
+
+        with db_session() as session:
+            session.execute(
+                text("UPDATE income_events SET notified = true WHERE id = :id"),
+                {"id": row["id"]},
+            )
+            session.commit()
+
+
 def main():
     if not TELEGRAM_BOT_TOKEN:
         raise RuntimeError(
@@ -1374,6 +1467,7 @@ def main():
         )
 
     app.job_queue.run_daily(daily_job, time=job_time, name="daily_summary")
+    app.job_queue.run_repeating(check_income_events, interval=60, first=10, name="income_events_notifier")
 
     if JOBQUEUE_SMOKE_TEST_ON_START:
         app.job_queue.run_once(

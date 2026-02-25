@@ -8,6 +8,7 @@
 - Telegram‑бот:
   - недельный отчёт по пятницам в 18:00 (по времени хоста);
   - месячный отчёт в последний день месяца в 18:00 (по времени хоста);
+  - авто‑уведомления о зачислении купонов и дивидендов (по событиям из БД);
   - уведомление о новом максимуме портфеля «по итогу дня»;
   - уведомление о выполнении годового плана пополнений.
 - Ограничение доступа по списку доверенных Telegram user_id.
@@ -217,6 +218,16 @@ Get-Content .\migrations\20260221_operations_from_deposits.rollback.sql | docker
 
 ```powershell
 Get-Content .\migrations\20260225_operations_add_instrument_columns.sql | docker compose exec -T db psql -U $env:POSTGRES_USER -d $env:POSTGRES_DB
+```
+
+Миграция `migrations/20260226_income_events.sql` добавляет таблицу `income_events`.
+
+Новая схема уведомлений:
+- `tracker` фиксирует события купонов/дивидендов в `income_events`;
+- `bot` раз в минуту читает `income_events.notified = false`, отправляет уведомления и помечает событие как отправленное.
+
+```powershell
+Get-Content .\migrations\20260226_income_events.sql | docker compose exec -T db psql -U $env:POSTGRES_USER -d $env:POSTGRES_DB
 ```
 
 После применения tracker при очередной синхронизации:
