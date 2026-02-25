@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from decimal import Decimal
 from typing import List
 import random
 
@@ -13,6 +14,10 @@ class MonthContext:
     delta_month_abs: str       # "+4 120 ₽" — изменение стоимости за месяц
     delta_month_pct: str       # "+1.22 %"
     plan_status_phrase: str    # готовая фраза о статусе графика (или пустая строка)
+    coupons: Decimal = Decimal('0')
+    dividends: Decimal = Decimal('0')
+    commissions: Decimal = Decimal('0')
+    taxes: Decimal = Decimal('0')
 
 MONTH_TEMPLATES: List[str] = [
     # --- Блок деловых/аналитических шаблонов (M01 - M25) ---
@@ -440,6 +445,13 @@ MONTH_TEMPLATES: List[str] = [
     ),  # M50
 ]
 
+MONTH_INCOME_EXPENSE_LINES = (
+    "\nДоходы: купоны {coupons}, дивиденды {dividends}."
+    "\nРасходы: комиссии {commissions}, налоги {taxes}."
+)
+
+MONTH_TEMPLATES = [template + MONTH_INCOME_EXPENSE_LINES for template in MONTH_TEMPLATES]
+
 def render_month_text(ctx: MonthContext) -> str:
     template = random.choice(MONTH_TEMPLATES)
     return template.format(
@@ -452,4 +464,8 @@ def render_month_text(ctx: MonthContext) -> str:
         delta_month_abs=ctx.delta_month_abs,
         delta_month_pct=ctx.delta_month_pct,
         plan_status_phrase=ctx.plan_status_phrase,
+        coupons=ctx.coupons,
+        dividends=ctx.dividends,
+        commissions=ctx.commissions,
+        taxes=ctx.taxes,
     ).strip()

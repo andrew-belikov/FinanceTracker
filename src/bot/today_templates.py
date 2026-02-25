@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from decimal import Decimal
 from typing import List
 import random
 
@@ -10,6 +11,10 @@ class TodayContext:
     delta_pct: str        # "+0.37 %"
     pnl_abs: str          # "-10 294 ₽"
     pnl_pct: str          # "-3.0 %"
+    coupons: Decimal = Decimal('0')
+    dividends: Decimal = Decimal('0')
+    commissions: Decimal = Decimal('0')
+    taxes: Decimal = Decimal('0')
 
 TODAY_TEMPLATES: List[str] = [
     (
@@ -314,6 +319,13 @@ TODAY_TEMPLATES: List[str] = [
     ),  # T50
 ]
 
+TODAY_INCOME_EXPENSE_LINES = (
+    "\nДоходы: купоны {coupons}, дивиденды {dividends}."
+    "\nРасходы: комиссии {commissions}, налоги {taxes}."
+)
+
+TODAY_TEMPLATES = [template + TODAY_INCOME_EXPENSE_LINES for template in TODAY_TEMPLATES]
+
 def render_today_text(ctx: TodayContext) -> str:
     template = random.choice(TODAY_TEMPLATES)
     return template.format(
@@ -323,4 +335,8 @@ def render_today_text(ctx: TodayContext) -> str:
         delta_pct=ctx.delta_pct,
         pnl_abs=ctx.pnl_abs,
         pnl_pct=ctx.pnl_pct,
+        coupons=ctx.coupons,
+        dividends=ctx.dividends,
+        commissions=ctx.commissions,
+        taxes=ctx.taxes,
     )
