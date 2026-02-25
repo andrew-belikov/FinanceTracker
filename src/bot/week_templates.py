@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from decimal import Decimal
 from typing import List
 import random
 
@@ -10,6 +11,10 @@ class WeekContext:
     week_delta_pct: str       # "+0.25 %"
     dep_week: str             # "15 000 ₽" — пополнения за неделю
     plan_progress_pct: str    # "87.0 %" — выполнение годового плана по пополнениям
+    coupons: Decimal = Decimal('0')
+    dividends: Decimal = Decimal('0')
+    commissions: Decimal = Decimal('0')
+    taxes: Decimal = Decimal('0')
 
 WEEK_TEMPLATES: List[str] = [
     (
@@ -393,6 +398,13 @@ WEEK_TEMPLATES: List[str] = [
     ),  # W50
 ]
 
+WEEK_INCOME_EXPENSE_LINES = (
+    "\nДоходы: купоны {coupons}, дивиденды {dividends}."
+    "\nРасходы: комиссии {commissions}, налоги {taxes}."
+)
+
+WEEK_TEMPLATES = [template + WEEK_INCOME_EXPENSE_LINES for template in WEEK_TEMPLATES]
+
 def render_week_text(ctx: WeekContext) -> str:
     template = random.choice(WEEK_TEMPLATES)
     return template.format(
@@ -402,4 +414,8 @@ def render_week_text(ctx: WeekContext) -> str:
         week_delta_pct=ctx.week_delta_pct,
         dep_week=ctx.dep_week,
         plan_progress_pct=ctx.plan_progress_pct,
+        coupons=ctx.coupons,
+        dividends=ctx.dividends,
+        commissions=ctx.commissions,
+        taxes=ctx.taxes,
     )
