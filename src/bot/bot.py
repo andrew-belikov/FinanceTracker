@@ -175,6 +175,12 @@ def fmt_rub(x: float | None, precision: int = 0) -> str:
     return fmt.format(x).replace(",", " ")
 
 
+def fmt_decimal_rub(x: Decimal | float | int | None, precision: int = 2) -> str:
+    if x is None:
+        x = Decimal("0")
+    return fmt_rub(float(x), precision=precision)
+
+
 def fmt_pct(x: float | None, precision: int = 2) -> str:
     if x is None:
         return "—"
@@ -590,9 +596,17 @@ def build_today_summary() -> str:
     """
     Формирует текст сводки "на сегодня" используя шаблоны из today_templates.
     """
+    now_local = datetime.now(TZ)
+    day_start = datetime.combine(now_local.date(), time.min)
+    day_end_exclusive = day_start + timedelta(days=1)
+    day_end = day_end_exclusive - timedelta(microseconds=1)
+
     with db_session() as session:
         snaps = get_latest_snapshots(session, limit=2)
         total_deposits = get_total_deposits(session)
+        coupons, dividends = get_income_for_period(session, day_start, day_end)
+        commissions = get_commissions_for_period(session, day_start, day_end)
+        taxes = get_taxes_for_period(session, day_start, day_end)
 
     if not snaps:
         return "Пока нет ни одного снапшота портфеля."
@@ -636,6 +650,10 @@ def build_today_summary() -> str:
         delta_pct=fmt_pct(delta_pct) if delta_pct is not None else "—",
         pnl_abs=fmt_rub(pnl_abs) if pnl_abs is not None else "—",
         pnl_pct=fmt_pct(pnl_pct) if pnl_pct is not None else "—",
+        coupons=fmt_decimal_rub(coupons),
+        dividends=fmt_decimal_rub(dividends),
+        commissions=fmt_decimal_rub(commissions),
+        taxes=fmt_decimal_rub(taxes),
     )
 
     return render_today_text(ctx)
@@ -645,24 +663,36 @@ def build_week_summary() -> str:
     """
     Формирует текст еженедельной сводки используя шаблоны из week_templates.
     """
+    now_local = datetime.now(TZ)
+    week_start_date = now_local.date() - timedelta(days=now_local.weekday())
+    week_end_date = week_start_date + timedelta(days=4)
+    week_start = datetime.combine(week_start_date, time.min)
+    week_end_exclusive = datetime.combine(week_end_date + timedelta(days=1), time.min)
+    week_end = week_end_exclusive - timedelta(microseconds=1)
+
     with db_session() as session:
-        # 1. Определяем даты (неделя = последние 7 дней до последнего снапшота включительно)
+        # 1. Определяем даты текущей рабочей недели (понедельник–пятница)
         latest_snap = get_latest_snapshot_with_id(session)
         if not latest_snap:
             return "Пока нет ни одного снапшота портфеля."
 
-        end_date = latest_snap["snapshot_date"]  # date
-        start_date = end_date - timedelta(days=6)
-
-        # Формируем week_label (например "10–16 ноября 2025")
-        month_name = MONTHS_RU.get(end_date.month, str(end_date.month))
-        week_label = f"{start_date.day}–{end_date.day} {month_name} {end_date.year}"
+        # Формируем week_label (например "10–14 ноября 2025")
+        if week_start_date.month == week_end_date.month:
+            month_name = MONTHS_RU.get(week_end_date.month, str(week_end_date.month))
+            week_label = f"{week_start_date.day}–{week_end_date.day} {month_name} {week_end_date.year}"
+        else:
+            start_month_name = MONTHS_RU.get(week_start_date.month, str(week_start_date.month))
+            end_month_name = MONTHS_RU.get(week_end_date.month, str(week_end_date.month))
+            week_label = (
+                f"{week_start_date.day} {start_month_name}–"
+                f"{week_end_date.day} {end_month_name} {week_end_date.year}"
+            )
 
         # 2. Текущая стоимость
         current_value = float(latest_snap["total_value"]) if latest_snap["total_value"] is not None else 0.0
 
         # 3. Изменение за неделю
-        # Ищем снапшот на дату <= start_date, чтобы посчитать дельту
+        # Ищем снапшот на дату <= week_start_date, чтобы посчитать дельту
         # Если снапшота ровно в start_date нет, берем ближайший предыдущий
         # Если портфель моложе недели, берем самый первый
         start_val_row = session.execute(
@@ -675,7 +705,7 @@ def build_week_summary() -> str:
             LIMIT 1
             """
             ),
-            {"d": start_date},
+            {"d": week_start_date},
         ).scalar()
 
         start_value = float(start_val_row) if start_val_row is not None else 0.0
@@ -694,17 +724,15 @@ def build_week_summary() -> str:
             week_delta_abs = current_value
             week_delta_pct = 0.0 # Или None, как удобнее
 
-        # 4. Пополнения за неделю (start_date включительно, end_date включительно)
-        # get_deposits_for_period требует datetime, верхняя граница эксклюзивна
-        t_start = datetime(start_date.year, start_date.month, start_date.day)
-        t_end_date_inc = end_date + timedelta(days=1)
-        t_end = datetime(t_end_date_inc.year, t_end_date_inc.month, t_end_date_inc.day)
-
-        dep_week = get_deposits_for_period(session, t_start, t_end)
+        # 4. Пополнения/доходы/расходы за текущую рабочую неделю
+        dep_week = get_deposits_for_period(session, week_start, week_end_exclusive)
+        coupons, dividends = get_income_for_period(session, week_start, week_end)
+        commissions = get_commissions_for_period(session, week_start, week_end)
+        taxes = get_taxes_for_period(session, week_start, week_end)
 
         # 5. Прогресс по годовому плану
-        year_start = datetime(end_date.year, 1, 1)
-        dep_year = get_deposits_for_period(session, year_start, t_end)
+        year_start = datetime(week_end_date.year, 1, 1)
+        dep_year = get_deposits_for_period(session, year_start, week_end_exclusive)
         
         plan = PLAN_ANNUAL_CONTRIB_RUB
         plan_pct = (dep_year / plan * 100.0) if plan > 0 else 0.0
@@ -716,6 +744,10 @@ def build_week_summary() -> str:
         week_delta_pct=fmt_pct(week_delta_pct) if week_delta_pct is not None else "—",
         dep_week=fmt_rub(dep_week),
         plan_progress_pct=f"{plan_pct:.1f} %",
+        coupons=fmt_decimal_rub(coupons),
+        dividends=fmt_decimal_rub(dividends),
+        commissions=fmt_decimal_rub(commissions),
+        taxes=fmt_decimal_rub(taxes),
     )
 
     return render_week_text(ctx)
@@ -762,6 +794,10 @@ def build_month_summary() -> str:
     else:
         next_month_start = date(year, month + 1, 1)
 
+    month_start_dt = datetime.combine(month_start, time.min)
+    month_end_exclusive = datetime.combine(next_month_start, time.min)
+    month_end_dt = month_end_exclusive - timedelta(microseconds=1)
+
     year_start = date(year, 1, 1)
     next_year_start = date(year + 1, 1, 1)
 
@@ -769,15 +805,19 @@ def build_month_summary() -> str:
         # Пополнения за месяц
         dep_month = get_deposits_for_period(
             session,
-            start_dt=datetime(year, month, 1),
-            end_dt=datetime(next_month_start.year, next_month_start.month, next_month_start.day),
+            start_dt=month_start_dt,
+            end_dt=month_end_exclusive,
         )
+
+        coupons, dividends = get_income_for_period(session, month_start_dt, month_end_dt)
+        commissions = get_commissions_for_period(session, month_start_dt, month_end_dt)
+        taxes = get_taxes_for_period(session, month_start_dt, month_end_dt)
 
         # Пополнения за год
         dep_year = get_deposits_for_period(
             session,
             start_dt=datetime(year, 1, 1),
-            end_dt=datetime(next_year_start.year, next_year_start.month, next_year_start.day),
+            end_dt=month_end_exclusive,
         )
 
         # Снапшоты для изменения стоимости за месяц
@@ -830,6 +870,10 @@ def build_month_summary() -> str:
         delta_month_abs=fmt_rub(delta_abs) if delta_abs is not None else "—",
         delta_month_pct=fmt_pct(delta_pct, precision=2) if delta_pct is not None else "—",
         plan_status_phrase=status_phrase,
+        coupons=fmt_decimal_rub(coupons),
+        dividends=fmt_decimal_rub(dividends),
+        commissions=fmt_decimal_rub(commissions),
+        taxes=fmt_decimal_rub(taxes),
     )
 
     return render_month_text(ctx)
