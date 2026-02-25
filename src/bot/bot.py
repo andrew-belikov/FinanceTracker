@@ -27,10 +27,12 @@ import os
 import logging
 import random
 from contextlib import contextmanager
+from decimal import Decimal
 from datetime import datetime, date, time, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import bindparam, create_engine, text
+from sqlalchemy.exc import ProgrammingError
 from sqlalchemy.orm import sessionmaker
 
 import matplotlib
@@ -123,6 +125,19 @@ engine = create_engine(DB_DSN, future=True)
 SessionLocal = sessionmaker(bind=engine, expire_on_commit=False)
 
 DEPOSIT_OPERATION_TYPES: tuple[str, ...] = ("OPERATION_TYPE_INPUT",)
+COMMISSION_OPERATION_TYPES: tuple[str, ...] = (
+    "OPERATION_TYPE_BROKER_FEE",
+    "OPERATION_TYPE_MARGIN_FEE",
+    "OPERATION_TYPE_SUCCESS_FEE",
+    "OPERATION_TYPE_WITHDRAW_COMMISSION",
+    "OPERATION_TYPE_OTHER_FEE",
+)
+TAX_OPERATION_TYPES: tuple[str, ...] = (
+    "OPERATION_TYPE_TAX",
+    "OPERATION_TYPE_TAX_PROGRESSIVE",
+    "OPERATION_TYPE_TAX_COUPON",
+    "OPERATION_TYPE_TAX_DIVIDEND",
+)
 
 
 @contextmanager
@@ -271,6 +286,95 @@ def get_deposits_for_period(
         },
     ).scalar_one()
     return float(row or 0)
+
+
+def _is_undefined_table_error(exc: Exception, table_name: str) -> bool:
+    if not isinstance(exc, ProgrammingError):
+        return False
+    if getattr(exc.orig, "pgcode", None) == "42P01":
+        return True
+    return f'relation "{table_name}" does not exist' in str(exc).lower()
+
+
+def get_income_for_period(db, start_date, end_date) -> tuple[Decimal, Decimal]:
+    try:
+        row = db.execute(
+            text(
+                """
+                SELECT
+                    COALESCE(SUM(CASE WHEN event_type = 'coupon' THEN net_amount ELSE 0 END), 0) AS coupons,
+                    COALESCE(SUM(CASE WHEN event_type = 'dividend' THEN net_amount ELSE 0 END), 0) AS dividends
+                FROM income_events
+                WHERE event_date >= :start_date
+                  AND event_date <= :end_date
+                """
+            ),
+            {"start_date": start_date, "end_date": end_date},
+        ).mappings().one()
+    except Exception as exc:
+        if _is_undefined_table_error(exc, "income_events"):
+            return Decimal("0"), Decimal("0")
+        raise
+
+    return Decimal(row["coupons"] or 0), Decimal(row["dividends"] or 0)
+
+
+def get_commissions_for_period(db, start_date, end_date) -> Decimal:
+    total = db.execute(
+        text(
+            """
+            SELECT COALESCE(SUM(amount), 0) AS total
+            FROM operations
+            WHERE date >= :start_date
+              AND date <= :end_date
+              AND operation_type IN :operation_types
+            """
+        ).bindparams(bindparam("operation_types", expanding=True)),
+        {
+            "start_date": start_date,
+            "end_date": end_date,
+            "operation_types": COMMISSION_OPERATION_TYPES,
+        },
+    ).scalar_one()
+    return abs(Decimal(total or 0))
+
+
+def get_taxes_for_period(db, start_date, end_date) -> Decimal:
+    income_taxes = Decimal("0")
+    try:
+        income_taxes_row = db.execute(
+            text(
+                """
+                SELECT COALESCE(SUM(tax_amount), 0) AS total
+                FROM income_events
+                WHERE event_date >= :start_date
+                  AND event_date <= :end_date
+                """
+            ),
+            {"start_date": start_date, "end_date": end_date},
+        ).scalar_one()
+        income_taxes = Decimal(income_taxes_row or 0)
+    except Exception as exc:
+        if not _is_undefined_table_error(exc, "income_events"):
+            raise
+
+    operation_taxes = db.execute(
+        text(
+            """
+            SELECT COALESCE(SUM(ABS(amount)), 0) AS total
+            FROM operations
+            WHERE date >= :start_date
+              AND date <= :end_date
+              AND operation_type IN :operation_types
+            """
+        ).bindparams(bindparam("operation_types", expanding=True)),
+        {
+            "start_date": start_date,
+            "end_date": end_date,
+            "operation_types": TAX_OPERATION_TYPES,
+        },
+    ).scalar_one()
+    return income_taxes + Decimal(operation_taxes or 0)
 
 
 def get_month_snapshots(session, year: int, month: int):
