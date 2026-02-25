@@ -113,18 +113,28 @@ docker compose up -d --build --force-recreate --remove-orphans
 docker compose ps
 
 # 3) Проверить логи tracker (ищем operations_sync и отсутствие operations_sync_failed)
+# Иногда сразу после старта логов мало: можно смотреть в follow-режиме 1-2 минуты.
 docker compose logs --tail=200 tracker
+docker compose logs -f tracker
 
 # 4) Проверить, что в operations появляются записи
-docker compose exec -T db sh -lc 'psql -X -P pager=off -tA -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "SELECT COUNT(*) FROM operations;"'
-docker compose exec -T db sh -lc 'psql -X -P pager=off -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "SELECT operation_type, COUNT(*) AS cnt, COALESCE(SUM(amount),0) AS amount_sum FROM operations GROUP BY operation_type ORDER BY cnt DESC;"'
+# Вариант A: краткий числовой вывод
+docker compose exec -T db sh -lc 'psql -X -v ON_ERROR_STOP=1 -P pager=off -tA -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "SELECT COUNT(*) FROM operations;"'
+
+# Вариант B (диагностический): явный префикс, если в консоли "пусто"
+docker compose exec -T db sh -lc 'psql -X -v ON_ERROR_STOP=1 -P pager=off -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "SELECT ''operations_total='' || COUNT(*) FROM operations;"'
+
+docker compose exec -T db sh -lc 'psql -X -v ON_ERROR_STOP=1 -P pager=off -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "SELECT operation_type, COUNT(*) AS cnt, COALESCE(SUM(amount),0) AS amount_sum FROM operations GROUP BY operation_type ORDER BY cnt DESC;"'
 
 # 5) Проверить последние операции
 docker compose exec -T db sh -lc 'psql -X -P pager=off -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "SELECT date, operation_type, amount, currency, description FROM operations ORDER BY date DESC LIMIT 20;"'
 
 # 6) Проверить обратную совместимость представления deposits
-docker compose exec -T db sh -lc 'psql -X -P pager=off -tA -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "SELECT COUNT(*) FROM deposits;"'
-docker compose exec -T db sh -lc 'psql -X -P pager=off -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "SELECT date, amount, currency, description FROM deposits ORDER BY date DESC LIMIT 20;"'
+docker compose exec -T db sh -lc 'psql -X -v ON_ERROR_STOP=1 -P pager=off -tA -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "SELECT COUNT(*) FROM deposits;"'
+# Диагностический вариант с префиксом
+
+docker compose exec -T db sh -lc 'psql -X -v ON_ERROR_STOP=1 -P pager=off -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "SELECT ''deposits_rows='' || COUNT(*) FROM deposits;"'
+docker compose exec -T db sh -lc 'psql -X -v ON_ERROR_STOP=1 -P pager=off -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "SELECT date, amount, currency, description FROM deposits ORDER BY date DESC LIMIT 20;"'
 ```
 
 
@@ -135,6 +145,7 @@ docker compose exec -T db sh -lc 'psql -X -P pager=off -U "$POSTGRES_USER" -d "$
 - команда `SELECT COUNT(*) FROM operations;` возвращает число (желательно `> 0`);
 - команда `SELECT COUNT(*) FROM deposits;` возвращает число (для активного счёта обычно `> 0`);
 - таблицы с последними строками (`ORDER BY date DESC LIMIT 20`) показывают реальные записи.
+- если `COUNT(*)` выглядит пустым, используйте диагностические команды с префиксом `operations_total=` / `deposits_rows=`.
 
 ## Данные и бэкап
 
