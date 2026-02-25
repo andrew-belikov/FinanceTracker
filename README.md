@@ -131,7 +131,8 @@ docker compose config
 Она:
 - создаёт таблицу `operations`;
 - сохраняет старую таблицу как `deposits_legacy`;
-- создаёт view `deposits` для обратной совместимости старых SQL-запросов;
+- создаёт view `deposits` только для legacy/backward compatibility старых SQL-запросов;
+- новый код должен читать пополнения из `operations` (с фильтром по `operation_type`), а не из `deposits`;
 - не копирует данные напрямую из `deposits_legacy`: исторические операции догружаются tracker-сервисом из API.
 
 Применение вручную:
@@ -139,6 +140,25 @@ docker compose config
 ```powershell
 Get-Content .\migrations\20260221_operations_from_deposits.sql | docker compose exec -T db psql -U $env:POSTGRES_USER -d $env:POSTGRES_DB
 ```
+
+### Коротко: миграция на новую схему
+
+```powershell
+# 1) Остановить writer/reader, чтобы зафиксировать состояние на время миграции
+docker compose stop tracker bot
+
+# 2) Применить SQL-миграцию
+Get-Content .\migrations\20260221_operations_from_deposits.sql | docker compose exec -T db psql -U $env:POSTGRES_USER -d $env:POSTGRES_DB
+
+# 3) Поднять сервисы обратно
+docker compose up -d tracker bot
+
+# 4) Проверить результат миграции
+docker compose exec -T db psql -U $env:POSTGRES_USER -d $env:POSTGRES_DB -c "SELECT operation_type, COUNT(*) FROM operations GROUP BY operation_type ORDER BY operation_type;"
+docker compose exec -T db psql -U $env:POSTGRES_USER -d $env:POSTGRES_DB -c "SELECT COUNT(*) AS deposits_rows FROM deposits;"
+```
+
+Ожидаемый результат: данные операций и пополнений читаются из `operations`; view `deposits` остаётся только для обратной совместимости legacy-запросов.
 
 ### Как применить миграцию без потери данных (рекомендуемый порядок)
 
