@@ -852,6 +852,26 @@ def sync_operations_for_account(db, acc_data: dict):
     if last_dt is not None:
         from_iso = dt_to_iso_z(last_dt - timedelta(days=1))
 
+    # После расширения схемы OperationItem может потребоваться дозаполнение
+    # новых колонок у исторических строк. Если видим пустые новые поля,
+    # делаем backfill с даты открытия счёта.
+    needs_backfill = (
+        db.query(Operation.id)
+        .filter(
+            Operation.account_id == acc_id,
+            Operation.state.is_(None),
+        )
+        .first()
+        is not None
+    )
+    if needs_backfill and opened_iso:
+        from_iso = opened_iso
+        logger.info(
+            "operations_backfill_started",
+            f"Detected incomplete OperationItem fields for account {acc_id}; backfill from account open date.",
+            extra={"ctx": {"account_id": acc_id, "from": from_iso}},
+        )
+
     stats = _sync_operations(db, acc_id, from_iso)
 
     income_type_map = {

@@ -62,6 +62,8 @@
   (кроме массива `trades_info.trades`).
 - Tracker использует `GetOperationsByCursor` с `withoutTrades=true`, постранично обходит `nextCursor`
   и делает upsert по `operation_id`.
+- Если после миграции у исторических строк новые поля ещё пустые (`state IS NULL`), tracker
+  автоматически делает backfill от даты открытия счёта, затем возвращается к инкрементальной синхронизации.
 
 ### Миграция на новую схему (кратко)
 
