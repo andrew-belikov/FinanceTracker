@@ -630,6 +630,121 @@ def compute_positions_diff_lines(start_positions, end_positions) -> list[str]:
     return new_lines + closed_lines + up_lines + down_lines
 
 
+def compute_positions_diff_grouped(session, from_dt: datetime, to_dt: datetime) -> tuple[list[str], str | None]:
+    def _qty(value) -> float:
+        if value is None:
+            return 0.0
+        return float(value)
+
+    def _fmt_qty(value: float) -> str:
+        if value.is_integer():
+            return f"{int(value)}"
+        return f"{value:.6f}".rstrip("0").rstrip(".")
+
+    def _display_name(pos: dict) -> str:
+        name = (pos.get("instrument_name") or pos.get("position_name") or "").strip()
+        ticker = (pos.get("instrument_ticker") or pos.get("position_ticker") or "").strip()
+        if name and ticker:
+            return f"{name} ({ticker})"
+        if name:
+            return name
+        if ticker:
+            return ticker
+        return (pos.get("figi") or "UNKNOWN").strip()
+
+    snapshot_bounds = session.execute(
+        text(
+            """
+            SELECT id, snapshot_date, snapshot_at
+            FROM portfolio_snapshots
+            WHERE snapshot_at >= :from_dt
+              AND snapshot_at < :to_dt
+            ORDER BY snapshot_date ASC, snapshot_at ASC
+            """
+        ),
+        {"from_dt": from_dt, "to_dt": to_dt},
+    ).mappings().all()
+
+    if len(snapshot_bounds) < 2:
+        return [], "За выбранный период недостаточно снапшотов для сравнения позиций."
+
+    start_snapshot_id = snapshot_bounds[0]["id"]
+    end_snapshot_id = snapshot_bounds[-1]["id"]
+
+    rows = session.execute(
+        text(
+            """
+            SELECT
+                pp.snapshot_id,
+                pp.figi,
+                pp.quantity,
+                pp.ticker AS position_ticker,
+                pp.name AS position_name,
+                i.ticker AS instrument_ticker,
+                i.name AS instrument_name
+            FROM portfolio_positions pp
+            LEFT JOIN instruments i ON i.figi = pp.figi
+            WHERE pp.snapshot_id IN (:start_snapshot_id, :end_snapshot_id)
+            """
+        ),
+        {"start_snapshot_id": start_snapshot_id, "end_snapshot_id": end_snapshot_id},
+    ).mappings().all()
+
+    start_map: dict[str, dict] = {}
+    end_map: dict[str, dict] = {}
+    for row in rows:
+        figi = str(row.get("figi") or "").strip()
+        if not figi:
+            continue
+        if row["snapshot_id"] == start_snapshot_id:
+            start_map[figi] = row
+        elif row["snapshot_id"] == end_snapshot_id:
+            end_map[figi] = row
+
+    grouped: list[tuple[str, str, str]] = []
+    all_figis = sorted(set(start_map.keys()) | set(end_map.keys()))
+    for figi in all_figis:
+        start_pos = start_map.get(figi)
+        end_pos = end_map.get(figi)
+
+        if start_pos is None and end_pos is not None:
+            end_qty = _qty(end_pos.get("quantity"))
+            name = _display_name(end_pos)
+            grouped.append(("🆕 Новые", name, f"+ {name}: {_fmt_qty(0.0)} → {_fmt_qty(end_qty)} шт"))
+            continue
+
+        if start_pos is not None and end_pos is None:
+            start_qty = _qty(start_pos.get("quantity"))
+            name = _display_name(start_pos)
+            grouped.append(("✅ Закрыли", name, f"- {name}: {_fmt_qty(start_qty)} → {_fmt_qty(0.0)} шт"))
+            continue
+
+        if start_pos is None or end_pos is None:
+            continue
+
+        start_qty = _qty(start_pos.get("quantity"))
+        end_qty = _qty(end_pos.get("quantity"))
+        if end_qty > start_qty:
+            name = _display_name(end_pos)
+            grouped.append(("📈 Докупили", name, f"↑ {name}: {_fmt_qty(start_qty)} → {_fmt_qty(end_qty)} шт"))
+        elif end_qty < start_qty:
+            name = _display_name(end_pos)
+            grouped.append(("📉 Продали часть", name, f"↓ {name}: {_fmt_qty(start_qty)} → {_fmt_qty(end_qty)} шт"))
+
+    categories = ["🆕 Новые", "📈 Докупили", "📉 Продали часть", "✅ Закрыли"]
+    grouped_lines: list[str] = []
+    for category in categories:
+        category_items = sorted([item for item in grouped if item[0] == category], key=lambda item: item[1])
+        if not category_items:
+            continue
+        if grouped_lines:
+            grouped_lines.append("")
+        grouped_lines.append(category)
+        grouped_lines.extend(line for _, _, line in category_items)
+
+    return grouped_lines, None
+
+
 def get_portfolio_timeseries(session):
     rows = (
         session.execute(
@@ -1644,8 +1759,7 @@ def build_year_summary(year: int | None) -> tuple[str, str, str | None]:
         )
 
         start_snap, end_snap = get_period_snapshots(session, period_start, period_end_dt_exclusive.date())
-        start_positions = get_positions_for_snapshot(session, start_snap["id"]) if start_snap else []
-        end_positions = get_positions_for_snapshot(session, end_snap["id"]) if end_snap else []
+        diff_lines, diff_error = compute_positions_diff_grouped(session, period_start_dt, period_end_dt_exclusive)
         realized_by_asset, realized_total = compute_realized_by_asset(
             session,
             period_start_dt,
@@ -1700,9 +1814,10 @@ def build_year_summary(year: int | None) -> tuple[str, str, str | None]:
 
     summary_text = "\n".join(summary_lines)
 
-    diff_lines = compute_positions_diff_lines(start_positions, end_positions) if end_snap else []
-    if diff_lines:
-        diff_text = f"📦 Изменения позиций за {label}\n" + "\n".join(diff_lines)
+    if diff_error:
+        diff_text = f"📦 {diff_error}"
+    elif diff_lines:
+        diff_text = f"📦 Изменения позиций за {label}\n\n" + "\n".join(diff_lines)
     else:
         diff_text = f"📦 За период {label} изменений по позициям не найдено."
 
