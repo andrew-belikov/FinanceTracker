@@ -28,6 +28,7 @@ Telegram-бот для проекта iis_tracker.
 import os
 import logging
 import random
+import tempfile
 from contextlib import contextmanager
 from decimal import Decimal
 from datetime import datetime, date, time, timedelta, timezone
@@ -894,6 +895,74 @@ def get_year_deposits_by_date(
     )
     return rows
 
+
+def get_monthly_portfolio_values(
+    session,
+    from_dt: datetime,
+    to_dt: datetime,
+    is_ytd: bool,
+):
+    rows = (
+        session.execute(
+            text(
+                """
+                SELECT month_start, total_value
+                FROM (
+                    SELECT
+                        date_trunc('month', snapshot_date)::date AS month_start,
+                        total_value,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY date_trunc('month', snapshot_date)
+                            ORDER BY snapshot_date DESC, snapshot_at DESC
+                        ) AS rn
+                    FROM portfolio_snapshots
+                    WHERE snapshot_date >= :from_date
+                      AND snapshot_date < :to_date
+                ) month_snaps
+                WHERE rn = 1
+                ORDER BY month_start ASC
+                """
+            ),
+            {
+                "from_date": from_dt.date(),
+                "to_date": to_dt.date(),
+            },
+        )
+        .mappings()
+        .all()
+    )
+    return rows
+
+
+def get_monthly_deposits(session, from_dt: datetime, to_dt: datetime):
+    rows = (
+        session.execute(
+            text(
+                f"""
+                {OPERATIONS_DEDUP_CTE}
+                SELECT
+                    date_trunc('month', date)::date AS month_start,
+                    SUM(amount) AS amount
+                FROM operations_dedup
+                WHERE date >= :from_dt
+                  AND date < :to_dt
+                  AND state = :executed_state
+                  AND operation_type = 'OPERATION_TYPE_INPUT'
+                GROUP BY month_start
+                ORDER BY month_start ASC
+                """
+            ),
+            {
+                "from_dt": from_dt,
+                "to_dt": to_dt,
+                "executed_state": EXECUTED_OPERATION_STATE,
+            },
+        )
+        .mappings()
+        .all()
+    )
+    return rows
+
 def get_portfolio_timeseries_agg_by_date(session):
     rows = (
         session.execute(
@@ -1505,55 +1574,40 @@ def build_year_chart(path: str, year: int, end_date_exclusive: date) -> str | No
     year_start = date(year, 1, 1)
     period_start_dt = datetime.combine(year_start, time.min)
     period_end_dt_exclusive = datetime.combine(end_date_exclusive, time.min)
+    is_ytd = end_date_exclusive.year == year and end_date_exclusive <= (datetime.now(TZ).date() + timedelta(days=1))
 
     with db_session() as session:
-        ts = get_portfolio_timeseries(session)
-        deps = get_year_deposits_by_date(session, period_start_dt, period_end_dt_exclusive)
+        portfolio_rows = get_monthly_portfolio_values(session, period_start_dt, period_end_dt_exclusive, is_ytd)
+        deposits_rows = get_monthly_deposits(session, period_start_dt, period_end_dt_exclusive)
 
-    ts_sorted = sorted(
-        [row for row in ts if year_start <= row["snapshot_date"] < end_date_exclusive],
-        key=lambda x: x["snapshot_date"],
-    )
-    deps_sorted = sorted(
-        [row for row in deps if year_start <= row["d"] < end_date_exclusive],
-        key=lambda x: x["d"],
-    )
-
-    if len(ts_sorted) < 2:
+    if not portfolio_rows:
         return None
 
-    start_date = ts_sorted[0]["snapshot_date"]
-    end_date = ts_sorted[-1]["snapshot_date"]
+    portfolio_by_month = {
+        row["month_start"]: float(row["total_value"] or 0)
+        for row in portfolio_rows
+    }
+    deposits_by_month = {
+        row["month_start"]: float(row["amount"] or 0)
+        for row in deposits_rows
+    }
 
-    week_dates = []
-    curr = start_date
-    while curr <= end_date:
-        week_dates.append(curr)
-        curr += timedelta(days=7)
-    if week_dates[-1] < end_date:
-        week_dates.append(end_date)
-
-    ts_data = [(row["snapshot_date"], float(row["total_value"])) for row in ts_sorted]
-    deps_data = [(row["d"], float(row["s"])) for row in deps_sorted]
-
-    values = []
-    cum_deps = []
-    for d in week_dates:
-        relevant_snaps = [v for (dt, v) in ts_data if dt <= d]
-        values.append(relevant_snaps[-1] if relevant_snaps else 0.0)
-
-        relevant_deps = [amt for (dt, amt) in deps_data if dt <= d]
-        cum_deps.append(sum(relevant_deps))
+    months = sorted(portfolio_by_month.keys())
+    portfolio_values = [portfolio_by_month[m] for m in months]
+    deposits_values = [deposits_by_month.get(m, 0.0) for m in months]
+    labels = [m.strftime("%Y-%m") for m in months]
 
     fig, ax = plt.subplots(figsize=(10, 4))
-    ax.plot(week_dates, values, label="Стоимость портфеля")
-    ax.plot(week_dates, cum_deps, linestyle="--", label="Пополнения за период")
+    x = list(range(len(months)))
+    ax.bar(x, portfolio_values, width=0.8, label="Стоимость портфеля")
+    ax.bar(x, deposits_values, width=0.45, label="Пополнения")
 
-    ax.set_title(f"{ACCOUNT_FRIENDLY_NAME} — {year}")
+    ax.set_title(f"{year}: стоимость портфеля и пополнения")
     ax.set_ylabel("₽")
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels, rotation=45, ha="right")
     ax.grid(True, alpha=0.3)
     ax.legend()
-    fig.autofmt_xdate()
     fig.tight_layout()
     fig.savefig(path, dpi=150)
     plt.close(fig)
@@ -1901,15 +1955,21 @@ async def cmd_year(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     _, period_end_dt_exclusive, _, _ = get_year_period(year)
     chart_year = year if year is not None else datetime.now(TZ).year
-    chart_path = f"/tmp/year_{chart_year}.png"
+    temp_chart = tempfile.NamedTemporaryFile(prefix=f"year_{chart_year}_", suffix=".png", delete=False)
+    chart_path = temp_chart.name
+    temp_chart.close()
     chart = build_year_chart(
         chart_path,
         year=chart_year,
         end_date_exclusive=period_end_dt_exclusive.date(),
     )
     if chart:
-        with open(chart, "rb") as f:
-            await update.message.reply_photo(photo=InputFile(f))
+        try:
+            with open(chart, "rb") as f:
+                await update.message.reply_photo(photo=InputFile(f))
+        finally:
+            if os.path.exists(chart):
+                os.remove(chart)
     else:
         await update.message.reply_text(f"Недостаточно данных для графика за {label}.")
 
