@@ -140,6 +140,25 @@ TAX_OPERATION_TYPES: tuple[str, ...] = (
     "OPERATION_TYPE_TAX_COUPON",
     "OPERATION_TYPE_TAX_DIVIDEND",
 )
+INCOME_OPERATION_TYPES: tuple[str, ...] = (
+    "OPERATION_TYPE_COUPON",
+    "OPERATION_TYPE_DIVIDEND",
+)
+EXECUTED_OPERATION_STATE = "OPERATION_STATE_EXECUTED"
+
+OPERATIONS_DEDUP_CTE = """
+WITH operations_dedup AS (
+    SELECT DISTINCT ON (COALESCE(operation_id, id::text))
+        id,
+        operation_id,
+        date,
+        amount,
+        operation_type,
+        state
+    FROM operations
+    ORDER BY COALESCE(operation_id, id::text), id DESC
+)
+"""
 
 
 @contextmanager
@@ -620,6 +639,84 @@ def get_deposits_by_date(
         """
             ).bindparams(bindparam("operation_types", expanding=True)),
             {"operation_types": operation_types},
+        )
+        .mappings()
+        .all()
+    )
+    return rows
+
+
+def get_year_financials_from_operations(session, start_dt: datetime, end_dt: datetime) -> dict[str, Decimal]:
+    row = session.execute(
+        text(
+            f"""
+            {OPERATIONS_DEDUP_CTE}
+            SELECT
+                COALESCE(SUM(CASE WHEN operation_type IN :deposit_types THEN amount ELSE 0 END), 0) AS deposits,
+                COALESCE(SUM(CASE WHEN operation_type IN :income_types THEN amount ELSE 0 END), 0) AS income,
+                COALESCE(SUM(CASE WHEN operation_type IN :commission_types THEN ABS(amount) ELSE 0 END), 0) AS commissions,
+                COALESCE(SUM(CASE WHEN operation_type IN :tax_types THEN ABS(amount) ELSE 0 END), 0) AS taxes
+            FROM operations_dedup
+            WHERE date >= :start_dt
+              AND date < :end_dt
+              AND state = :executed_state
+            """
+        ).bindparams(
+            bindparam("deposit_types", expanding=True),
+            bindparam("income_types", expanding=True),
+            bindparam("commission_types", expanding=True),
+            bindparam("tax_types", expanding=True),
+        ),
+        {
+            "start_dt": start_dt,
+            "end_dt": end_dt,
+            "deposit_types": DEPOSIT_OPERATION_TYPES,
+            "income_types": INCOME_OPERATION_TYPES,
+            "commission_types": COMMISSION_OPERATION_TYPES,
+            "tax_types": TAX_OPERATION_TYPES,
+            "executed_state": EXECUTED_OPERATION_STATE,
+        },
+    ).mappings().one()
+
+    income = Decimal(row["income"] or 0)
+    commissions = Decimal(row["commissions"] or 0)
+    taxes = Decimal(row["taxes"] or 0)
+
+    return {
+        "deposits": Decimal(row["deposits"] or 0),
+        "income": income,
+        "commissions": commissions,
+        "taxes": taxes,
+        "realized": income - commissions - taxes,
+    }
+
+
+def get_year_deposits_by_date(
+    session,
+    start_dt: datetime,
+    end_dt: datetime,
+):
+    rows = (
+        session.execute(
+            text(
+                f"""
+                {OPERATIONS_DEDUP_CTE}
+                SELECT date::date AS d, SUM(amount) AS s
+                FROM operations_dedup
+                WHERE date >= :start_dt
+                  AND date < :end_dt
+                  AND operation_type IN :operation_types
+                  AND state = :executed_state
+                GROUP BY date::date
+                ORDER BY d ASC
+                """
+            ).bindparams(bindparam("operation_types", expanding=True)),
+            {
+                "start_dt": start_dt,
+                "end_dt": end_dt,
+                "operation_types": DEPOSIT_OPERATION_TYPES,
+                "executed_state": EXECUTED_OPERATION_STATE,
+            },
         )
         .mappings()
         .all()
@@ -1234,11 +1331,14 @@ def build_history_chart(path: str) -> str | None:
 
 
 def build_year_chart(path: str, year: int, end_date_exclusive: date) -> str | None:
+    year_start = date(year, 1, 1)
+    period_start_dt = datetime.combine(year_start, time.min)
+    period_end_dt_exclusive = datetime.combine(end_date_exclusive, time.min)
+
     with db_session() as session:
         ts = get_portfolio_timeseries(session)
-        deps = get_deposits_by_date(session)
+        deps = get_year_deposits_by_date(session, period_start_dt, period_end_dt_exclusive)
 
-    year_start = date(year, 1, 1)
     ts_sorted = sorted(
         [row for row in ts if year_start <= row["snapshot_date"] < end_date_exclusive],
         key=lambda x: x["snapshot_date"],
@@ -1299,17 +1399,23 @@ def build_year_summary(year: int, ytd: bool) -> tuple[str, str, str | None]:
 
     period_start_dt = datetime.combine(year_start, time.min)
     period_end_dt_exclusive = datetime.combine(period_end_exclusive, time.min)
-    period_end_dt = period_end_dt_exclusive - timedelta(microseconds=1)
 
     with db_session() as session:
-        dep_year = get_deposits_for_period(session, period_start_dt, period_end_dt_exclusive)
-        coupons, dividends = get_income_for_period(session, period_start_dt, period_end_dt)
-        commissions = get_commissions_for_period(session, period_start_dt, period_end_dt)
-        taxes = get_taxes_for_period(session, period_start_dt, period_end_dt)
+        year_financials = get_year_financials_from_operations(
+            session,
+            period_start_dt,
+            period_end_dt_exclusive,
+        )
 
         start_snap, end_snap = get_period_snapshots(session, year_start, period_end_exclusive)
         start_positions = get_positions_for_snapshot(session, start_snap["id"]) if start_snap else []
         end_positions = get_positions_for_snapshot(session, end_snap["id"]) if end_snap else []
+
+    dep_year = float(year_financials["deposits"])
+    income_total = year_financials["income"]
+    commissions = year_financials["commissions"]
+    taxes = year_financials["taxes"]
+    realized = year_financials["realized"]
 
     current_value = float(end_snap["total_value"]) if end_snap else 0.0
     delta_abs = None
@@ -1332,10 +1438,10 @@ def build_year_summary(year: int, ytd: bool) -> tuple[str, str, str | None]:
         f" ({fmt_pct(delta_pct, precision=2) if delta_pct is not None else '—'})\n"
         f"Пополнения: *{fmt_rub(dep_year)}*\n"
         f"Прогресс годового плана: {plan_pct:.1f} % ({fmt_rub(dep_year)} / {fmt_rub(plan)})\n\n"
-        f"Купоны: {fmt_decimal_rub(coupons)}\n"
-        f"Дивиденды: {fmt_decimal_rub(dividends)}\n"
+        f"Доходы (купоны + дивиденды): {fmt_decimal_rub(income_total)}\n"
         f"Комиссии: {fmt_decimal_rub(commissions)}\n"
-        f"Налоги: {fmt_decimal_rub(taxes)}"
+        f"Налоги: {fmt_decimal_rub(taxes)}\n"
+        f"Реализовано (net): {fmt_decimal_rub(realized)}"
     )
 
     diff_lines = compute_positions_diff_lines(start_positions, end_positions) if end_snap else []
