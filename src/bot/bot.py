@@ -6,6 +6,7 @@ Telegram-бот для проекта iis_tracker.
     /today      — сводка по портфелю "Семейный капитал" на сегодня
     /week       — сводка по текущей неделе
     /month      — отчёт по текущему месяцу
+    /year       — отчёт за год (YTD или календарный)
     /structure  — текущая структура портфеля
     /history    — график стоимости портфеля и суммы пополнений
     /twr        — TWR (time-weighted return) и график по дням
@@ -423,6 +424,50 @@ def get_month_snapshots(session, year: int, month: int):
         """
             ),
             {"start": month_start, "end": next_month_start},
+        )
+        .mappings()
+        .first()
+    )
+
+    return start_row, end_row
+
+
+def get_period_snapshots(session, start_date: date, end_date_exclusive: date):
+    """
+    Возвращает пару снапшотов для периода:
+    - start_row: последний снапшот строго до start_date
+    - end_row:   последний снапшот внутри [start_date, end_date_exclusive)
+    """
+    start_row = (
+        session.execute(
+            text(
+                """
+        SELECT id, snapshot_date, snapshot_at, total_value
+        FROM portfolio_snapshots
+        WHERE snapshot_date < :start
+        ORDER BY snapshot_date DESC, snapshot_at DESC
+        LIMIT 1
+        """
+            ),
+            {"start": start_date},
+        )
+        .mappings()
+        .first()
+    )
+
+    end_row = (
+        session.execute(
+            text(
+                """
+        SELECT id, snapshot_date, snapshot_at, total_value
+        FROM portfolio_snapshots
+        WHERE snapshot_date >= :start
+          AND snapshot_date < :end
+        ORDER BY snapshot_date DESC, snapshot_at DESC
+        LIMIT 1
+        """
+            ),
+            {"start": start_date, "end": end_date_exclusive},
         )
         .mappings()
         .first()
@@ -1188,6 +1233,120 @@ def build_history_chart(path: str) -> str | None:
     return path
 
 
+def build_year_chart(path: str, year: int, end_date_exclusive: date) -> str | None:
+    with db_session() as session:
+        ts = get_portfolio_timeseries(session)
+        deps = get_deposits_by_date(session)
+
+    year_start = date(year, 1, 1)
+    ts_sorted = sorted(
+        [row for row in ts if year_start <= row["snapshot_date"] < end_date_exclusive],
+        key=lambda x: x["snapshot_date"],
+    )
+    deps_sorted = sorted(
+        [row for row in deps if year_start <= row["d"] < end_date_exclusive],
+        key=lambda x: x["d"],
+    )
+
+    if len(ts_sorted) < 2:
+        return None
+
+    start_date = ts_sorted[0]["snapshot_date"]
+    end_date = ts_sorted[-1]["snapshot_date"]
+
+    week_dates = []
+    curr = start_date
+    while curr <= end_date:
+        week_dates.append(curr)
+        curr += timedelta(days=7)
+    if week_dates[-1] < end_date:
+        week_dates.append(end_date)
+
+    ts_data = [(row["snapshot_date"], float(row["total_value"])) for row in ts_sorted]
+    deps_data = [(row["d"], float(row["s"])) for row in deps_sorted]
+
+    values = []
+    cum_deps = []
+    for d in week_dates:
+        relevant_snaps = [v for (dt, v) in ts_data if dt <= d]
+        values.append(relevant_snaps[-1] if relevant_snaps else 0.0)
+
+        relevant_deps = [amt for (dt, amt) in deps_data if dt <= d]
+        cum_deps.append(sum(relevant_deps))
+
+    fig, ax = plt.subplots(figsize=(10, 4))
+    ax.plot(week_dates, values, label="Стоимость портфеля")
+    ax.plot(week_dates, cum_deps, linestyle="--", label="Пополнения за период")
+
+    ax.set_title(f"{ACCOUNT_FRIENDLY_NAME} — {year}")
+    ax.set_ylabel("₽")
+    ax.grid(True, alpha=0.3)
+    ax.legend()
+    fig.autofmt_xdate()
+    fig.tight_layout()
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+
+    return path
+
+
+def build_year_summary(year: int, ytd: bool) -> tuple[str, str, str | None]:
+    today = datetime.now(TZ).date()
+    year_start = date(year, 1, 1)
+    period_end_exclusive = date(year + 1, 1, 1)
+    if ytd:
+        period_end_exclusive = today + timedelta(days=1)
+
+    period_start_dt = datetime.combine(year_start, time.min)
+    period_end_dt_exclusive = datetime.combine(period_end_exclusive, time.min)
+    period_end_dt = period_end_dt_exclusive - timedelta(microseconds=1)
+
+    with db_session() as session:
+        dep_year = get_deposits_for_period(session, period_start_dt, period_end_dt_exclusive)
+        coupons, dividends = get_income_for_period(session, period_start_dt, period_end_dt)
+        commissions = get_commissions_for_period(session, period_start_dt, period_end_dt)
+        taxes = get_taxes_for_period(session, period_start_dt, period_end_dt)
+
+        start_snap, end_snap = get_period_snapshots(session, year_start, period_end_exclusive)
+        start_positions = get_positions_for_snapshot(session, start_snap["id"]) if start_snap else []
+        end_positions = get_positions_for_snapshot(session, end_snap["id"]) if end_snap else []
+
+    current_value = float(end_snap["total_value"]) if end_snap else 0.0
+    delta_abs = None
+    delta_pct = None
+    if start_snap and end_snap:
+        start_val = float(start_snap["total_value"])
+        end_val = float(end_snap["total_value"])
+        delta_abs = end_val - start_val
+        if start_val != 0:
+            delta_pct = delta_abs / start_val * 100.0
+
+    plan = PLAN_ANNUAL_CONTRIB_RUB
+    plan_pct = dep_year / plan * 100.0 if plan > 0 else 0.0
+    label = f"{year} YTD" if ytd else str(year)
+
+    summary_text = (
+        f"📅 *Отчёт за {label}*\n\n"
+        f"Стоимость портфеля: *{fmt_rub(current_value)}*\n"
+        f"Изменение стоимости: {fmt_rub(delta_abs) if delta_abs is not None else '—'}"
+        f" ({fmt_pct(delta_pct, precision=2) if delta_pct is not None else '—'})\n"
+        f"Пополнения: *{fmt_rub(dep_year)}*\n"
+        f"Прогресс годового плана: {plan_pct:.1f} % ({fmt_rub(dep_year)} / {fmt_rub(plan)})\n\n"
+        f"Купоны: {fmt_decimal_rub(coupons)}\n"
+        f"Дивиденды: {fmt_decimal_rub(dividends)}\n"
+        f"Комиссии: {fmt_decimal_rub(commissions)}\n"
+        f"Налоги: {fmt_decimal_rub(taxes)}"
+    )
+
+    diff_lines = compute_positions_diff_lines(start_positions, end_positions) if end_snap else []
+    if diff_lines:
+        diff_text = f"📦 Изменения позиций за {label}\n" + "\n".join(diff_lines)
+    else:
+        diff_text = f"📦 За период {label} изменений по позициям не найдено."
+
+    return summary_text, diff_text, label
+
+
 def compute_twr_timeseries(session):
     ts = get_portfolio_timeseries_agg_by_date(session)
     if len(ts) < 2:
@@ -1375,6 +1534,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/today — сводка по портфелю на сегодня\n"
         "/week — сводка по текущей неделе\n"
         "/month — отчёт по текущему месяцу\n"
+        "/year [YYYY] — отчёт за год (без аргумента: текущий год YTD)\n"
         "/structure — текущая структура портфеля по позициям\n"
         "/history — график стоимости портфеля и суммы пополнений\n"
         "/twr — TWR (time-weighted return) и график по дням\n"
@@ -1406,6 +1566,44 @@ async def cmd_month(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     text = build_month_summary()
     await safe_send_message(context.bot, update.effective_chat.id, text, parse_mode="Markdown")
+
+
+async def cmd_year(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_authorized(update):
+        return
+
+    args = context.args or []
+    if len(args) > 1:
+        await update.message.reply_text("Формат: /year или /year YYYY")
+        return
+
+    today = datetime.now(TZ).date()
+    ytd = True
+    year = today.year
+
+    if len(args) == 1:
+        try:
+            year = int(args[0])
+            if year < 1900 or year > 2100:
+                raise ValueError
+            ytd = False
+        except ValueError:
+            await update.message.reply_text("Формат: /year или /year YYYY")
+            return
+
+    summary_text, diff_text, label = build_year_summary(year, ytd=ytd)
+    await safe_send_message(context.bot, update.effective_chat.id, summary_text, parse_mode="Markdown")
+
+    chart_path = f"/tmp/year_{year}.png"
+    period_end_exclusive = (today + timedelta(days=1)) if ytd else date(year + 1, 1, 1)
+    chart = build_year_chart(chart_path, year=year, end_date_exclusive=period_end_exclusive)
+    if chart:
+        with open(chart, "rb") as f:
+            await update.message.reply_photo(photo=InputFile(f))
+    else:
+        await update.message.reply_text(f"Недостаточно данных для графика за {label}.")
+
+    await safe_send_message(context.bot, update.effective_chat.id, diff_text, parse_mode="Markdown")
 
 
 async def cmd_structure(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1675,6 +1873,7 @@ def main():
     app.add_handler(CommandHandler("today", cmd_today))
     app.add_handler(CommandHandler("week", cmd_week))
     app.add_handler(CommandHandler("month", cmd_month))
+    app.add_handler(CommandHandler("year", cmd_year))
     app.add_handler(CommandHandler("structure", cmd_structure))
     app.add_handler(CommandHandler("history", cmd_history))
     app.add_handler(CommandHandler("twr", cmd_twr))
