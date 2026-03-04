@@ -641,16 +641,21 @@ def compute_positions_diff_grouped(session, from_dt: datetime, to_dt: datetime) 
             return f"{int(value)}"
         return f"{value:.6f}".rstrip("0").rstrip(".")
 
-    def _display_name(pos: dict) -> str:
+    def _display_name(pos: dict, with_figi_suffix: bool) -> str:
         name = (pos.get("instrument_name") or pos.get("position_name") or "").strip()
         ticker = (pos.get("instrument_ticker") or pos.get("position_ticker") or "").strip()
+        figi = (pos.get("figi") or "UNKNOWN").strip()
+
+        if with_figi_suffix and ticker:
+            ticker = f"{ticker}…{figi[-6:]}"
+
         if name and ticker:
             return f"{name} ({ticker})"
         if name:
             return name
         if ticker:
             return ticker
-        return (pos.get("figi") or "UNKNOWN").strip()
+        return figi
 
     snapshot_bounds = session.execute(
         text(
@@ -680,8 +685,10 @@ def compute_positions_diff_grouped(session, from_dt: datetime, to_dt: datetime) 
                 pp.quantity,
                 pp.ticker AS position_ticker,
                 pp.name AS position_name,
+                pp.instrument_type AS position_instrument_type,
                 i.ticker AS instrument_ticker,
-                i.name AS instrument_name
+                i.name AS instrument_name,
+                i.instrument_type AS instrument_type
             FROM portfolio_positions pp
             LEFT JOIN instruments i ON i.figi = pp.figi
             WHERE pp.snapshot_id IN (:start_snapshot_id, :end_snapshot_id)
@@ -701,21 +708,42 @@ def compute_positions_diff_grouped(session, from_dt: datetime, to_dt: datetime) 
         elif row["snapshot_id"] == end_snapshot_id:
             end_map[figi] = row
 
+    ticker_to_figis: dict[str, set[str]] = {}
+    for pos in [*start_map.values(), *end_map.values()]:
+        ticker = (pos.get("instrument_ticker") or pos.get("position_ticker") or "").strip()
+        figi = (pos.get("figi") or "").strip()
+        if ticker and figi:
+            ticker_to_figis.setdefault(ticker, set()).add(figi)
+    duplicate_tickers = {ticker for ticker, figis in ticker_to_figis.items() if len(figis) > 1}
+
     grouped: list[tuple[str, str, str]] = []
+    has_currency_changes = False
     all_figis = sorted(set(start_map.keys()) | set(end_map.keys()))
     for figi in all_figis:
         start_pos = start_map.get(figi)
         end_pos = end_map.get(figi)
 
+        ref_pos = end_pos or start_pos
+        instrument_type = (
+            (ref_pos.get("instrument_type") or ref_pos.get("position_instrument_type") or "")
+            if ref_pos
+            else ""
+        )
+        if figi == "RUB000UTSTOM" or str(instrument_type).lower() == "currency":
+            has_currency_changes = True
+            continue
+
         if start_pos is None and end_pos is not None:
             end_qty = _qty(end_pos.get("quantity"))
-            name = _display_name(end_pos)
+            ticker = (end_pos.get("instrument_ticker") or end_pos.get("position_ticker") or "").strip()
+            name = _display_name(end_pos, with_figi_suffix=ticker in duplicate_tickers)
             grouped.append(("🆕 Новые", name, f"+ {name}: {_fmt_qty(0.0)} → {_fmt_qty(end_qty)} шт"))
             continue
 
         if start_pos is not None and end_pos is None:
             start_qty = _qty(start_pos.get("quantity"))
-            name = _display_name(start_pos)
+            ticker = (start_pos.get("instrument_ticker") or start_pos.get("position_ticker") or "").strip()
+            name = _display_name(start_pos, with_figi_suffix=ticker in duplicate_tickers)
             grouped.append(("✅ Закрыли", name, f"- {name}: {_fmt_qty(start_qty)} → {_fmt_qty(0.0)} шт"))
             continue
 
@@ -724,11 +752,12 @@ def compute_positions_diff_grouped(session, from_dt: datetime, to_dt: datetime) 
 
         start_qty = _qty(start_pos.get("quantity"))
         end_qty = _qty(end_pos.get("quantity"))
+        ticker = (end_pos.get("instrument_ticker") or end_pos.get("position_ticker") or "").strip()
+        name = _display_name(end_pos, with_figi_suffix=ticker in duplicate_tickers)
+
         if end_qty > start_qty:
-            name = _display_name(end_pos)
             grouped.append(("📈 Докупили", name, f"↑ {name}: {_fmt_qty(start_qty)} → {_fmt_qty(end_qty)} шт"))
         elif end_qty < start_qty:
-            name = _display_name(end_pos)
             grouped.append(("📉 Продали часть", name, f"↓ {name}: {_fmt_qty(start_qty)} → {_fmt_qty(end_qty)} шт"))
 
     categories = ["🆕 Новые", "📈 Докупили", "📉 Продали часть", "✅ Закрыли"]
@@ -741,6 +770,11 @@ def compute_positions_diff_grouped(session, from_dt: datetime, to_dt: datetime) 
             grouped_lines.append("")
         grouped_lines.append(category)
         grouped_lines.extend(line for _, _, line in category_items)
+
+    if has_currency_changes:
+        if grouped_lines:
+            grouped_lines.append("")
+        grouped_lines.append("(валюту не показываем в движениях по qty)")
 
     return grouped_lines, None
 
@@ -792,9 +826,14 @@ def get_year_financials_from_operations(session, start_dt: datetime, end_dt: dat
             {OPERATIONS_DEDUP_CTE}
             SELECT
                 COALESCE(SUM(CASE WHEN operation_type IN :deposit_types THEN amount ELSE 0 END), 0) AS deposits,
-                COALESCE(SUM(CASE WHEN operation_type IN :income_types THEN amount ELSE 0 END), 0) AS income,
-                COALESCE(SUM(CASE WHEN operation_type IN :commission_types THEN ABS(amount) ELSE 0 END), 0) AS commissions,
-                COALESCE(SUM(CASE WHEN operation_type IN :tax_types THEN ABS(amount) ELSE 0 END), 0) AS taxes
+                COALESCE(SUM(CASE
+                    WHEN operation_type IN ('OPERATION_TYPE_DIVIDEND', 'OPERATION_TYPE_DIVIDEND_TAX') THEN amount
+                    ELSE 0
+                END), 0) AS dividend_net,
+                COALESCE(SUM(CASE
+                    WHEN operation_type IN ('OPERATION_TYPE_COUPON', 'OPERATION_TYPE_COUPON_TAX') THEN amount
+                    ELSE 0
+                END), 0) AS coupon_net
             FROM operations_dedup
             WHERE date >= :start_dt
               AND date < :end_dt
@@ -802,31 +841,24 @@ def get_year_financials_from_operations(session, start_dt: datetime, end_dt: dat
             """
         ).bindparams(
             bindparam("deposit_types", expanding=True),
-            bindparam("income_types", expanding=True),
-            bindparam("commission_types", expanding=True),
-            bindparam("tax_types", expanding=True),
         ),
         {
             "start_dt": start_dt,
             "end_dt": end_dt,
             "deposit_types": DEPOSIT_OPERATION_TYPES,
-            "income_types": INCOME_OPERATION_TYPES,
-            "commission_types": COMMISSION_OPERATION_TYPES,
-            "tax_types": TAX_OPERATION_TYPES,
             "executed_state": EXECUTED_OPERATION_STATE,
         },
     ).mappings().one()
 
-    income = Decimal(row["income"] or 0)
-    commissions = Decimal(row["commissions"] or 0)
-    taxes = Decimal(row["taxes"] or 0)
+    dividend_net = Decimal(row["dividend_net"] or 0)
+    coupon_net = Decimal(row["coupon_net"] or 0)
+    income_net = dividend_net + coupon_net
 
     return {
         "deposits": Decimal(row["deposits"] or 0),
-        "income": income,
-        "commissions": commissions,
-        "taxes": taxes,
-        "realized": income - commissions - taxes,
+        "income_net": income_net,
+        "dividend_net": dividend_net,
+        "coupon_net": coupon_net,
     }
 
 
@@ -1733,14 +1765,13 @@ def build_year_chart(path: str, year: int, end_date_exclusive: date) -> str | No
 def _format_asset_lines(rows: list[dict], total: Decimal, title: str, top_n: int = YEAR_REPORT_TOP_N) -> list[str]:
     lines = [title]
     if not rows:
-        lines.append("- нет данных")
-        lines.append(f"- Итого: {fmt_decimal_rub(total)}")
+        lines[0] = f"{title}: нет данных"
         return lines
 
-    for idx, row in enumerate(rows[:top_n], start=1):
+    for row in rows[:top_n]:
         ticker = row.get("ticker") or "—"
         name = row.get("name") or row.get("figi") or "—"
-        lines.append(f"{idx}. {name} [{ticker}] — {fmt_decimal_rub(row.get('amount'))}")
+        lines.append(f"• {name} ({ticker})  {fmt_decimal_rub(row.get('amount'))}")
 
     lines.append(f"Итого: {fmt_decimal_rub(total)}")
     return lines
@@ -1773,10 +1804,7 @@ def build_year_summary(year: int | None) -> tuple[str, str, str | None]:
         unrealized = get_unrealized_at_period_end(session, period_end_dt_exclusive)
 
     dep_year = float(year_financials["deposits"])
-    income_total = year_financials["income"]
-    commissions = year_financials["commissions"]
-    taxes = year_financials["taxes"]
-    realized = year_financials["realized"]
+    income_total_net = year_financials["income_net"]
 
     current_value = float(end_snap["total_value"]) if end_snap else 0.0
     delta_abs = None
@@ -1791,26 +1819,26 @@ def build_year_summary(year: int | None) -> tuple[str, str, str | None]:
     plan = PLAN_ANNUAL_CONTRIB_RUB
     plan_pct = dep_year / plan * 100.0 if plan > 0 else 0.0
 
+    if start_snap and end_snap:
+        delta_line = f"Изменение стоимости: {fmt_rub(delta_abs)} ({fmt_pct(delta_pct, precision=2) if delta_pct is not None else '—'})"
+    else:
+        delta_line = "Изменение стоимости: нет данных (нет снапшота в начале периода)"
+
     summary_lines = [
         f"📅 *Команда /year {period_start.year}*",
         f"Период: {period_start.strftime('%d.%m.%Y')} — {period_end_inclusive.strftime('%d.%m.%Y')} ({label})",
         "",
         f"Стоимость портфеля на конец периода: *{fmt_rub(current_value)}*",
-        f"Изменение стоимости: {fmt_rub(delta_abs) if delta_abs is not None else '—'} ({fmt_pct(delta_pct, precision=2) if delta_pct is not None else '—'})",
+        delta_line,
         f"Пополнения: *{fmt_rub(dep_year)}*",
         f"Прогресс годового плана: {plan_pct:.1f} % ({fmt_rub(dep_year)} / {fmt_rub(plan)})",
         "",
-        f"Доходы (купоны + дивиденды): {fmt_decimal_rub(income_total)}",
-        f"Комиссии: {fmt_decimal_rub(commissions)}",
-        f"Налоги: {fmt_decimal_rub(taxes)}",
-        f"Реализовано (net): {fmt_decimal_rub(realized)}",
-        f"Реализовано по продажам (yield + commission): {fmt_decimal_rub(realized_total)}",
         f"Нереализовано на конец периода: {fmt_decimal_rub(unrealized)}",
         "",
     ]
-    summary_lines.extend(_format_asset_lines(realized_by_asset, realized_total, f"Топ-{YEAR_REPORT_TOP_N} реализованных по активам:"))
+    summary_lines.extend(_format_asset_lines(realized_by_asset, realized_total, "💰 Реализовано (продажи, net; комиссия учтена)"))
     summary_lines.append("")
-    summary_lines.extend(_format_asset_lines(income_by_asset_net, income_total_net, f"Топ-{YEAR_REPORT_TOP_N} доходов по активам (net):"))
+    summary_lines.extend(_format_asset_lines(income_by_asset_net, income_total_net, "🧾 Дивиденды/купоны (net; налог учтён)"))
 
     summary_text = "\n".join(summary_lines)
 
