@@ -154,11 +154,17 @@ WITH operations_dedup AS (
         date,
         amount,
         operation_type,
-        state
+        state,
+        figi,
+        name,
+        commission,
+        yield
     FROM operations
     ORDER BY COALESCE(operation_id, id::text), id DESC
 )
 """
+
+YEAR_REPORT_TOP_N = 5
 
 
 @contextmanager
@@ -228,6 +234,23 @@ def last_day_of_month(d: date) -> date:
         return date(d.year, 12, 31)
     first_next = date(d.year, d.month + 1, 1)
     return first_next - timedelta(days=1)
+
+
+def get_year_period(year: int | None) -> tuple[datetime, datetime, str, bool]:
+    today = datetime.now(TZ).date()
+    is_ytd = year is None
+    period_year = today.year if is_ytd else int(year)
+
+    from_dt = datetime(period_year, 1, 1)
+    if is_ytd:
+        to_date_inclusive = today
+        label = f"{period_year} YTD"
+    else:
+        to_date_inclusive = date(period_year, 12, 31)
+        label = str(period_year)
+
+    to_dt = datetime.combine(to_date_inclusive + timedelta(days=1), time.min)
+    return from_dt, to_dt, label, is_ytd
 
 
 # ============ DB QUERIES (CORE) ===========
@@ -689,6 +712,154 @@ def get_year_financials_from_operations(session, start_dt: datetime, end_dt: dat
         "taxes": taxes,
         "realized": income - commissions - taxes,
     }
+
+
+def compute_realized_by_asset(session, start_dt: datetime, end_dt: datetime) -> tuple[list[dict], Decimal]:
+    rows = (
+        session.execute(
+            text(
+                f"""
+                {OPERATIONS_DEDUP_CTE}
+                SELECT
+                    od.figi,
+                    COALESCE(NULLIF(MAX(NULLIF(od.name, '')), ''), NULLIF(MAX(NULLIF(i.name, '')), ''), od.figi) AS name,
+                    COALESCE(NULLIF(MAX(NULLIF(i.ticker, '')), ''), '') AS ticker,
+                    COALESCE(SUM(COALESCE(od.yield, 0) + COALESCE(od.commission, 0)), 0) AS amount
+                FROM operations_dedup od
+                LEFT JOIN instruments i ON i.figi = od.figi
+                WHERE od.date >= :start_dt
+                  AND od.date < :end_dt
+                  AND od.state = :executed_state
+                  AND od.operation_type = 'OPERATION_TYPE_SELL'
+                  AND od.figi IS NOT NULL
+                GROUP BY od.figi
+                ORDER BY amount DESC
+                """
+            ),
+            {
+                "start_dt": start_dt,
+                "end_dt": end_dt,
+                "executed_state": EXECUTED_OPERATION_STATE,
+            },
+        )
+        .mappings()
+        .all()
+    )
+
+    parsed = []
+    total = Decimal('0')
+    for row in rows:
+        amount = Decimal(row['amount'] or 0)
+        total += amount
+        parsed.append(
+            {
+                'figi': row['figi'],
+                'name': row['name'] or row['figi'],
+                'ticker': row['ticker'] or '',
+                'amount': amount,
+            }
+        )
+    return parsed, total
+
+
+def compute_income_by_asset_net(session, start_dt: datetime, end_dt: datetime) -> tuple[list[dict], Decimal]:
+    rows = (
+        session.execute(
+            text(
+                f"""
+                {OPERATIONS_DEDUP_CTE}
+                SELECT
+                    od.figi,
+                    COALESCE(NULLIF(MAX(NULLIF(od.name, '')), ''), NULLIF(MAX(NULLIF(i.name, '')), ''), od.figi) AS name,
+                    COALESCE(NULLIF(MAX(NULLIF(i.ticker, '')), ''), '') AS ticker,
+                    COALESCE(SUM(
+                        CASE
+                            WHEN od.operation_type IN ('OPERATION_TYPE_DIVIDEND', 'OPERATION_TYPE_COUPON') THEN od.amount
+                            WHEN od.operation_type IN ('OPERATION_TYPE_DIVIDEND_TAX', 'OPERATION_TYPE_COUPON_TAX') THEN od.amount
+                            ELSE 0
+                        END
+                    ), 0) AS net_amount
+                FROM operations_dedup od
+                LEFT JOIN instruments i ON i.figi = od.figi
+                WHERE od.date >= :start_dt
+                  AND od.date < :end_dt
+                  AND od.state = :executed_state
+                  AND od.operation_type IN (
+                      'OPERATION_TYPE_DIVIDEND',
+                      'OPERATION_TYPE_DIVIDEND_TAX',
+                      'OPERATION_TYPE_COUPON',
+                      'OPERATION_TYPE_COUPON_TAX'
+                  )
+                  AND od.figi IS NOT NULL
+                GROUP BY od.figi
+                ORDER BY net_amount DESC
+                """
+            ),
+            {
+                'start_dt': start_dt,
+                'end_dt': end_dt,
+                'executed_state': EXECUTED_OPERATION_STATE,
+            },
+        )
+        .mappings()
+        .all()
+    )
+
+    parsed = []
+    total = Decimal('0')
+    for row in rows:
+        amount = Decimal(row['net_amount'] or 0)
+        total += amount
+        parsed.append(
+            {
+                'figi': row['figi'],
+                'name': row['name'] or row['figi'],
+                'ticker': row['ticker'] or '',
+                'amount': amount,
+            }
+        )
+    return parsed, total
+
+
+def get_unrealized_at_period_end(session, to_dt: datetime) -> Decimal:
+    to_date = to_dt.date() - timedelta(days=1)
+    snap = (
+        session.execute(
+            text(
+                """
+                SELECT id, expected_yield
+                FROM portfolio_snapshots
+                WHERE snapshot_date <= :to_date
+                ORDER BY snapshot_date DESC, snapshot_at DESC
+                LIMIT 1
+                """
+            ),
+            {'to_date': to_date},
+        )
+        .mappings()
+        .first()
+    )
+    if not snap:
+        return Decimal('0')
+
+    positions_sum = session.execute(
+        text(
+            """
+            SELECT SUM(expected_yield)
+            FROM portfolio_positions
+            WHERE snapshot_id = :sid
+            """
+        ),
+        {'sid': snap['id']},
+    ).scalar_one()
+
+    if positions_sum is not None:
+        return Decimal(positions_sum)
+
+    snapshot_yield = snap.get('expected_yield')
+    if snapshot_yield is None:
+        return Decimal('0')
+    return Decimal(snapshot_yield)
 
 
 def get_year_deposits_by_date(
@@ -1390,15 +1561,26 @@ def build_year_chart(path: str, year: int, end_date_exclusive: date) -> str | No
     return path
 
 
-def build_year_summary(year: int, ytd: bool) -> tuple[str, str, str | None]:
-    today = datetime.now(TZ).date()
-    year_start = date(year, 1, 1)
-    period_end_exclusive = date(year + 1, 1, 1)
-    if ytd:
-        period_end_exclusive = today + timedelta(days=1)
+def _format_asset_lines(rows: list[dict], total: Decimal, title: str, top_n: int = YEAR_REPORT_TOP_N) -> list[str]:
+    lines = [title]
+    if not rows:
+        lines.append("- нет данных")
+        lines.append(f"- Итого: {fmt_decimal_rub(total)}")
+        return lines
 
-    period_start_dt = datetime.combine(year_start, time.min)
-    period_end_dt_exclusive = datetime.combine(period_end_exclusive, time.min)
+    for idx, row in enumerate(rows[:top_n], start=1):
+        ticker = row.get("ticker") or "—"
+        name = row.get("name") or row.get("figi") or "—"
+        lines.append(f"{idx}. {name} [{ticker}] — {fmt_decimal_rub(row.get('amount'))}")
+
+    lines.append(f"Итого: {fmt_decimal_rub(total)}")
+    return lines
+
+
+def build_year_summary(year: int | None) -> tuple[str, str, str | None]:
+    period_start_dt, period_end_dt_exclusive, label, _ = get_year_period(year)
+    period_start = period_start_dt.date()
+    period_end_inclusive = period_end_dt_exclusive.date() - timedelta(days=1)
 
     with db_session() as session:
         year_financials = get_year_financials_from_operations(
@@ -1407,9 +1589,20 @@ def build_year_summary(year: int, ytd: bool) -> tuple[str, str, str | None]:
             period_end_dt_exclusive,
         )
 
-        start_snap, end_snap = get_period_snapshots(session, year_start, period_end_exclusive)
+        start_snap, end_snap = get_period_snapshots(session, period_start, period_end_dt_exclusive.date())
         start_positions = get_positions_for_snapshot(session, start_snap["id"]) if start_snap else []
         end_positions = get_positions_for_snapshot(session, end_snap["id"]) if end_snap else []
+        realized_by_asset, realized_total = compute_realized_by_asset(
+            session,
+            period_start_dt,
+            period_end_dt_exclusive,
+        )
+        income_by_asset_net, income_total_net = compute_income_by_asset_net(
+            session,
+            period_start_dt,
+            period_end_dt_exclusive,
+        )
+        unrealized = get_unrealized_at_period_end(session, period_end_dt_exclusive)
 
     dep_year = float(year_financials["deposits"])
     income_total = year_financials["income"]
@@ -1429,20 +1622,29 @@ def build_year_summary(year: int, ytd: bool) -> tuple[str, str, str | None]:
 
     plan = PLAN_ANNUAL_CONTRIB_RUB
     plan_pct = dep_year / plan * 100.0 if plan > 0 else 0.0
-    label = f"{year} YTD" if ytd else str(year)
 
-    summary_text = (
-        f"📅 *Отчёт за {label}*\n\n"
-        f"Стоимость портфеля: *{fmt_rub(current_value)}*\n"
-        f"Изменение стоимости: {fmt_rub(delta_abs) if delta_abs is not None else '—'}"
-        f" ({fmt_pct(delta_pct, precision=2) if delta_pct is not None else '—'})\n"
-        f"Пополнения: *{fmt_rub(dep_year)}*\n"
-        f"Прогресс годового плана: {plan_pct:.1f} % ({fmt_rub(dep_year)} / {fmt_rub(plan)})\n\n"
-        f"Доходы (купоны + дивиденды): {fmt_decimal_rub(income_total)}\n"
-        f"Комиссии: {fmt_decimal_rub(commissions)}\n"
-        f"Налоги: {fmt_decimal_rub(taxes)}\n"
-        f"Реализовано (net): {fmt_decimal_rub(realized)}"
-    )
+    summary_lines = [
+        f"📅 *Команда /year {period_start.year}*",
+        f"Период: {period_start.strftime('%d.%m.%Y')} — {period_end_inclusive.strftime('%d.%m.%Y')} ({label})",
+        "",
+        f"Стоимость портфеля на конец периода: *{fmt_rub(current_value)}*",
+        f"Изменение стоимости: {fmt_rub(delta_abs) if delta_abs is not None else '—'} ({fmt_pct(delta_pct, precision=2) if delta_pct is not None else '—'})",
+        f"Пополнения: *{fmt_rub(dep_year)}*",
+        f"Прогресс годового плана: {plan_pct:.1f} % ({fmt_rub(dep_year)} / {fmt_rub(plan)})",
+        "",
+        f"Доходы (купоны + дивиденды): {fmt_decimal_rub(income_total)}",
+        f"Комиссии: {fmt_decimal_rub(commissions)}",
+        f"Налоги: {fmt_decimal_rub(taxes)}",
+        f"Реализовано (net): {fmt_decimal_rub(realized)}",
+        f"Реализовано по продажам (yield + commission): {fmt_decimal_rub(realized_total)}",
+        f"Нереализовано на конец периода: {fmt_decimal_rub(unrealized)}",
+        "",
+    ]
+    summary_lines.extend(_format_asset_lines(realized_by_asset, realized_total, f"Топ-{YEAR_REPORT_TOP_N} реализованных по активам:"))
+    summary_lines.append("")
+    summary_lines.extend(_format_asset_lines(income_by_asset_net, income_total_net, f"Топ-{YEAR_REPORT_TOP_N} доходов по активам (net):"))
+
+    summary_text = "\n".join(summary_lines)
 
     diff_lines = compute_positions_diff_lines(start_positions, end_positions) if end_snap else []
     if diff_lines:
@@ -1683,26 +1885,28 @@ async def cmd_year(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Формат: /year или /year YYYY")
         return
 
-    today = datetime.now(TZ).date()
-    ytd = True
-    year = today.year
-
+    year: int | None = None
     if len(args) == 1:
         try:
-            year = int(args[0])
-            if year < 1900 or year > 2100:
+            parsed_year = int(args[0])
+            if parsed_year < 1900 or parsed_year > 2100:
                 raise ValueError
-            ytd = False
+            year = parsed_year
         except ValueError:
             await update.message.reply_text("Формат: /year или /year YYYY")
             return
 
-    summary_text, diff_text, label = build_year_summary(year, ytd=ytd)
+    summary_text, diff_text, label = build_year_summary(year)
     await safe_send_message(context.bot, update.effective_chat.id, summary_text, parse_mode="Markdown")
 
-    chart_path = f"/tmp/year_{year}.png"
-    period_end_exclusive = (today + timedelta(days=1)) if ytd else date(year + 1, 1, 1)
-    chart = build_year_chart(chart_path, year=year, end_date_exclusive=period_end_exclusive)
+    _, period_end_dt_exclusive, _, _ = get_year_period(year)
+    chart_year = year if year is not None else datetime.now(TZ).year
+    chart_path = f"/tmp/year_{chart_year}.png"
+    chart = build_year_chart(
+        chart_path,
+        year=chart_year,
+        end_date_exclusive=period_end_dt_exclusive.date(),
+    )
     if chart:
         with open(chart, "rb") as f:
             await update.message.reply_photo(photo=InputFile(f))
