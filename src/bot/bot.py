@@ -1754,6 +1754,50 @@ def build_year_chart(path: str, year: int, end_date_exclusive: date) -> str | No
     return path
 
 
+def build_year_monthly_delta_chart(path: str, year: int, end_date_exclusive: date) -> str | None:
+    year_start = date(year, 1, 1)
+    period_start_dt = datetime.combine(year_start, time.min)
+    period_end_dt_exclusive = datetime.combine(end_date_exclusive, time.min)
+    is_ytd = end_date_exclusive.year == year and end_date_exclusive <= (datetime.now(TZ).date() + timedelta(days=1))
+
+    with db_session() as session:
+        portfolio_rows = get_monthly_portfolio_values(session, period_start_dt, period_end_dt_exclusive, is_ytd)
+
+    if not portfolio_rows or len(portfolio_rows) < 2:
+        return None
+
+    months = [row["month_start"] for row in portfolio_rows]
+    values = [float(row["total_value"] or 0) for row in portfolio_rows]
+
+    delta_points: list[tuple[str, float]] = []
+    for idx in range(1, len(months)):
+        delta_points.append((months[idx].strftime("%Y-%m"), values[idx] - values[idx - 1]))
+
+    if not delta_points:
+        return None
+
+    labels = [label for label, _ in delta_points]
+    deltas = [delta for _, delta in delta_points]
+    x = list(range(len(labels)))
+
+    fig, ax = plt.subplots(figsize=(10, 4))
+    ax.bar(x, deltas)
+    ax.axhline(0, linewidth=1)
+
+    title_prefix = f"{year} YTD" if is_ytd else str(year)
+    ax.set_title(f"{title_prefix}: прирост/падение по месяцам")
+    ax.set_ylabel("₽")
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels, rotation=45, ha="right")
+    ax.grid(True, alpha=0.3)
+
+    fig.tight_layout()
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+
+    return path
+
+
 def _format_asset_lines(rows: list[dict], total: Decimal, title: str, top_n: int = YEAR_REPORT_TOP_N) -> list[str]:
     lines = [title]
     for row in rows[:top_n]:
@@ -1818,10 +1862,9 @@ def build_year_summary(year: int | None) -> tuple[str, str, str | None]:
         "",
         f"Стоимость портфеля на конец периода: *{fmt_rub(current_value)}*",
         delta_line,
-        f"Пополнения: *{fmt_rub(dep_year)}*",
         f"Прогресс годового плана: {plan_pct:.1f} % ({fmt_rub(dep_year)} / {fmt_rub(plan)})",
         "",
-        f"Нереализовано на конец периода: {fmt_decimal_rub(unrealized)}",
+        f"По открытым позициям: {fmt_decimal_rub(unrealized)}",
         "",
     ]
     if realized_by_asset or realized_total != 0:
@@ -2110,6 +2153,22 @@ async def cmd_year(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 os.remove(chart)
     else:
         await update.message.reply_text(f"Недостаточно данных для графика за {label}.")
+
+    temp_delta_chart = tempfile.NamedTemporaryFile(prefix=f"year_delta_{chart_year}_", suffix=".png", delete=False)
+    delta_chart_path = temp_delta_chart.name
+    temp_delta_chart.close()
+    delta_chart = build_year_monthly_delta_chart(
+        delta_chart_path,
+        year=chart_year,
+        end_date_exclusive=period_end_dt_exclusive.date(),
+    )
+    if delta_chart:
+        try:
+            with open(delta_chart, "rb") as f:
+                await update.message.reply_photo(photo=InputFile(f))
+        finally:
+            if os.path.exists(delta_chart):
+                os.remove(delta_chart)
 
     await safe_send_message(context.bot, update.effective_chat.id, diff_text, parse_mode="Markdown")
 
