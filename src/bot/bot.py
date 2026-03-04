@@ -679,8 +679,11 @@ def compute_positions_diff_grouped(session, from_dt: datetime, to_dt: datetime) 
     if len(snapshot_bounds) < 2:
         return [], "За выбранный период недостаточно снапшотов для сравнения позиций."
 
-    start_snapshot_id = snapshot_bounds[0]["id"]
-    end_snapshot_id = snapshot_bounds[-1]["id"]
+    start_snapshot = snapshot_bounds[0]
+    end_snapshot = snapshot_bounds[-1]
+    start_snapshot_id = start_snapshot["id"]
+    end_snapshot_id = end_snapshot["id"]
+    show_new_block = start_snapshot["snapshot_date"] == date(from_dt.year, 1, 1)
 
     rows = session.execute(
         text(
@@ -709,8 +712,6 @@ def compute_positions_diff_grouped(session, from_dt: datetime, to_dt: datetime) 
     end_figis_by_key: dict[str, set[str]] = {}
     display_by_key: dict[str, str] = {}
 
-    has_currency_changes = False
-
     for row in rows:
         figi = str(row.get("figi") or "").strip()
         if not figi:
@@ -718,7 +719,6 @@ def compute_positions_diff_grouped(session, from_dt: datetime, to_dt: datetime) 
 
         instrument_type = (row.get("instrument_type") or row.get("position_instrument_type") or "")
         if figi == "RUB000UTSTOM" or str(instrument_type).lower() == "currency":
-            has_currency_changes = True
             continue
 
         key = _asset_key(row)
@@ -755,7 +755,9 @@ def compute_positions_diff_grouped(session, from_dt: datetime, to_dt: datetime) 
         elif qty1 < qty0 and qty1 > 0:
             grouped.append(("📉 Продали часть", name, f"↓ {name}: {_fmt_qty(qty0)} → {_fmt_qty(qty1)} шт{figi_suffix}"))
 
-    categories = ["🆕 Новые", "📈 Докупили", "📉 Продали часть", "✅ Закрыли"]
+    categories = ["📈 Докупили", "📉 Продали часть", "✅ Закрыли"]
+    if show_new_block:
+        categories = ["🆕 Новые", *categories]
     grouped_lines: list[str] = []
     for category in categories:
         category_items = sorted([item for item in grouped if item[0] == category], key=lambda item: item[1])
@@ -765,11 +767,6 @@ def compute_positions_diff_grouped(session, from_dt: datetime, to_dt: datetime) 
             grouped_lines.append("")
         grouped_lines.append(category)
         grouped_lines.extend(line for _, _, line in category_items)
-
-    if has_currency_changes:
-        if grouped_lines:
-            grouped_lines.append("")
-        grouped_lines.append("(валюту не показываем в движениях по qty)")
 
     return grouped_lines, None
 
@@ -1759,10 +1756,6 @@ def build_year_chart(path: str, year: int, end_date_exclusive: date) -> str | No
 
 def _format_asset_lines(rows: list[dict], total: Decimal, title: str, top_n: int = YEAR_REPORT_TOP_N) -> list[str]:
     lines = [title]
-    if not rows:
-        lines[0] = f"{title}: нет данных"
-        return lines
-
     for row in rows[:top_n]:
         ticker = row.get("ticker") or "—"
         name = row.get("name") or row.get("figi") or "—"
@@ -1831,9 +1824,16 @@ def build_year_summary(year: int | None) -> tuple[str, str, str | None]:
         f"Нереализовано на конец периода: {fmt_decimal_rub(unrealized)}",
         "",
     ]
-    summary_lines.extend(_format_asset_lines(realized_by_asset, realized_total, "💰 Реализовано (продажи, net; комиссия учтена)"))
-    summary_lines.append("")
-    summary_lines.extend(_format_asset_lines(income_by_asset_net, income_total_net, "🧾 Дивиденды/купоны (net; налог учтён)"))
+    if realized_by_asset or realized_total != 0:
+        summary_lines.extend(_format_asset_lines(realized_by_asset, realized_total, "💰 Реализовано"))
+
+    if income_by_asset_net or income_total_net != 0:
+        if summary_lines and summary_lines[-1] != "":
+            summary_lines.append("")
+        summary_lines.extend(_format_asset_lines(income_by_asset_net, income_total_net, "🧾 Дивиденды/купоны"))
+
+    while summary_lines and summary_lines[-1] == "":
+        summary_lines.pop()
 
     summary_text = "\n".join(summary_lines)
 
