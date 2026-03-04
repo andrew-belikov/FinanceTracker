@@ -233,6 +233,8 @@ Get-Content .\migrations\20260304_operations_operation_item_fields.sql | docker 
 
 Синхронизация операций теперь использует `OperationsService/GetOperationsByCursor` с `withoutTrades=true`
 и постраничной обработкой `nextCursor`.
+Если после миграции у старых записей новые поля операции пустые, tracker автоматически
+делает backfill с даты открытия счёта и затем возвращается к инкрементальному режиму.
 
 Миграция `migrations/20260226_income_events.sql` добавляет таблицу `income_events`.
 
