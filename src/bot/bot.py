@@ -1811,16 +1811,21 @@ def build_year_monthly_delta_chart(path: str, year: int, end_date_exclusive: dat
     delta_points: list[tuple[str, float]] = []
     first_month_start = months[0]
 
+    first_month_end_exclusive = (
+        date(first_month_start.year + 1, 1, 1)
+        if first_month_start.month == 12
+        else date(first_month_start.year, first_month_start.month + 1, 1)
+    )
+
     with db_session() as session:
-        prev_snapshot = get_last_snapshot_before_date(session, first_month_start)
-        if prev_snapshot is not None:
-            first_month_base = float(prev_snapshot["total_value"] or 0)
+        if first_month_start.month == 1:
+            prev_snapshot = get_last_snapshot_before_date(session, first_month_start)
+            if prev_snapshot is not None:
+                first_month_base = float(prev_snapshot["total_value"] or 0)
+            else:
+                first_snapshot = get_first_snapshot_in_period(session, first_month_start, first_month_end_exclusive)
+                first_month_base = float(first_snapshot["total_value"] or 0) if first_snapshot is not None else values[0]
         else:
-            first_month_end_exclusive = (
-                date(first_month_start.year + 1, 1, 1)
-                if first_month_start.month == 12
-                else date(first_month_start.year, first_month_start.month + 1, 1)
-            )
             first_snapshot = get_first_snapshot_in_period(session, first_month_start, first_month_end_exclusive)
             first_month_base = float(first_snapshot["total_value"] or 0) if first_snapshot is not None else values[0]
 
