@@ -391,16 +391,15 @@ def get_month_snapshots(session, year: int, month: int):
     else:
         next_month_start = date(year, month + 1, 1)
 
-    # первый снапшот в месяце
+    # последний снапшот до начала месяца — база для расчёта дельты
     start_row = (
         session.execute(
             text(
                 """
         SELECT snapshot_date, snapshot_at, total_value
         FROM portfolio_snapshots
-        WHERE snapshot_date >= :start
-          AND snapshot_date < :end
-        ORDER BY snapshot_date ASC, snapshot_at ASC
+        WHERE snapshot_date < :start
+        ORDER BY snapshot_date DESC, snapshot_at DESC
         LIMIT 1
         """
             ),
@@ -693,7 +692,7 @@ def build_week_summary() -> str:
         current_value = float(latest_snap["total_value"]) if latest_snap["total_value"] is not None else 0.0
 
         # 3. Изменение за неделю
-        # Ищем снапшот на дату <= week_start_date, чтобы посчитать дельту
+        # Ищем снапшот до начала недели, чтобы посчитать дельту
         # Если снапшота ровно в start_date нет, берем ближайший предыдущий
         # Если портфель моложе недели, берем самый первый
         start_val_row = session.execute(
@@ -701,7 +700,7 @@ def build_week_summary() -> str:
                 """
             SELECT total_value
             FROM portfolio_snapshots
-            WHERE snapshot_date <= :d
+            WHERE snapshot_date < :d
             ORDER BY snapshot_date DESC, snapshot_at DESC
             LIMIT 1
             """
