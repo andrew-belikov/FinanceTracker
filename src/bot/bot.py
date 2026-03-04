@@ -641,14 +641,20 @@ def compute_positions_diff_grouped(session, from_dt: datetime, to_dt: datetime) 
             return f"{int(value)}"
         return f"{value:.6f}".rstrip("0").rstrip(".")
 
-    def _display_name(pos: dict, with_figi_suffix: bool) -> str:
-        name = (pos.get("instrument_name") or pos.get("position_name") or "").strip()
+    def _asset_key(pos: dict) -> str:
         ticker = (pos.get("instrument_ticker") or pos.get("position_ticker") or "").strip()
+        name = (pos.get("instrument_name") or pos.get("position_name") or "").strip()
         figi = (pos.get("figi") or "UNKNOWN").strip()
+        if ticker:
+            return ticker
+        if name:
+            return f"NAME:{name}"
+        return f"FIGI:{figi}"
 
-        if with_figi_suffix and ticker:
-            ticker = f"{ticker}…{figi[-6:]}"
-
+    def _display_name(pos: dict) -> str:
+        ticker = (pos.get("instrument_ticker") or pos.get("position_ticker") or "").strip()
+        name = (pos.get("instrument_name") or pos.get("position_name") or "").strip()
+        figi = (pos.get("figi") or "UNKNOWN").strip()
         if name and ticker:
             return f"{name} ({ticker})"
         if name:
@@ -697,68 +703,57 @@ def compute_positions_diff_grouped(session, from_dt: datetime, to_dt: datetime) 
         {"start_snapshot_id": start_snapshot_id, "end_snapshot_id": end_snapshot_id},
     ).mappings().all()
 
-    start_map: dict[str, dict] = {}
-    end_map: dict[str, dict] = {}
+    start_qty_by_key: dict[str, float] = {}
+    end_qty_by_key: dict[str, float] = {}
+    start_figis_by_key: dict[str, set[str]] = {}
+    end_figis_by_key: dict[str, set[str]] = {}
+    display_by_key: dict[str, str] = {}
+
+    has_currency_changes = False
+
     for row in rows:
         figi = str(row.get("figi") or "").strip()
         if not figi:
             continue
-        if row["snapshot_id"] == start_snapshot_id:
-            start_map[figi] = row
-        elif row["snapshot_id"] == end_snapshot_id:
-            end_map[figi] = row
 
-    ticker_to_figis: dict[str, set[str]] = {}
-    for pos in [*start_map.values(), *end_map.values()]:
-        ticker = (pos.get("instrument_ticker") or pos.get("position_ticker") or "").strip()
-        figi = (pos.get("figi") or "").strip()
-        if ticker and figi:
-            ticker_to_figis.setdefault(ticker, set()).add(figi)
-    duplicate_tickers = {ticker for ticker, figis in ticker_to_figis.items() if len(figis) > 1}
-
-    grouped: list[tuple[str, str, str]] = []
-    has_currency_changes = False
-    all_figis = sorted(set(start_map.keys()) | set(end_map.keys()))
-    for figi in all_figis:
-        start_pos = start_map.get(figi)
-        end_pos = end_map.get(figi)
-
-        ref_pos = end_pos or start_pos
-        instrument_type = (
-            (ref_pos.get("instrument_type") or ref_pos.get("position_instrument_type") or "")
-            if ref_pos
-            else ""
-        )
+        instrument_type = (row.get("instrument_type") or row.get("position_instrument_type") or "")
         if figi == "RUB000UTSTOM" or str(instrument_type).lower() == "currency":
             has_currency_changes = True
             continue
 
-        if start_pos is None and end_pos is not None:
-            end_qty = _qty(end_pos.get("quantity"))
-            ticker = (end_pos.get("instrument_ticker") or end_pos.get("position_ticker") or "").strip()
-            name = _display_name(end_pos, with_figi_suffix=ticker in duplicate_tickers)
-            grouped.append(("🆕 Новые", name, f"+ {name}: {_fmt_qty(0.0)} → {_fmt_qty(end_qty)} шт"))
-            continue
+        key = _asset_key(row)
+        display_by_key.setdefault(key, _display_name(row))
+        qty = _qty(row.get("quantity"))
 
-        if start_pos is not None and end_pos is None:
-            start_qty = _qty(start_pos.get("quantity"))
-            ticker = (start_pos.get("instrument_ticker") or start_pos.get("position_ticker") or "").strip()
-            name = _display_name(start_pos, with_figi_suffix=ticker in duplicate_tickers)
-            grouped.append(("✅ Закрыли", name, f"- {name}: {_fmt_qty(start_qty)} → {_fmt_qty(0.0)} шт"))
-            continue
+        if row["snapshot_id"] == start_snapshot_id:
+            start_qty_by_key[key] = start_qty_by_key.get(key, 0.0) + qty
+            start_figis_by_key.setdefault(key, set()).add(figi)
+        elif row["snapshot_id"] == end_snapshot_id:
+            end_qty_by_key[key] = end_qty_by_key.get(key, 0.0) + qty
+            end_figis_by_key.setdefault(key, set()).add(figi)
 
-        if start_pos is None or end_pos is None:
-            continue
+    grouped: list[tuple[str, str, str]] = []
+    all_keys = sorted(set(start_qty_by_key.keys()) | set(end_qty_by_key.keys()))
+    for key in all_keys:
+        qty0 = start_qty_by_key.get(key, 0.0)
+        qty1 = end_qty_by_key.get(key, 0.0)
+        name = display_by_key.get(key, key)
 
-        start_qty = _qty(start_pos.get("quantity"))
-        end_qty = _qty(end_pos.get("quantity"))
-        ticker = (end_pos.get("instrument_ticker") or end_pos.get("position_ticker") or "").strip()
-        name = _display_name(end_pos, with_figi_suffix=ticker in duplicate_tickers)
+        figi_changed = (
+            key in start_figis_by_key
+            and key in end_figis_by_key
+            and start_figis_by_key.get(key, set()) != end_figis_by_key.get(key, set())
+        )
+        figi_suffix = " (сменился FIGI)" if figi_changed else ""
 
-        if end_qty > start_qty:
-            grouped.append(("📈 Докупили", name, f"↑ {name}: {_fmt_qty(start_qty)} → {_fmt_qty(end_qty)} шт"))
-        elif end_qty < start_qty:
-            grouped.append(("📉 Продали часть", name, f"↓ {name}: {_fmt_qty(start_qty)} → {_fmt_qty(end_qty)} шт"))
+        if qty0 == 0 and qty1 > 0:
+            grouped.append(("🆕 Новые", name, f"+ {name}: {_fmt_qty(0.0)} → {_fmt_qty(qty1)} шт{figi_suffix}"))
+        elif qty0 > 0 and qty1 == 0:
+            grouped.append(("✅ Закрыли", name, f"- {name}: {_fmt_qty(qty0)} → {_fmt_qty(0.0)} шт{figi_suffix}"))
+        elif qty1 > qty0:
+            grouped.append(("📈 Докупили", name, f"↑ {name}: {_fmt_qty(qty0)} → {_fmt_qty(qty1)} шт{figi_suffix}"))
+        elif qty1 < qty0 and qty1 > 0:
+            grouped.append(("📉 Продали часть", name, f"↓ {name}: {_fmt_qty(qty0)} → {_fmt_qty(qty1)} шт{figi_suffix}"))
 
     categories = ["🆕 Новые", "📈 Докупили", "📉 Продали часть", "✅ Закрыли"]
     grouped_lines: list[str] = []
