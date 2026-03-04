@@ -1102,6 +1102,45 @@ def get_monthly_deposits(session, from_dt: datetime, to_dt: datetime):
     )
     return rows
 
+
+def get_last_snapshot_before_date(session, d: date):
+    return (
+        session.execute(
+            text(
+                """
+                SELECT total_value
+                FROM portfolio_snapshots
+                WHERE snapshot_date < :d
+                ORDER BY snapshot_date DESC, snapshot_at DESC
+                LIMIT 1
+                """
+            ),
+            {"d": d},
+        )
+        .mappings()
+        .first()
+    )
+
+
+def get_first_snapshot_in_period(session, from_date: date, to_date: date):
+    return (
+        session.execute(
+            text(
+                """
+                SELECT total_value
+                FROM portfolio_snapshots
+                WHERE snapshot_date >= :from_date
+                  AND snapshot_date < :to_date
+                ORDER BY snapshot_date ASC, snapshot_at ASC
+                LIMIT 1
+                """
+            ),
+            {"from_date": from_date, "to_date": to_date},
+        )
+        .mappings()
+        .first()
+    )
+
 def get_portfolio_timeseries_agg_by_date(session):
     rows = (
         session.execute(
@@ -1763,13 +1802,30 @@ def build_year_monthly_delta_chart(path: str, year: int, end_date_exclusive: dat
     with db_session() as session:
         portfolio_rows = get_monthly_portfolio_values(session, period_start_dt, period_end_dt_exclusive, is_ytd)
 
-    if not portfolio_rows or len(portfolio_rows) < 2:
+    if not portfolio_rows:
         return None
 
     months = [row["month_start"] for row in portfolio_rows]
     values = [float(row["total_value"] or 0) for row in portfolio_rows]
 
     delta_points: list[tuple[str, float]] = []
+    first_month_start = months[0]
+
+    with db_session() as session:
+        prev_snapshot = get_last_snapshot_before_date(session, first_month_start)
+        if prev_snapshot is not None:
+            first_month_base = float(prev_snapshot["total_value"] or 0)
+        else:
+            first_month_end_exclusive = (
+                date(first_month_start.year + 1, 1, 1)
+                if first_month_start.month == 12
+                else date(first_month_start.year, first_month_start.month + 1, 1)
+            )
+            first_snapshot = get_first_snapshot_in_period(session, first_month_start, first_month_end_exclusive)
+            first_month_base = float(first_snapshot["total_value"] or 0) if first_snapshot is not None else values[0]
+
+    delta_points.append((months[0].strftime("%Y-%m"), values[0] - first_month_base))
+
     for idx in range(1, len(months)):
         delta_points.append((months[idx].strftime("%Y-%m"), values[idx] - values[idx - 1]))
 
