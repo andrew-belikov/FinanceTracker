@@ -29,6 +29,7 @@ from sqlalchemy import (
     create_engine,
     Column,
     Integer,
+    BigInteger,
     String,
     Date,
     DateTime,
@@ -235,11 +236,30 @@ class Operation(Base):
 
     operation_id = Column(String, nullable=False)
     operation_type = Column(String, nullable=False)
+    cursor = Column(String, nullable=True)
+    broker_account_id = Column(String, nullable=True)
+    parent_operation_id = Column(String, nullable=True)
+    name = Column(String, nullable=True)
+    state = Column(String, nullable=True)
     instrument_uid = Column(String, nullable=True)
     figi = Column(String, nullable=True)
+    instrument_type = Column(String, nullable=True)
+    instrument_kind = Column(String, nullable=True)
+    position_uid = Column(String, nullable=True)
+    asset_uid = Column(String, nullable=True)
     date = Column(DateTime, nullable=False)
     amount = Column(Numeric(18, 2), nullable=False)
+    price = Column(Numeric(18, 9), nullable=True)
+    commission = Column(Numeric(18, 9), nullable=True)
+    yield_amount = Column("yield", Numeric(18, 9), nullable=True)
+    yield_relative = Column(Numeric(18, 9), nullable=True)
+    accrued_int = Column(Numeric(18, 9), nullable=True)
+    quantity = Column(BigInteger, nullable=True)
+    quantity_rest = Column(BigInteger, nullable=True)
+    quantity_done = Column(BigInteger, nullable=True)
     currency = Column(String, nullable=False)
+    cancel_date_time = Column(DateTime, nullable=True)
+    cancel_reason = Column(String, nullable=True)
 
     description = Column(String, nullable=True)
     source = Column(String, nullable=True)
@@ -307,6 +327,14 @@ def money_to_float(m: Optional[dict]) -> Optional[float]:
     units = _to_int(m.get("units"))
     nano = _to_int(m.get("nano"))
     return units + nano / 1e9
+
+
+def get_json_value(payload: dict, snake_name: str):
+    camel_name = "".join(
+        part.capitalize() if i else part
+        for i, part in enumerate(snake_name.split("_"))
+    )
+    return payload.get(camel_name, payload.get(snake_name))
 
 
 def post_api(method_path: str, payload: dict) -> dict:
@@ -416,6 +444,7 @@ def api_get_operations_by_cursor(account_id: str, opened_iso: Optional[str]):
             "to": now_iso,
             "cursor": cursor,
             "limit": 1000,
+            "withoutTrades": True,
         }
         data = post_api(
             "tinkoff.public.invest.api.contract.v1.OperationsService/GetOperationsByCursor",
@@ -427,6 +456,8 @@ def api_get_operations_by_cursor(account_id: str, opened_iso: Optional[str]):
 
         has_next = data.get("hasNext", False)
         next_cursor = data.get("nextCursor") or ""
+        logger.info("operations_page_loaded", f"loaded operations: {len(operations)}")
+        logger.info("operations_next_cursor", f"next_cursor: {next_cursor}")
 
         # Следующая страница
         if not has_next or not next_cursor:
@@ -690,116 +721,162 @@ def guess_deposit_source(description: Optional[str]) -> Optional[str]:
     return None
 
 
+def _upsert_operation(db, acc_id: str, op: dict) -> tuple[Optional[Operation], bool]:
+    op_id = get_json_value(op, "id")
+    if not op_id:
+        return None, False
+
+    op_type = get_json_value(op, "type") or get_json_value(op, "operation_type") or "OPERATION_TYPE_UNSPECIFIED"
+    payment = get_json_value(op, "payment")
+    payment_value = money_to_float(payment) or 0.0
+    payment_currency = ((payment or {}).get("currency") or PORTFOLIO_CURRENCY).upper()
+
+    op_dt_raw = parse_iso_dt(get_json_value(op, "date")) or datetime.now(timezone.utc)
+    if op_dt_raw.tzinfo is None:
+        op_dt = op_dt_raw.replace(tzinfo=timezone.utc).replace(tzinfo=None)
+    else:
+        op_dt = op_dt_raw.astimezone(timezone.utc).replace(tzinfo=None)
+
+    cancel_dt = parse_iso_dt(get_json_value(op, "cancel_date_time"))
+    if cancel_dt and cancel_dt.tzinfo is not None:
+        cancel_dt = cancel_dt.astimezone(timezone.utc).replace(tzinfo=None)
+
+    values = {
+        "account_id": acc_id,
+        "operation_id": op_id,
+        "operation_type": op_type,
+        "cursor": get_json_value(op, "cursor"),
+        "broker_account_id": get_json_value(op, "broker_account_id"),
+        "parent_operation_id": get_json_value(op, "parent_operation_id"),
+        "name": get_json_value(op, "name"),
+        "date": op_dt,
+        "state": get_json_value(op, "state"),
+        "description": get_json_value(op, "description") or get_json_value(op, "asset_uid") or "",
+        "instrument_uid": get_json_value(op, "instrument_uid"),
+        "figi": get_json_value(op, "figi"),
+        "instrument_type": get_json_value(op, "instrument_type"),
+        "instrument_kind": get_json_value(op, "instrument_kind"),
+        "position_uid": get_json_value(op, "position_uid"),
+        "asset_uid": get_json_value(op, "asset_uid"),
+        "amount": payment_value,
+        "price": quotation_to_float(get_json_value(op, "price")),
+        "commission": money_to_float(get_json_value(op, "commission")),
+        "yield_amount": money_to_float(get_json_value(op, "yield")),
+        "yield_relative": quotation_to_float(get_json_value(op, "yield_relative")),
+        "accrued_int": money_to_float(get_json_value(op, "accrued_int")),
+        "quantity": get_json_value(op, "quantity"),
+        "quantity_rest": get_json_value(op, "quantity_rest"),
+        "quantity_done": get_json_value(op, "quantity_done"),
+        "currency": payment_currency,
+        "cancel_date_time": cancel_dt,
+        "cancel_reason": get_json_value(op, "cancel_reason"),
+        "source": guess_deposit_source(get_json_value(op, "description")),
+    }
+
+    existing = db.query(Operation).filter(Operation.operation_id == op_id).one_or_none()
+    if existing is None:
+        operation = Operation(**values)
+        db.add(operation)
+        return operation, True
+
+    for field, value in values.items():
+        setattr(existing, field, value)
+    return existing, False
+
+
+def _sync_operations(db, account_id: str, from_date: Optional[str]) -> dict:
+    """Синхронизирует операции счёта через GetOperationsByCursor и upsert в БД."""
+    cursor = ""
+    count_new = 0
+    count_updated = 0
+    loaded_total = 0
+
+    while True:
+        payload = {
+            "accountId": account_id,
+            "from": from_date or "2000-01-01T00:00:00Z",
+            "to": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "limit": 1000,
+            "withoutTrades": True,
+            "cursor": cursor,
+        }
+        data = post_api(
+            "tinkoff.public.invest.api.contract.v1.OperationsService/GetOperationsByCursor",
+            payload,
+        )
+
+        operations = data.get("items") or data.get("operations") or []
+        loaded_total += len(operations)
+
+        for op in operations:
+            operation, created = _upsert_operation(db, account_id, op)
+            if operation is None:
+                continue
+            if created:
+                count_new += 1
+            else:
+                count_updated += 1
+
+        next_cursor = data.get("nextCursor") or ""
+        logger.info("operations_page_loaded", f"loaded operations: {loaded_total}")
+        logger.info("operations_next_cursor", f"next_cursor: {next_cursor}")
+
+        has_next = bool(data.get("hasNext"))
+        if not has_next or not next_cursor:
+            break
+        cursor = next_cursor
+
+    return {"loaded": loaded_total, "new": count_new, "updated": count_updated}
+
+
+def sync_operations(account_id: str, from_date: Optional[str]) -> dict:
+    """Отдельная функция синхронизации операций: API + курсор + сохранение в БД."""
+    with SessionLocal() as db:
+        stats = _sync_operations(db, account_id, from_date)
+        db.commit()
+        return stats
+
+
 def sync_operations_for_account(db, acc_data: dict):
-    """
-    Тянем все операции и кладём их в operations (без дублей).
-    Для обратной совместимости старые SQL-запросы читают пополнения через view deposits.
-    """
+    """Тянем операции и сохраняем в operations (идемпотентно по operation_id)."""
     acc_id = str(acc_data.get("id"))
     opened_iso = acc_data.get("openedDate") or acc_data.get("opened_date")
 
-    # Инкрементальная синхронизация: начинаем не с открытия счёта, а с последней
-    # сохранённой операции (минус 1 день для страховки от задержек/часовых поясов).
     last_dt: Optional[datetime] = (
         db.query(func.max(Operation.date))
-        .filter(
-            Operation.account_id == acc_id,
-            Operation.operation_type == "OPERATION_TYPE_INPUT",
-        )
+        .filter(Operation.account_id == acc_id)
         .scalar()
     )
 
     from_iso = opened_iso
     if last_dt is not None:
-        from_dt = (last_dt - timedelta(days=1))
-        from_iso = dt_to_iso_z(from_dt)
+        from_iso = dt_to_iso_z(last_dt - timedelta(days=1))
 
-    count_new = 0
-    count_updated = 0
-    total_amount = 0.0
-    currency_seen: Optional[str] = None
-    type_breakdown: dict[str, dict[str, float | int]] = {}
-    income_by_key: dict[tuple[str, date, str], dict[str, float]] = {}
+    stats = _sync_operations(db, acc_id, from_iso)
+
     income_type_map = {
         "OPERATION_TYPE_COUPON": ("coupon", "gross"),
         "OPERATION_TYPE_COUPON_TAX": ("coupon", "tax"),
         "OPERATION_TYPE_DIVIDEND": ("dividend", "gross"),
         "OPERATION_TYPE_DIVIDEND_TAX": ("dividend", "tax"),
     }
+    income_by_key: dict[tuple[str, date, str], dict[str, float]] = {}
+    from_dt = parse_iso_dt(from_iso) if from_iso else None
 
-    for op in api_get_operations_by_cursor(acc_id, from_iso):
-        op_type = op.get("operationType") or op.get("type")
-        payment = op.get("payment")
-        val = money_to_float(payment)
-        if val is None:
+    query = db.query(Operation).filter(Operation.account_id == acc_id)
+    if from_dt is not None:
+        if from_dt.tzinfo is not None:
+            from_dt = from_dt.astimezone(timezone.utc).replace(tzinfo=None)
+        query = query.filter(Operation.date >= from_dt)
+
+    for row in query:
+        if not row.figi or row.operation_type not in income_type_map:
             continue
-
-        op_currency = (payment.get("currency") or PORTFOLIO_CURRENCY).upper()
-        currency_seen = currency_seen or op_currency
-
-        op_id = op.get("id")
-        op_instrument_uid = op.get("instrumentUid") or op.get("assetUid")
-        op_figi = op.get("figi")
-        op_date_str = op.get("date")
-        op_dt_raw = parse_iso_dt(op_date_str)
-        if op_dt_raw is None:
-            op_dt_raw = datetime.now(timezone.utc)
-        # В БД храним naive UTC
-        if op_dt_raw.tzinfo is None:
-            op_dt = op_dt_raw.replace(tzinfo=timezone.utc).replace(tzinfo=None)
-        else:
-            op_dt = op_dt_raw.astimezone(timezone.utc).replace(tzinfo=None)
-        desc = op.get("description") or op.get("assetUid") or ""
-
-        exists = (
-            db.query(Operation)
-            .filter(
-                Operation.account_id == acc_id,
-                Operation.operation_id == op_id,
-            )
-            .one_or_none()
-        )
-        if exists:
-            changed = False
-            if op_instrument_uid and not exists.instrument_uid:
-                exists.instrument_uid = op_instrument_uid
-                changed = True
-            if op_figi and not exists.figi:
-                exists.figi = op_figi
-                changed = True
-            if changed:
-                count_updated += 1
-            continue
-
-        src = guess_deposit_source(desc)
-
-        operation = Operation(
-            account_id=acc_id,
-            operation_id=op_id,
-            operation_type=op_type or "OPERATION_TYPE_UNSPECIFIED",
-            instrument_uid=op_instrument_uid,
-            figi=op_figi,
-            date=op_dt,
-            amount=val,
-            currency=op_currency,
-            description=desc,
-            source=src,
-        )
-        db.add(operation)
-        count_new += 1
-        total_amount += val
-        operation_type = operation.operation_type
-        if operation_type not in type_breakdown:
-            type_breakdown[operation_type] = {"count": 0, "sum": 0.0}
-        type_breakdown[operation_type]["count"] += 1
-        type_breakdown[operation_type]["sum"] += val
-
-        if op_figi and operation_type in income_type_map:
-            event_type, amount_kind = income_type_map[operation_type]
-            key = (op_figi, op_dt.date(), event_type)
-            if key not in income_by_key:
-                income_by_key[key] = {"gross": 0.0, "tax": 0.0}
-            income_by_key[key][amount_kind] += val
+        event_type, amount_kind = income_type_map[row.operation_type]
+        key = (row.figi, row.date.date(), event_type)
+        if key not in income_by_key:
+            income_by_key[key] = {"gross": 0.0, "tax": 0.0}
+        income_by_key[key][amount_kind] += float(row.amount or 0)
 
     for (figi, event_date, event_type), amounts in income_by_key.items():
         gross_sum = amounts["gross"]
@@ -808,17 +885,10 @@ def sync_operations_for_account(db, acc_data: dict):
         if net_amount <= 0:
             continue
 
-        net_yield_pct = 0.0
-        try:
-            cost_basis = get_latest_cost_basis(db, figi)
-            net_yield_pct = compute_income_net_yield_pct(net_amount, cost_basis)
-        except Exception:
-            logger.exception(
-                "income_event_yield_failed",
-                extra={"ctx": {"account_id": acc_id, "figi": figi, "event_date": event_date.isoformat(), "event_type": event_type}},
-            )
+        cost_basis = get_latest_cost_basis(db, figi)
+        net_yield_pct = compute_income_net_yield_pct(net_amount, cost_basis)
 
-        result = db.execute(
+        db.execute(
             text(
                 """
                 INSERT INTO income_events (
@@ -842,45 +912,12 @@ def sync_operations_for_account(db, acc_data: dict):
                 "net_yield_pct": round(net_yield_pct, 4),
             },
         )
-        if result.rowcount:
-            logger.info(
-                "income_event_created",
-                extra={
-                    "ctx": {
-                        "account_id": acc_id,
-                        "figi": figi,
-                        "event_date": event_date.isoformat(),
-                        "event_type": event_type,
-                        "net_amount": round(net_amount, 2),
-                        "net_yield_pct": round(net_yield_pct, 4),
-                    }
-                },
-            )
 
-    db.flush()
-
-    if currency_seen is None:
-        currency_seen = PORTFOLIO_CURRENCY.upper()
-
-    # Логируем результаты синхронизации
     logger.info(
         "operations_sync",
-        f"Operations sync for account {acc_id}: new records={count_new}, updated records={count_updated}, sum={total_amount:.2f} {currency_seen}",
-        extra={
-            "ctx": {
-                "account_id": acc_id,
-                "new_records": count_new,
-                "updated_records": count_updated,
-                "sum": round(total_amount, 2),
-                "currency": currency_seen,
-                "type_breakdown": {
-                    k: {"count": v["count"], "sum": round(v["sum"], 2)}
-                    for k, v in type_breakdown.items()
-                },
-            }
-        },
+        f"Operations sync for account {acc_id}: new records={stats['new']}, updated records={stats['updated']}, loaded={stats['loaded']}",
+        extra={"ctx": {"account_id": acc_id, **stats}},
     )
-
 
 def sync_deposits_for_account(db, acc_data: dict):
     """Deprecated wrapper for backward compatibility."""

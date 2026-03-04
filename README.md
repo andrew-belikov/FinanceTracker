@@ -222,6 +222,18 @@ Get-Content .\migrations\20260221_operations_from_deposits.rollback.sql | docker
 Get-Content .\migrations\20260225_operations_add_instrument_columns.sql | docker compose exec -T db psql -U $env:POSTGRES_USER -d $env:POSTGRES_DB
 ```
 
+
+Миграция `migrations/20260304_operations_operation_item_fields.sql` расширяет таблицу `operations` полями
+из `OperationItem` (кроме `trades_info.trades`) и добавляет уникальность по `operation_id`
+для идемпотентного upsert.
+
+```powershell
+Get-Content .\migrations\20260304_operations_operation_item_fields.sql | docker compose exec -T db psql -U $env:POSTGRES_USER -d $env:POSTGRES_DB
+```
+
+Синхронизация операций теперь использует `OperationsService/GetOperationsByCursor` с `withoutTrades=true`
+и постраничной обработкой `nextCursor`.
+
 Миграция `migrations/20260226_income_events.sql` добавляет таблицу `income_events`.
 
 Новая схема уведомлений:

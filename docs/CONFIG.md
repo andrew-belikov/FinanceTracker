@@ -55,6 +55,14 @@
   при синхронизации обновляет не только новые операции, но и делает backfill существующих строк,
   где эти поля ещё пустые.
 
+
+### Поля `OperationItem` в `operations`
+
+- Миграция `migrations/20260304_operations_operation_item_fields.sql` добавляет поля из `OperationItem`
+  (кроме массива `trades_info.trades`).
+- Tracker использует `GetOperationsByCursor` с `withoutTrades=true`, постранично обходит `nextCursor`
+  и делает upsert по `operation_id`.
+
 ### Миграция на новую схему (кратко)
 
 ```bash
