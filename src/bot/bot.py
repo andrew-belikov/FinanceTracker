@@ -396,7 +396,7 @@ def get_month_snapshots(session, year: int, month: int):
         session.execute(
             text(
                 """
-        SELECT snapshot_date, snapshot_at, total_value
+        SELECT id, snapshot_date, snapshot_at, total_value
         FROM portfolio_snapshots
         WHERE snapshot_date < :start
         ORDER BY snapshot_date DESC, snapshot_at DESC
@@ -414,7 +414,7 @@ def get_month_snapshots(session, year: int, month: int):
         session.execute(
             text(
                 """
-        SELECT snapshot_date, snapshot_at, total_value
+        SELECT id, snapshot_date, snapshot_at, total_value
         FROM portfolio_snapshots
         WHERE snapshot_date >= :start
           AND snapshot_date < :end
@@ -476,6 +476,70 @@ def get_positions_for_snapshot(session, snapshot_id: int):
         .all()
     )
     return rows
+
+
+def compute_positions_diff_lines(start_positions, end_positions) -> list[str]:
+    def _qty(value) -> float:
+        if value is None:
+            return 0.0
+        return float(value)
+
+    def _ticker(pos: dict) -> str:
+        return (pos.get("ticker") or pos.get("figi") or "UNKNOWN").strip()
+
+    start_map = {
+        str(pos.get("figi")): pos
+        for pos in start_positions
+        if pos.get("figi") is not None
+    }
+    end_map = {
+        str(pos.get("figi")): pos
+        for pos in end_positions
+        if pos.get("figi") is not None
+    }
+
+    new_items: list[tuple[str, str]] = []
+    closed_items: list[tuple[str, str]] = []
+    up_items: list[tuple[str, str]] = []
+    down_items: list[tuple[str, str]] = []
+
+    all_figis = sorted(set(start_map.keys()) | set(end_map.keys()))
+    for figi in all_figis:
+        start_pos = start_map.get(figi)
+        end_pos = end_map.get(figi)
+
+        if start_pos is None and end_pos is not None:
+            end_qty = _qty(end_pos.get("quantity"))
+            ticker = _ticker(end_pos)
+            new_items.append((ticker, f"+ {ticker} — {end_qty:.0f} шт (новая)"))
+            continue
+
+        if start_pos is not None and end_pos is None:
+            start_qty = _qty(start_pos.get("quantity"))
+            ticker = _ticker(start_pos)
+            closed_items.append((ticker, f"- {ticker} — {start_qty:.0f} шт (закрыта)"))
+            continue
+
+        start_qty = _qty(start_pos.get("quantity"))
+        end_qty = _qty(end_pos.get("quantity"))
+        qty_diff = end_qty - start_qty
+        if qty_diff > 0:
+            ticker = _ticker(end_pos)
+            up_items.append(
+                (ticker, f"↑ {ticker} — +{qty_diff:.0f} шт ({start_qty:.0f} → {end_qty:.0f})")
+            )
+        elif qty_diff < 0:
+            ticker = _ticker(end_pos)
+            down_items.append(
+                (ticker, f"↓ {ticker} — -{abs(qty_diff):.0f} шт ({start_qty:.0f} → {end_qty:.0f})")
+            )
+
+    new_lines = [line for _, line in sorted(new_items, key=lambda item: item[0])]
+    closed_lines = [line for _, line in sorted(closed_items, key=lambda item: item[0])]
+    up_lines = [line for _, line in sorted(up_items, key=lambda item: item[0])]
+    down_lines = [line for _, line in sorted(down_items, key=lambda item: item[0])]
+
+    return new_lines + closed_lines + up_lines + down_lines
 
 
 def get_portfolio_timeseries(session):
@@ -823,6 +887,13 @@ def build_month_summary() -> str:
         # Снапшоты для изменения стоимости за месяц
         start_snap, end_snap = get_month_snapshots(session, year, month)
 
+        start_positions = []
+        end_positions = []
+        if start_snap:
+            start_positions = get_positions_for_snapshot(session, start_snap["id"])
+        if end_snap:
+            end_positions = get_positions_for_snapshot(session, end_snap["id"])
+
     # План по году
     plan = PLAN_ANNUAL_CONTRIB_RUB
     year_pct = dep_year / plan * 100.0 if plan > 0 else 0.0
@@ -876,7 +947,13 @@ def build_month_summary() -> str:
         taxes=fmt_decimal_rub(taxes),
     )
 
-    return render_month_text(ctx)
+    month_text = render_month_text(ctx)
+    if end_snap:
+        diff_lines = compute_positions_diff_lines(start_positions, end_positions)
+        if diff_lines:
+            month_text += "\n\n📦 Изменения позиций за месяц\n" + "\n".join(diff_lines)
+
+    return month_text
 
 
 def _instrument_type_to_group(instr_type: str | None) -> str:
