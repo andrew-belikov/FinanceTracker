@@ -739,21 +739,14 @@ def compute_positions_diff_grouped(session, from_dt: datetime, to_dt: datetime) 
         qty1 = end_qty_by_key.get(key, 0.0)
         name = display_by_key.get(key, key)
 
-        figi_changed = (
-            key in start_figis_by_key
-            and key in end_figis_by_key
-            and start_figis_by_key.get(key, set()) != end_figis_by_key.get(key, set())
-        )
-        figi_suffix = " (сменился FIGI)" if figi_changed else ""
-
         if qty0 == 0 and qty1 > 0:
-            grouped.append(("🆕 Новые", name, f"+ {name}: {_fmt_qty(0.0)} → {_fmt_qty(qty1)} шт{figi_suffix}"))
+            grouped.append(("🆕 Новые", name, f"+ {name}: {_fmt_qty(0.0)} → {_fmt_qty(qty1)} шт"))
         elif qty0 > 0 and qty1 == 0:
-            grouped.append(("✅ Закрыли", name, f"- {name}: {_fmt_qty(qty0)} → {_fmt_qty(0.0)} шт{figi_suffix}"))
+            grouped.append(("✅ Закрыли", name, f"- {name}: {_fmt_qty(qty0)} → {_fmt_qty(0.0)} шт"))
         elif qty1 > qty0:
-            grouped.append(("📈 Докупили", name, f"↑ {name}: {_fmt_qty(qty0)} → {_fmt_qty(qty1)} шт{figi_suffix}"))
+            grouped.append(("📈 Докупили", name, f"↑ {name}: {_fmt_qty(qty0)} → {_fmt_qty(qty1)} шт"))
         elif qty1 < qty0 and qty1 > 0:
-            grouped.append(("📉 Продали часть", name, f"↓ {name}: {_fmt_qty(qty0)} → {_fmt_qty(qty1)} шт{figi_suffix}"))
+            grouped.append(("📉 Продали часть", name, f"↓ {name}: {_fmt_qty(qty0)} → {_fmt_qty(qty1)} шт"))
 
     categories = ["📈 Докупили", "📉 Продали часть", "✅ Закрыли"]
     if show_new_block:
