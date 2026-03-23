@@ -1,84 +1,138 @@
-# Конфигурация (.env)
+# Конфигурация FinanceTracker
 
-Все параметры задаются через файл `.env` в корне проекта.
+Проект использует один файл `.env` в корне репозитория. Его читают:
 
-## Обязательные
+- `docker compose` для подстановки значений в [`compose.yml`](../compose.yml);
+- `tracker` и `bot` через `env_file: .env`;
+- код приложений напрямую через `os.getenv(...)`.
 
-- `POSTGRES_DB` — имя базы данных.
-- `POSTGRES_USER` — пользователь Postgres.
-- `POSTGRES_PASSWORD` — пароль пользователя Postgres.
-- `TELEGRAM_BOT_TOKEN` — токен Telegram-бота.
-- `TINVEST_API_TOKEN` — токен Invest API.
-- `ALLOWED_USER_IDS` — список Telegram user_id, которым разрешена работа с ботом (через запятую).
+## Как Разрешаются Значения
 
-## Расписание
+При стандартном запуске через `docker compose up -d --build` действует такой порядок:
 
-- `TIMEZONE` — таймзона для отображения дат в текстах (например, `Europe/Moscow`).
+1. `docker compose` читает `.env`.
+2. Секция `env_file: .env` передаёт эти значения в контейнеры.
+3. Секция `environment:` в `compose.yml` перекрывает одноимённые переменные из `env_file`.
+4. Внутри `tracker` и `bot` переменная `DB_DSN`, если задана, перекрывает сборку DSN из `DB_*`.
 
-Рассылка JobQueue запускается в `18:00` по времени хоста (локальная таймзона контейнера/сервера).
-- `JOBQUEUE_SMOKE_TEST_ON_START` — одноразовый тест отправки через JobQueue при старте бота (`true/false`).
-- `JOBQUEUE_SMOKE_TEST_DELAY_SECONDS` — задержка перед smoke-test после старта (секунды).
+Практические последствия:
 
-Недельные отчёты отправляются по пятницам в 18:00, месячные — в последний день месяца в 18:00 (время хоста).
+- `POSTGRES_*` обязательны для контейнера `db`.
+- В Docker-режиме `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, `DB_PASSWORD` всё равно переопределяются из `compose.yml`.
+- Если нужно изменить подключение приложений к БД без правки `compose.yml`, используйте `DB_DSN`.
+- Эффективная переменная `APP_SERVICE` в контейнерах задаётся через `APP_SERVICE_TRACKER` и `APP_SERVICE_BOT`.
 
-## Параметры портфеля/плана
+## Минимум Для Первого Старта
 
-- `ACCOUNT_FRIENDLY_NAME` — отображаемое имя счёта.
-- `PLAN_ANNUAL_CONTRIB_RUB` — целевой план пополнений за год.
+Для базового запуска через Docker заполните:
 
-## Invest API
+- `POSTGRES_PASSWORD`
+- `TELEGRAM_BOT_TOKEN`
+- `TINVEST_API_TOKEN`
+- `ALLOWED_USER_IDS`
 
-- `TINVEST_BASE_URL` — базовый URL API.
-- `TINVEST_PORTFOLIO_CURRENCY` — валюта портфеля (обычно `RUB`).
-- `TINVEST_ACCOUNT_STATUS` — фильтр статуса счёта (`ACCOUNT_STATUS_ALL` и т.п.).
-- `TINKOFF_ACCOUNT_ID` — фиксированный account_id (если пусто/`auto`, выбирается первый доступный).
-- `OPERATIONS_MAX_PAGES` — лимит страниц для синка операций.
+Остальные значения можно оставить по умолчанию и уточнить позже.
 
-## Сеть
+## Время И Планировщики
 
-- `VERIFY_SSL` — проверка SSL сертификата при запросах к API (`true/false`).
+В проекте есть три разных времени:
 
-## Снапшоты
+- `TIMEZONE` используется ботом для форматирования дат и для части локальных периодов `/today`, `/week`, `/month`, `/year`, `/twr`.
+- `SCHED_TZ` используется `tracker` для APScheduler и для вычисления `portfolio_snapshots.snapshot_date`.
+- `bot` планирует ежедневный JobQueue в `18:00` по локальному времени контейнера через `datetime.now().astimezone().tzinfo`.
 
-- `SNAPSHOT_INTERVAL_MINUTES` — интервал сохранения снапшотов (в минутах).
-- `SNAPSHOT_HOUR`, `SNAPSHOT_MINUTE` — совместимость со старыми настройками (может не использоваться).
+`TIMEZONE` не меняет время срабатывания ежедневного JobQueue. Если нужен, например, строго московский запуск авторассылок, настраивайте локальную таймзону контейнера отдельно. В текущем `compose.yml` отдельной переменной для этого не предусмотрено.
 
-### Совместимость `deposits`
+## Переменные Окружения
 
-- View `deposits` сохраняется только для legacy/backward compatibility старых SQL-запросов.
-- Новый код и проверки должны читать данные операций из `operations`.
+### Postgres И Compose
 
-### Поля инструмента в `operations`
+| Переменная | Обязательность | Default | Кто читает | Назначение и замечания |
+| --- | --- | --- | --- | --- |
+| `POSTGRES_DB` | обязательно для Docker | нет | `compose.yml` | Имя базы данных для контейнера `db`. В Docker-режиме также прокидывается в приложения как `DB_NAME`. |
+| `POSTGRES_USER` | обязательно для Docker | нет | `compose.yml` | Пользователь Postgres для контейнера `db`. В Docker-режиме также прокидывается в приложения как `DB_USER`. |
+| `POSTGRES_PASSWORD` | обязательно для Docker | нет | `compose.yml` | Пароль Postgres. В Docker-режиме также прокидывается в приложения как `DB_PASSWORD`. |
 
-- Для операций поддерживаются поля `instrument_uid` и `figi`.
-- Если поля добавлены миграцией `migrations/20260225_operations_add_instrument_columns.sql`, tracker
-  при синхронизации обновляет не только новые операции, но и делает backfill существующих строк,
-  где эти поля ещё пустые.
+### Подключение Приложений К БД
 
+| Переменная | Обязательность | Default | Кто читает | Назначение и замечания |
+| --- | --- | --- | --- | --- |
+| `DB_HOST` | опционально | `db` | `tracker`, `bot` | Хост Postgres. При штатном запуске через Docker Compose переопределяется значением `db`. |
+| `DB_PORT` | опционально | `5432` | `tracker`, `bot` | Порт Postgres. При штатном запуске через Docker Compose переопределяется значением `5432`. |
+| `DB_NAME` | опционально | `fintracker` | `tracker`, `bot` | Имя базы для приложений. При штатном запуске через Docker Compose переопределяется `POSTGRES_DB`. |
+| `DB_USER` | опционально | `aqua4` | `tracker`, `bot` | Пользователь БД для приложений. При штатном запуске через Docker Compose переопределяется `POSTGRES_USER`. |
+| `DB_PASSWORD` | опционально | `Q1a2z334` в коде | `tracker`, `bot` | Пароль БД для приложений. При штатном запуске через Docker Compose переопределяется `POSTGRES_PASSWORD`. |
+| `DB_DSN` | опционально | собирается из `DB_*` | `tracker`, `bot` | Полный SQLAlchemy DSN. Если задан, код игнорирует `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, `DB_PASSWORD`. Это основной способ переопределить БД без правки `compose.yml`. |
 
-### Поля `OperationItem` в `operations`
+Если пароль содержит спецсимволы, для `DB_DSN` используйте URL-encoding.
 
-- Миграция `migrations/20260304_operations_operation_item_fields.sql` добавляет поля из `OperationItem`
-  (кроме массива `trades_info.trades`).
-- Tracker использует `GetOperationsByCursor` с `withoutTrades=true`, постранично обходит `nextCursor`
-  и делает upsert по `operation_id`.
-- Если после миграции у исторических строк новые поля ещё пустые (`state IS NULL`), tracker
-  автоматически делает backfill от даты открытия счёта, затем возвращается к инкрементальной синхронизации.
+### Telegram И Доступ
 
-### Миграция на новую схему (кратко)
+| Переменная | Обязательность | Default | Кто читает | Назначение и замечания |
+| --- | --- | --- | --- | --- |
+| `TELEGRAM_BOT_TOKEN` | обязательно для работы бота | пусто | `bot` | Токен от `@BotFather`. При пустом значении бот падает при старте. |
+| `ALLOWED_USER_IDS` | обязательно на практике | `365469` | `bot` | Список Telegram user_id через запятую. Используется и как белый список доступа, и как список чатов для авторассылок. |
 
-```bash
-# 1) Остановить сервисы, пишущие/читающие БД
-docker compose stop tracker bot
+### Время И Расписания
 
-# 2) Применить миграцию
-docker compose exec -T db psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -f migrations/20260221_operations_from_deposits.sql
+| Переменная | Обязательность | Default | Кто читает | Назначение и замечания |
+| --- | --- | --- | --- | --- |
+| `TIMEZONE` | опционально | `Europe/Moscow` | `bot` | Локальная таймзона для текстов и части date-based расчётов. Не влияет на время `run_daily(18:00)`. |
+| `SCHED_TZ` | опционально | `Europe/Moscow` | `tracker` | Таймзона APScheduler у `tracker` и источник локальной даты для `snapshot_date`. Если `ZoneInfo` недоступен, код деградирует в `UTC`. |
+| `SNAPSHOT_MODE` | опционально | `interval` | `tracker` | Режим планировщика: `interval` или `cron`. |
+| `SNAPSHOT_INTERVAL_MINUTES` | обязательно для `interval`-режима | `5` | `tracker` | Интервал запуска `job_with_retry()` в минутах. |
+| `SNAPSHOT_HOUR` | обязательно для `cron`-режима | `23` | `tracker` | Час запуска `CronTrigger`. Игнорируется в `interval`-режиме. |
+| `SNAPSHOT_MINUTE` | обязательно для `cron`-режима | `30` | `tracker` | Минута запуска `CronTrigger`. Игнорируется в `interval`-режиме. |
+| `JOBQUEUE_SMOKE_TEST_ON_START` | опционально | `false` | `bot` | Если `true`, бот один раз планирует тестовую отправку после старта. |
+| `JOBQUEUE_SMOKE_TEST_DELAY_SECONDS` | опционально | `20` | `bot` | Задержка перед smoke-test JobQueue. Используется только если включён `JOBQUEUE_SMOKE_TEST_ON_START`. |
 
-# 3) Запустить сервисы обратно
-docker compose up -d tracker bot
+### Портфель И Отчёты
 
-# 4) Проверить, что операции читаются из operations
-docker compose exec -T db psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "SELECT operation_type, COUNT(*) FROM operations GROUP BY operation_type ORDER BY operation_type;"
-```
+| Переменная | Обязательность | Default | Кто читает | Назначение и замечания |
+| --- | --- | --- | --- | --- |
+| `ACCOUNT_FRIENDLY_NAME` | опционально | `Семейный капитал` | `bot` | Человекочитаемое имя счёта в текстах и заголовках графиков. |
+| `PLAN_ANNUAL_CONTRIB_RUB` | опционально | `400000` | `bot` | Годовой план пополнений в рублях. Используется в `/week`, `/month`, `/year` и в триггере выполнения плана. |
 
-Ожидаемый результат: в `operations` есть записи по типам пополнений; `deposits` используется только как совместимый legacy-view.
+### Invest API
+
+| Переменная | Обязательность | Default | Кто читает | Назначение и замечания |
+| --- | --- | --- | --- | --- |
+| `TINVEST_API_TOKEN` | обязательно для `tracker` | пусто | `tracker` | Bearer token для Invest API. При пустом значении `tracker` падает при импорте модуля. |
+| `TINVEST_BASE_URL` | опционально | `https://invest-public-api.tbank.ru/rest` | `tracker` | Базовый URL REST-шлюза T-Invest. |
+| `TINVEST_PORTFOLIO_CURRENCY` | опционально | `RUB` | `tracker` | Валюта портфеля в запросе `GetPortfolio` и в `portfolio_snapshots.currency`. |
+| `TINVEST_ACCOUNT_STATUS` | опционально | `ACCOUNT_STATUS_ALL` | `tracker` | Статус-фильтр в `UsersService/GetAccounts`. |
+| `TINKOFF_ACCOUNT_ID` | опционально | пусто | `tracker` | Если задан и совпал с одним из `accounts[].id`, будет выбран именно этот счёт. При пустом или несовпавшем значении код возьмёт первый `ACCOUNT_STATUS_OPEN`, иначе просто первый счёт. Значение `auto` в текущем коде равносильно "не требовать точного совпадения". |
+| `OPERATIONS_MAX_PAGES` | опционально | `10000` | `tracker` | Предохранитель от зависания при пагинации `GetOperationsByCursor`. |
+
+### HTTP И Безопасность Подключения
+
+| Переменная | Обязательность | Default | Кто читает | Назначение и замечания |
+| --- | --- | --- | --- | --- |
+| `VERIFY_SSL` | опционально | `false` | `tracker` | Включает или отключает SSL-проверку у `requests.post(...)`. При `false` код глушит `InsecureRequestWarning` и пишет предупреждение в лог. Используйте только в доверенной сети. |
+
+### Логирование И Сервисная Идентичность
+
+| Переменная | Обязательность | Default | Кто читает | Назначение и замечания |
+| --- | --- | --- | --- | --- |
+| `APP_ENV` | опционально | `dev` | `compose.yml`, `common/logging_setup.py` | Значение поля `env` в JSON-логах. По умолчанию compose передаёт `dev`. |
+| `APP_SERVICE_TRACKER` | опционально | `iis_tracker` | `compose.yml` | Человекочитаемое имя сервиса для `tracker`. Через compose становится значением `APP_SERVICE`. |
+| `APP_SERVICE_BOT` | опционально | `iis_tracker_bot` | `compose.yml` | Человекочитаемое имя сервиса для `bot`. Через compose становится значением `APP_SERVICE`. |
+| `LOG_LEVEL` | опционально | `INFO` | `common/logging_setup.py` | Уровень root logger. |
+
+### Эффективные Runtime-Переменные
+
+Эти переменные читает код, но в Docker-режиме они обычно не задаются вручную в `.env`:
+
+| Переменная | Кто читает | Откуда берётся | Замечание |
+| --- | --- | --- | --- |
+| `APP_SERVICE` | `common/logging_setup.py` | из `compose.yml` | Для `tracker` и `bot` значения разные. В обычном Docker-запуске используйте `APP_SERVICE_TRACKER` и `APP_SERVICE_BOT`, а не одну общую переменную `APP_SERVICE`. |
+
+## Конфигурация И Схема Данных
+
+Некоторые параметры имеют смысл только вместе с определённой схемой БД:
+
+- `income_events` используется для купонов, дивидендов и части налогов. На чистой БД ORM создаёт эту таблицу автоматически.
+- compatibility-view `deposits` появляется только после миграции `migrations/20260221_operations_from_deposits.sql`; без неё на чистой БД остаётся обычная таблица `deposits`, которую новый код не использует.
+- глобальная уникальность `operations.operation_id` появляется только после миграции `migrations/20260304_operations_operation_item_fields.sql`.
+
+Подробности о миграциях и об отличиях clean install от upgrade смотрите в [docs/ARCHITECTURE.md](ARCHITECTURE.md) и [docs/RUNBOOK.md](RUNBOOK.md).
