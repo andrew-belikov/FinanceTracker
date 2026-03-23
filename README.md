@@ -10,6 +10,7 @@
   - в дневных/недельных/месячных отчётах показываются доходы (купоны, дивиденды) и расходы (комиссии, налоги);
   - месячный отчёт в последний день месяца в 18:00 (по времени хоста);
   - команда `/twr` с расчётом TWR (time-weighted return) и графиком по дням в двух связанных панелях: стоимость портфеля и TWR;
+  - команда `/dataset` отправляет один ZIP-архив для AI-анализа: внутри `dataset.json`, `daily_timeseries.csv`, `positions_current.csv`, `operations.csv`, `income_events.csv` и `README_AI.md`; summary в архиве period-first, а не lifetime-first, плюс есть `logical_asset_id`, `reconciliation_*` и quality flags;
   - команда `/year` работает в двух режимах: без аргумента — отчёт за текущий год (YTD), с аргументом `/year YYYY` — отчёт за указанный календарный год;
   - `/year` отправляет 4 сообщения: summary, PNG-график с двумя связанными блоками (сверху — стоимость портфеля на конец месяца, снизу — пополнения за месяц), дополнительный PNG-график `результат по месяцам` (дельта без учёта пополнений: изменение стоимости минус пополнения за период месяца), и movements (сгруппированный блок изменений позиций 🆕/📈/📉/✅ по первому и последнему снапшоту внутри периода, с агрегацией по логическому активу: ticker → name → figi; валютные позиции из qty-движений исключаются);
   - для `/year` финансовые суммы считаются только по исполненным операциям (`state = OPERATION_STATE_EXECUTED`) c дедупликацией по `operation_id` (последняя запись по `id`), чтобы не было задвоений;
@@ -261,6 +262,28 @@ Get-Content .\migrations\20260304_operations_operation_item_fields.sql | docker 
 Get-Content .\migrations\20260226_income_events.sql | docker compose exec -T db psql -U $env:POSTGRES_USER -d $env:POSTGRES_DB
 ```
 
+Миграция `migrations/20260324_dataset_source_fields.sql` добавляет поля в `portfolio_positions`
+для source-aware `/dataset` и создаёт таблицу `asset_aliases`.
+
+Она нужна, чтобы:
+- `positions_current` экспортировал `asset_uid`, `instrument_uid`, `position_uid`, `logical_asset_id`;
+- `/dataset` мог строить reconciliation по классам активов из snapshot totals;
+- смена FIGI не ломала склейку по логическому активу.
+
+```powershell
+Get-Content .\migrations\20260324_dataset_source_fields.sql | docker compose exec -T db psql -U $env:POSTGRES_USER -d $env:POSTGRES_DB
+```
+
+Важно: эту миграцию нужно применить **до** пересборки `tracker`, иначе новый код tracker
+не сможет записывать расширенные поля `portfolio_positions`.
+
+Если после переноса backup с Windows в `operations.description` появилась битая кириллица,
+можно выполнить разовый repair внутри контейнера `tracker`:
+
+```powershell
+docker compose exec -T tracker python repair_operations_description_encoding.py
+```
+
 ### Пошагово: деплой + миграция + проверка (Windows Terminal / PowerShell)
 
 1) Откройте Windows Terminal (PowerShell) в папке репозитория и обновите код:
@@ -378,6 +401,17 @@ docker compose exec -T db psql -U $env:POSTGRES_USER -d $env:POSTGRES_DB -c "SEL
 - `/history` — строится график стоимости и пополнений (без ошибок отправки файла).
 - `/structure` — корректно отрисовывается структура портфеля.
 - `/twr` — приходит метрика TWR и график по дням.
+- `/dataset` — приходит ZIP-архив с `json + csv + md`, пригодный для передачи ИИ-модели; внутри summary используются `period_*` поля, `has_full_history_from_zero`, `reconciliation_gap_abs`, а в `positions_current`/`operations` есть `logical_asset_id`.
+
+## Бэклог `/dataset`
+
+- Разложить `reconciliation_gap_abs` на именованные компоненты источника (`cash_free`, `cash_blocked`, `accrued_interest`, `other_assets_value`), если Invest API отдаёт их стабильно и однозначно.
+- Довести source-aware reconciliation до полного совпадения не только по классам активов, но и по экономическому смыслу остатка внутри bond/cash-компонентов.
+- Добавить честную lifetime-аналитику только после подтверждения полной истории портфеля с нуля и корректного cost basis по всем текущим позициям.
+- Вынести lifetime-метрики в отдельный контракт датасета, чтобы не смешивать их с текущим period-first summary.
+- Достроить strict cost basis / realized / unrealized analytics по логическому активу, а не только по текущему `figi`.
+- Расширить alias-слой проверками и отчётами, чтобы смена FIGI автоматически подсвечивалась и не ломала downstream-аналитику.
+- Добавить интеграционную проверку после миграции `20260324_dataset_source_fields.sql`: alias-группы заполняются, а `logical_asset_id` стабилен между операциями и текущими позициями.
 
 5) Проверить авто-рассылки JobQueue:
 
