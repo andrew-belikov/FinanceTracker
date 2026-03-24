@@ -296,6 +296,42 @@ Get-Content .\migrations\20260324_rebalance_targets_and_invest_notifications.sql
 docker compose exec -T tracker python repair_operations_description_encoding.py
 ```
 
+Для временного переключения между ветками есть helper-скрипт
+`scripts/migrate_branch_switch.ps1`.
+
+Он:
+- находит новые SQL-файлы в `migrations/` для целевой ветки через `git diff FROM...TO`;
+- поднимает `db`, останавливает `tracker`/`bot`, применяет найденные миграции;
+- выполняет `compileall`, `docker compose config` и `unittest`;
+- пересобирает и поднимает контейнеры, затем показывает статус и последние логи.
+
+Примеры:
+
+```powershell
+.\scripts\migrate_branch_switch.ps1 -FromBranch main -ToBranch dev
+.\scripts\migrate_branch_switch.ps1 -FromBranch dev -ToBranch main
+```
+
+Запуск из Windows:
+
+```powershell
+cd C:\path\to\FinanceTracker
+powershell -ExecutionPolicy Bypass -File .\scripts\migrate_branch_switch.ps1 -FromBranch main -ToBranch dev
+```
+
+Если вы уже открыли PowerShell в корне репозитория:
+
+```powershell
+.\scripts\migrate_branch_switch.ps1 -FromBranch main -ToBranch dev
+```
+
+Если Windows блокирует запуск `.ps1`, можно разово разрешить выполнение для текущего окна:
+
+```powershell
+Set-ExecutionPolicy -Scope Process Bypass
+.\scripts\migrate_branch_switch.ps1 -FromBranch main -ToBranch dev
+```
+
 ### Пошагово: деплой + миграция + проверка (Windows Terminal / PowerShell)
 
 1) Откройте Windows Terminal (PowerShell) в папке репозитория и обновите код:
