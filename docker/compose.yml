@@ -23,6 +23,26 @@ services:
       retries: 20
     restart: unless-stopped
 
+  xray-client:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.xray-client
+    image: financetracker-xray-client
+    container_name: financetracker-xray-client-1
+    environment:
+      BOT_PROXY_ENABLED: ${BOT_PROXY_ENABLED:-false}
+      BOT_VLESS_URL: ${BOT_VLESS_URL:-}
+      XRAY_LOCAL_PROXY_PORT: "3128"
+    expose:
+      - "3128"
+    healthcheck:
+      test: ["CMD", "python", "-u", "/opt/finance/xray_client/healthcheck.py"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+    restart: on-failure
+
   tracker:
     build:
       context: ..
@@ -53,6 +73,8 @@ services:
     depends_on:
       db:
         condition: service_healthy
+      xray-client:
+        condition: service_started
     env_file:
       - ../.env
     environment:
@@ -63,6 +85,9 @@ services:
       DB_NAME: ${POSTGRES_DB}
       DB_USER: ${POSTGRES_USER}
       DB_PASSWORD: ${POSTGRES_PASSWORD}
+      BOT_PROXY_ENABLED: ${BOT_PROXY_ENABLED:-false}
+      BOT_PROXY_ENDPOINT: http://xray-client:3128
+      BOT_PROXY_NO_PROXY: localhost,127.0.0.1,db,tracker,xray-client
     restart: unless-stopped
 
 volumes:
