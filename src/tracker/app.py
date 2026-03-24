@@ -31,6 +31,7 @@ from sqlalchemy import (
     Integer,
     BigInteger,
     String,
+    Text,
     Date,
     DateTime,
     Numeric,
@@ -178,6 +179,9 @@ class PortfolioPosition(Base):
 
     figi = Column(String, nullable=False)
     instrument_id = Column(Integer, ForeignKey("instruments.id"), nullable=True)
+    instrument_uid = Column(String, nullable=True)
+    position_uid = Column(String, nullable=True)
+    asset_uid = Column(String, nullable=True)
     ticker = Column(String, nullable=True)
     name = Column(String, nullable=True)
     instrument_type = Column(String, nullable=True)
@@ -186,10 +190,12 @@ class PortfolioPosition(Base):
     currency = Column(String, nullable=True)
 
     current_price = Column(Numeric(18, 4), nullable=True)
+    current_nkd = Column(Numeric(18, 9), nullable=True)
     position_value = Column(Numeric(18, 2), nullable=True)
     expected_yield = Column(Numeric(18, 2), nullable=True)
     expected_yield_pct = Column(Numeric(9, 4), nullable=True)
     weight_pct = Column(Numeric(9, 4), nullable=True)
+    raw_payload_json = Column(Text, nullable=True)
 
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
@@ -292,6 +298,65 @@ class IncomeEvent(Base):
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
 
+class AssetAlias(Base):
+    __tablename__ = "asset_aliases"
+    __table_args__ = (
+        UniqueConstraint(
+            "asset_uid",
+            "instrument_uid",
+            "figi",
+            name="uq_asset_aliases_asset_instrument_figi",
+        ),
+    )
+
+    id = Column(Integer, primary_key=True)
+    asset_uid = Column(String, nullable=False)
+    instrument_uid = Column(String, nullable=True)
+    figi = Column(String, nullable=True)
+    ticker = Column(String, nullable=True)
+    name = Column(String, nullable=True)
+    first_seen_at = Column(DateTime, nullable=False)
+    last_seen_at = Column(DateTime, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class RebalanceTarget(Base):
+    __tablename__ = "rebalance_targets"
+    __table_args__ = (
+        UniqueConstraint(
+            "account_id",
+            "asset_class",
+            name="uq_rebalance_targets_account_class",
+        ),
+    )
+
+    id = Column(Integer, primary_key=True)
+    account_id = Column(String, nullable=False)
+    asset_class = Column(String, nullable=False)
+    target_weight_pct = Column(Numeric(9, 4), nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, server_default=func.now(), nullable=False)
+
+
+class InvestNotification(Base):
+    __tablename__ = "invest_notifications"
+    __table_args__ = (
+        UniqueConstraint(
+            "account_id",
+            "operation_id",
+            name="uq_invest_notifications_account_operation",
+        ),
+    )
+
+    id = Column(Integer, primary_key=True)
+    account_id = Column(String, nullable=False)
+    operation_id = Column(String, nullable=False)
+    operation_date = Column(DateTime, nullable=False)
+    amount = Column(Numeric(18, 2), nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, server_default=func.now(), nullable=False)
+
+
 # ============ INIT DB ============
 
 engine = create_engine(DB_DSN, echo=False, future=True)
@@ -335,6 +400,85 @@ def get_json_value(payload: dict, snake_name: str):
         for i, part in enumerate(snake_name.split("_"))
     )
     return payload.get(camel_name, payload.get(snake_name))
+
+
+def upsert_asset_alias(
+    db,
+    *,
+    asset_uid: Optional[str],
+    instrument_uid: Optional[str],
+    figi: Optional[str],
+    name: Optional[str],
+    seen_at: Optional[datetime],
+):
+    if not asset_uid:
+        return
+
+    seen_at = seen_at or datetime.utcnow()
+    instrument = None
+    if figi:
+        instrument = db.query(Instrument).filter(Instrument.figi == figi).one_or_none()
+
+    ticker = instrument.ticker if instrument is not None else None
+    display_name = name or (instrument.name if instrument is not None else None) or figi or asset_uid
+
+    alias = (
+        db.query(AssetAlias)
+        .filter(
+            AssetAlias.asset_uid == asset_uid,
+            AssetAlias.instrument_uid == instrument_uid,
+            AssetAlias.figi == figi,
+        )
+        .one_or_none()
+    )
+    if alias is None:
+        alias = AssetAlias(
+            asset_uid=asset_uid,
+            instrument_uid=instrument_uid,
+            figi=figi,
+            ticker=ticker,
+            name=display_name,
+            first_seen_at=seen_at,
+            last_seen_at=seen_at,
+        )
+        db.add(alias)
+        return
+
+    alias.ticker = ticker or alias.ticker
+    alias.name = display_name or alias.name
+    if seen_at < alias.first_seen_at:
+        alias.first_seen_at = seen_at
+    if seen_at > alias.last_seen_at:
+        alias.last_seen_at = seen_at
+    alias.updated_at = datetime.utcnow()
+
+
+def resolve_asset_uid_for_position(
+    db,
+    *,
+    asset_uid: Optional[str],
+    instrument_uid: Optional[str],
+    figi: Optional[str],
+) -> Optional[str]:
+    if asset_uid:
+        return asset_uid
+
+    alias = None
+    if instrument_uid:
+        alias = (
+            db.query(AssetAlias)
+            .filter(AssetAlias.instrument_uid == instrument_uid)
+            .order_by(AssetAlias.last_seen_at.desc(), AssetAlias.id.desc())
+            .first()
+        )
+    if alias is None and figi:
+        alias = (
+            db.query(AssetAlias)
+            .filter(AssetAlias.figi == figi)
+            .order_by(AssetAlias.last_seen_at.desc(), AssetAlias.id.desc())
+            .first()
+        )
+    return alias.asset_uid if alias is not None else None
 
 
 def post_api(method_path: str, payload: dict) -> dict:
@@ -662,6 +806,7 @@ def take_snapshot_for_account(db, acc_data: dict):
 
         quantity = quotation_to_float(pos.get("quantity"))
         current_price = money_to_float(pos.get("currentPrice"))
+        current_nkd = money_to_float(get_json_value(pos, "current_nkd"))
         position_value = None
         if quantity is not None and current_price is not None:
             position_value = quantity * current_price
@@ -676,20 +821,34 @@ def take_snapshot_for_account(db, acc_data: dict):
         if position_value is not None and total_value not in (None, 0):
             weight_pct = position_value / total_value * 100.0
 
+        instrument_uid = get_json_value(pos, "instrument_uid")
+        position_uid = get_json_value(pos, "position_uid")
+        asset_uid = resolve_asset_uid_for_position(
+            db,
+            asset_uid=get_json_value(pos, "asset_uid"),
+            instrument_uid=instrument_uid,
+            figi=figi,
+        )
+
         position = PortfolioPosition(
             snapshot_id=snap.id,
             instrument_id=inst.id,
             figi=figi,
+            instrument_uid=instrument_uid,
+            position_uid=position_uid,
+            asset_uid=asset_uid,
             ticker=inst.ticker,
             name=inst.name,
             instrument_type=pos.get("instrumentType"),
             quantity=quantity,
             currency=PORTFOLIO_CURRENCY.upper(),
             current_price=current_price,
+            current_nkd=current_nkd,
             position_value=position_value,
             expected_yield=expected_yield_pos,
             expected_yield_pct=expected_yield_pct_pos,
             weight_pct=weight_pct,
+            raw_payload_json=json.dumps(pos, ensure_ascii=False, sort_keys=True),
         )
         db.add(position)
 
@@ -772,6 +931,15 @@ def _upsert_operation(db, acc_id: str, op: dict) -> tuple[Optional[Operation], b
         "cancel_reason": get_json_value(op, "cancel_reason"),
         "source": guess_deposit_source(get_json_value(op, "description")),
     }
+
+    upsert_asset_alias(
+        db,
+        asset_uid=values["asset_uid"],
+        instrument_uid=values["instrument_uid"],
+        figi=values["figi"],
+        name=values["name"],
+        seen_at=values["date"],
+    )
 
     existing = db.query(Operation).filter(Operation.operation_id == op_id).one_or_none()
     if existing is None:
