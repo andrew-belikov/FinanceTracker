@@ -87,6 +87,47 @@ docker compose logs --tail=200 bot
 docker compose logs --tail=200 tracker
 ```
 
+### Опциональный outbound proxy только для `bot`
+
+Если на сервере прямой доступ к Telegram нестабилен, можно включить VLESS+Reality только для контейнера `bot`.
+`tracker` и `db` при этом продолжают работать напрямую, без proxy.
+
+Добавьте в `.env`:
+
+```env
+BOT_PROXY_ENABLED=true
+BOT_VLESS_URL="vless://uuid@host:443?encryption=none&security=reality&sni=example.com&fp=chrome&pbk=PUBLIC_KEY&sid=SHORT_ID&type=tcp#bot"
+```
+
+Чтобы выключить режим, достаточно вернуть:
+
+```env
+BOT_PROXY_ENABLED=false
+BOT_VLESS_URL=""
+```
+
+После изменения `.env` пересоберите и перезапустите стек:
+
+```powershell
+docker compose up -d --build --force-recreate --remove-orphans
+docker compose ps
+docker compose logs --tail=200 xray-client
+docker compose logs --tail=200 bot
+```
+
+Быстрый smoke-test маршрута `bot -> xray-client -> Telegram`:
+
+```powershell
+docker compose exec bot python proxy_smoke.py
+```
+
+Сценарий проверки:
+- при `BOT_PROXY_ENABLED=true` `docker compose ps` показывает `xray-client` в состоянии `healthy`;
+- при `BOT_PROXY_ENABLED=false` `xray-client` не попадает в обычный `docker compose ps`, потому что proxy не активен; при необходимости детальный статус виден в `docker compose ps -a xray-client` как `Exited (0)`;
+- в логах `xray-client` видно, что proxy endpoint поднят и smoke до `https://api.telegram.org` успешен;
+- `proxy_smoke.py` внутри `bot` подтверждает доступность Telegram API и прямой TCP-доступ к `db`;
+- при `BOT_PROXY_ENABLED=false` `proxy_smoke.py` показывает режим `disabled`, а `tracker` продолжает работать как раньше.
+
 ## Обновление (пересборка без потери данных)
 
 ```powershell

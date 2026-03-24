@@ -27,4 +27,4 @@ COPY src/common/ ./common/
 # Bot code (bot.py + templates рядом)
 COPY src/bot/ ./
 
-CMD ["python", "-u", "bot.py"]
+CMD ["python", "-u", "entrypoint.py"]
