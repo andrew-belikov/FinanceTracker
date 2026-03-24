@@ -7,9 +7,10 @@ Telegram-бот для проекта iis_tracker.
     /week       — сводка по текущей неделе
     /month      — отчёт по текущему месяцу
     /year       — отчёт за год (YTD или календарный)
+    /dataset    — архив json+csv+md для AI-анализа
     /structure  — текущая структура портфеля
     /history    — график стоимости портфеля и суммы пополнений
-    /twr        — TWR (time-weighted return) и график по дням
+    /twr        — TWR, XIRR и run-rate на конец года + график по дням
     /help       — список команд
 
 - Ежедневная задача (18:00 по времени хоста, через JobQueue):
@@ -29,8 +30,11 @@ import os
 import logging
 import random
 import tempfile
+import csv
+import json
+import zipfile
 from contextlib import contextmanager
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from datetime import datetime, date, time, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -41,6 +45,7 @@ from sqlalchemy.orm import sessionmaker
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from matplotlib.ticker import FuncFormatter, MaxNLocator
 
 from telegram import Update, InputFile
 from telegram.ext import (
@@ -86,6 +91,7 @@ JOBQUEUE_SMOKE_TEST_DELAY_SECONDS = int(os.getenv("JOBQUEUE_SMOKE_TEST_DELAY_SEC
 
 # Годовой план пополнений
 PLAN_ANNUAL_CONTRIB_RUB = float(os.getenv("PLAN_ANNUAL_CONTRIB_RUB", "400000"))
+TINKOFF_ACCOUNT_ID = os.getenv("TINKOFF_ACCOUNT_ID", "auto").strip()
 
 # Подключение к БД (та же, что у сервиса снапшотов)
 DB_HOST = os.getenv("DB_HOST", "db")
@@ -115,10 +121,58 @@ MONTHS_RU = {
     12: "декабрь",
 }
 
+MONTHS_RU_GENITIVE = {
+    1: "января",
+    2: "февраля",
+    3: "марта",
+    4: "апреля",
+    5: "мая",
+    6: "июня",
+    7: "июля",
+    8: "августа",
+    9: "сентября",
+    10: "октября",
+    11: "ноября",
+    12: "декабря",
+}
+
+SHORT_MONTHS_RU = {
+    1: "янв",
+    2: "фев",
+    3: "мар",
+    4: "апр",
+    5: "май",
+    6: "июн",
+    7: "июл",
+    8: "авг",
+    9: "сен",
+    10: "окт",
+    11: "ноя",
+    12: "дек",
+}
+
+CHART_COLORS = {
+    "portfolio": "#1f6f8b",
+    "portfolio_fill": "#d9eef4",
+    "deposits": "#d8a25e",
+    "deposits_fill": "#f6e4c9",
+    "twr": "#6b7aa1",
+    "positive": "#3e8e63",
+    "positive_fill": "#dcefe3",
+    "negative": "#c46b4f",
+    "negative_fill": "#f5dfd7",
+    "neutral": "#8f97a6",
+    "grid": "#d8dfe7",
+    "spine": "#d6dce3",
+    "text": "#1f2933",
+    "muted": "#67707b",
+}
+
 # ==========================================
 
 # Structured logging configuration
 from common.logging_setup import configure_logging, get_logger
+from common.text_utils import has_mojibake
 
 # Configure logging once at module load
 configure_logging()
@@ -141,16 +195,28 @@ TAX_OPERATION_TYPES: tuple[str, ...] = (
     "OPERATION_TYPE_TAX_COUPON",
     "OPERATION_TYPE_TAX_DIVIDEND",
 )
+INCOME_EVENT_TAX_OPERATION_TYPES: tuple[str, ...] = (
+    "OPERATION_TYPE_COUPON_TAX",
+    "OPERATION_TYPE_DIVIDEND_TAX",
+)
+INCOME_TAX_OPERATION_TYPES: tuple[str, ...] = TAX_OPERATION_TYPES + INCOME_EVENT_TAX_OPERATION_TYPES
 INCOME_OPERATION_TYPES: tuple[str, ...] = (
     "OPERATION_TYPE_COUPON",
     "OPERATION_TYPE_DIVIDEND",
 )
+WITHDRAWAL_OPERATION_TYPES: tuple[str, ...] = ("OPERATION_TYPE_OUTPUT",)
+BUY_OPERATION_TYPES: tuple[str, ...] = (
+    "OPERATION_TYPE_BUY",
+    "OPERATION_TYPE_BUY_CARD",
+)
+SELL_OPERATION_TYPES: tuple[str, ...] = ("OPERATION_TYPE_SELL",)
 EXECUTED_OPERATION_STATE = "OPERATION_STATE_EXECUTED"
 
 OPERATIONS_DEDUP_CTE = """
 WITH operations_dedup AS (
-    SELECT DISTINCT ON (COALESCE(operation_id, id::text))
+    SELECT DISTINCT ON (account_id, COALESCE(operation_id, id::text))
         id,
+        account_id,
         operation_id,
         date,
         amount,
@@ -161,11 +227,51 @@ WITH operations_dedup AS (
         commission,
         yield
     FROM operations
-    ORDER BY COALESCE(operation_id, id::text), id DESC
+    ORDER BY account_id, COALESCE(operation_id, id::text), id DESC
 )
 """
 
 YEAR_REPORT_TOP_N = 5
+SNAPSHOT_TOTAL_FIELDS = {
+    "share": "total_shares",
+    "bond": "total_bonds",
+    "etf": "total_etf",
+    "currency": "total_currencies",
+    "futures": "total_futures",
+    "future": "total_futures",
+}
+
+REBALANCE_ASSET_CLASSES: tuple[str, ...] = ("stocks", "bonds", "etf", "currency")
+REBALANCE_TARGET_ALIASES = {
+    "stocks": "stocks",
+    "bonds": "bonds",
+    "etf": "etf",
+    "cash": "currency",
+    "currency": "currency",
+}
+REBALANCE_CLASS_LABELS = {
+    "stocks": "Акции",
+    "bonds": "Облигации",
+    "etf": "ETF",
+    "currency": "Валюта",
+}
+REBALANCE_GROUP_TO_CLASS = {
+    "Акции": "stocks",
+    "Облигации": "bonds",
+    "ETF": "etf",
+    "Валюта": "currency",
+}
+REBALANCE_TOLERANCE_PCT = Decimal("5.0")
+REBALANCE_FEATURE_UNAVAILABLE_TEXT = (
+    "Функция таргетов пока недоступна: таблицы ещё не созданы. "
+    "Перезапустите tracker и bot или примените миграцию, затем попробуйте снова."
+)
+REBALANCE_TARGETS_NOT_CONFIGURED_TEXT = (
+    "Таргеты пока не настроены.\n\n"
+    "Пример: `/targets set stocks=50 bonds=30 cash=20`"
+)
+TARGETS_USAGE_TEXT = "Формат: /targets или /targets set stocks=50 bonds=30 cash=20"
+INVEST_USAGE_TEXT = "Формат: /invest 30000"
 
 
 @contextmanager
@@ -187,6 +293,98 @@ async def safe_send_message(bot, chat_id: int, text: str, parse_mode: str = "Mar
 
 
 # =============== HELPERS ==================
+
+
+def classify_operation_group(operation_type: str | None) -> str:
+    op_type = (operation_type or "").strip()
+    if op_type in DEPOSIT_OPERATION_TYPES:
+        return "deposit"
+    if op_type in WITHDRAWAL_OPERATION_TYPES:
+        return "withdrawal"
+    if op_type in BUY_OPERATION_TYPES:
+        return "buy"
+    if op_type in SELL_OPERATION_TYPES:
+        return "sell"
+    if op_type in COMMISSION_OPERATION_TYPES:
+        return "commission"
+    if op_type in INCOME_TAX_OPERATION_TYPES:
+        return "income_tax"
+    if op_type == "OPERATION_TYPE_DIVIDEND":
+        return "dividend"
+    if op_type == "OPERATION_TYPE_COUPON":
+        return "coupon"
+    return "other"
+
+
+def is_income_event_backed_tax_operation(operation_type: str | None) -> bool:
+    op_type = (operation_type or "").strip()
+    return op_type in INCOME_EVENT_TAX_OPERATION_TYPES
+
+
+def to_local_market_date(dt: datetime | None) -> date | None:
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(TZ).date()
+
+
+def to_iso_datetime(dt: datetime | None) -> str | None:
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.isoformat()
+
+
+def decimal_to_str(value: Decimal | float | int | None) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, Decimal):
+        value = Decimal(str(value))
+    return format(value, "f")
+
+
+def json_default(value):
+    if isinstance(value, Decimal):
+        return decimal_to_str(value)
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
+
+
+def write_csv_file(path: str, fieldnames: list[str], rows: list[dict]):
+    with open(path, "w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(
+                {
+                    key: (
+                        decimal_to_str(value)
+                        if isinstance(value, Decimal)
+                        else value.isoformat()
+                        if isinstance(value, (datetime, date))
+                        else value
+                    )
+                    for key, value in row.items()
+                }
+            )
+
+
+def normalize_decimal(value) -> Decimal:
+    if value is None:
+        return Decimal("0")
+    return Decimal(str(value))
+
+
+def build_logical_asset_id(
+    *,
+    asset_uid: str | None,
+    instrument_uid: str | None,
+    figi: str | None,
+) -> str | None:
+    return asset_uid or instrument_uid or figi
 
 
 def is_authorized(update: Update) -> bool:
@@ -230,6 +428,402 @@ def fmt_plain_pct(x: float, precision: int = 2) -> str:
     return value
 
 
+def fmt_compact_rub(x: float | None, precision: int = 1, signed: bool = False) -> str:
+    if x is None:
+        return "—"
+
+    abs_value = abs(x)
+    if abs_value >= 1_000_000:
+        scaled = x / 1_000_000
+        unit = "млн ₽"
+    elif abs_value >= 1_000:
+        scaled = x / 1_000
+        unit = "тыс ₽"
+    else:
+        fmt = f"{{:+,.0f}}" if signed else "{:,.0f}"
+        return f"{fmt.format(x).replace(',', ' ')} ₽"
+
+    fmt = f"{{:+,.{precision}f}}" if signed else f"{{:,.{precision}f}}"
+    value = fmt.format(scaled).replace(",", " ")
+    if "." in value:
+        value = value.rstrip("0").rstrip(".")
+    return f"{value} {unit}"
+
+
+def fmt_compact_pct(x: float | None, precision: int = 1, signed: bool = False) -> str:
+    if x is None:
+        return "—"
+
+    fmt = f"{{:+.{precision}f}}" if signed else f"{{:.{precision}f}}"
+    value = fmt.format(x)
+    if "." in value:
+        value = value.rstrip("0").rstrip(".")
+    return f"{value} %"
+
+
+def build_help_text() -> str:
+    return (
+        "Доступные команды:\n\n"
+        "/today — сводка по портфелю на сегодня\n"
+        "/week — сводка по текущей неделе\n"
+        "/month — отчёт по текущему месяцу\n"
+        "/year [YYYY] — отчёт за год (без аргумента: текущий год YTD)\n"
+        "/dataset — архив json+csv+md для AI-анализа\n"
+        "/structure — текущая структура портфеля по позициям\n"
+        "/history — график стоимости портфеля и суммы пополнений\n"
+        "/twr — TWR, XIRR и run-rate на конец года + график по дням\n"
+        "/targets — показать текущие таргеты аллокации\n"
+        "/targets set stocks=50 bonds=30 cash=20 — задать таргеты по классам\n"
+        "/rebalance — показать отклонения и buy/sell для возврата к таргетам\n"
+        "/invest <sum> — подсказать, как распределить новое пополнение\n"
+        "/help — эта подсказка\n\n"
+        "Автоматически:\n"
+        "• каждый день в 18:00 (по времени хоста) — проверка триггеров (максимум, годовой план)\n"
+        "• по пятницам в 18:00 (по времени хоста) — недельный отчёт\n"
+        "• в последний день месяца в 18:00 (по времени хоста) — дополнительный отчёт за месяц\n"
+        "• каждое новое пополнение счёта — подсказка, как распределить пополнение по таргетам."
+    )
+
+
+REPORTING_ACCOUNT_UNAVAILABLE_TEXT = (
+    "Не удалось определить активный счёт для отчёта. "
+    "Укажите корректный TINKOFF_ACCOUNT_ID или дождитесь первого снапшота."
+)
+
+
+def normalize_reporting_account_id(raw_value: str | None) -> str | None:
+    value = (raw_value or "").strip()
+    if not value or value.lower() == "auto":
+        return None
+    return value
+
+
+def choose_reporting_account_id(
+    explicit_account_id: str | None,
+    latest_snapshot_account_id: str | None,
+) -> str | None:
+    normalized_explicit = normalize_reporting_account_id(explicit_account_id)
+    if normalized_explicit:
+        return normalized_explicit
+
+    latest_value = (latest_snapshot_account_id or "").strip()
+    return latest_value or None
+
+
+def compute_twr_series(
+    snapshot_rows: list[dict],
+    net_external_flow_by_day: dict[date, float],
+) -> tuple[list[date], list[float | None], list[float]] | None:
+    if len(snapshot_rows) < 2:
+        return None
+
+    dates: list[date] = []
+    values: list[float | None] = []
+    for row in snapshot_rows:
+        dates.append(row["snapshot_date"])
+        total_value = row.get("total_value")
+        values.append(float(total_value) if total_value is not None else None)
+
+    cumulative_multiplier = 1.0
+    twr: list[float] = [0.0]
+    for idx in range(1, len(dates)):
+        previous_value = values[idx - 1]
+        current_value = values[idx]
+        net_external_flow = net_external_flow_by_day.get(dates[idx], 0.0)
+
+        if previous_value in (None, 0) or current_value is None:
+            twr.append(cumulative_multiplier - 1.0)
+            continue
+
+        period_return = (current_value - net_external_flow) / previous_value - 1.0
+        cumulative_multiplier *= 1.0 + period_return
+        twr.append(cumulative_multiplier - 1.0)
+
+    return dates, values, twr
+
+
+def compute_xnpv(rate: float, cashflows: list[tuple[datetime, float]]) -> float:
+    base_dt = cashflows[0][0]
+    total = 0.0
+    for dt, amount in cashflows:
+        years = (dt - base_dt).total_seconds() / (365.0 * 24 * 3600)
+        total += amount / ((1.0 + rate) ** years)
+    return total
+
+
+def compute_xirr(cashflows: list[tuple[datetime, float]]) -> float | None:
+    if not cashflows:
+        return None
+    if not any(amount < 0 for _, amount in cashflows):
+        return None
+    if not any(amount > 0 for _, amount in cashflows):
+        return None
+
+    low = -0.9999
+    high = 10.0
+    low_value = compute_xnpv(low, cashflows)
+    high_value = compute_xnpv(high, cashflows)
+
+    expansions = 0
+    while low_value * high_value > 0 and expansions < 20:
+        high *= 2
+        high_value = compute_xnpv(high, cashflows)
+        expansions += 1
+
+    if low_value * high_value > 0:
+        return None
+
+    for _ in range(200):
+        mid = (low + high) / 2.0
+        mid_value = compute_xnpv(mid, cashflows)
+        if abs(mid_value) < 1e-8:
+            return mid
+        if low_value * mid_value <= 0:
+            high = mid
+            high_value = mid_value
+        else:
+            low = mid
+            low_value = mid_value
+
+    return (low + high) / 2.0
+
+
+def project_run_rate_value(
+    current_value: float | None,
+    annual_rate: float | None,
+    from_date: date,
+    to_date: date,
+) -> float | None:
+    if current_value is None or annual_rate is None:
+        return None
+
+    day_count = (to_date - from_date).days
+    if day_count < 0:
+        return None
+    if day_count == 0:
+        return current_value
+
+    return current_value * ((1.0 + annual_rate) ** (day_count / 365.0))
+
+
+def render_twr_summary_text(
+    *,
+    last_date: date,
+    last_value: float | None,
+    last_twr_pct: float,
+    xirr_value: float | None,
+    projected_value: float | None,
+    projection_date: date | None,
+) -> str:
+    calc_date_text = last_date.strftime("%d.%m.%Y")
+    projection_date_text = projection_date.strftime("%d.%m.%Y") if projection_date is not None else "—"
+    xirr_text = fmt_pct(xirr_value * 100.0, precision=2) if xirr_value is not None else "—"
+    projection_text = fmt_rub(projected_value) if projected_value is not None else "—"
+
+    return (
+        "📈 *TWR и run-rate*\n"
+        f"Дата расчёта: {calc_date_text}\n\n"
+        f"*TWR периода*: {fmt_pct(last_twr_pct, precision=2)}\n"
+        f"*Текущая стоимость*: {fmt_rub(last_value)}\n\n"
+        f"*XIRR*: {xirr_text} годовых\n"
+        f"*Run-rate на {projection_date_text}*: {projection_text}\n"
+        "_Сценарий: без новых пополнений и выводов._"
+    )
+
+
+def format_month_short_label(d: date) -> str:
+    return SHORT_MONTHS_RU[d.month]
+
+
+def format_day_month_label(d: date, include_year: bool = False) -> str:
+    label = f"{d.day} {format_month_short_label(d)}"
+    if include_year:
+        return f"{label}\n{d.year}"
+    return label
+
+
+def build_month_tick_labels(months: list[date]) -> list[str]:
+    if not months:
+        return []
+
+    multi_year = len({month.year for month in months}) > 1
+    labels: list[str] = []
+    prev_year: int | None = None
+
+    for month in months:
+        label = format_month_short_label(month)
+        if multi_year and month.year != prev_year:
+            label = f"{label}\n{month.year}"
+        labels.append(label)
+        prev_year = month.year
+
+    return labels
+
+
+def pick_tick_indices(length: int, max_ticks: int = 7) -> list[int]:
+    if length <= 0:
+        return []
+    if length <= max_ticks:
+        return list(range(length))
+
+    indices: list[int] = []
+    for step in range(max_ticks):
+        idx = round(step * (length - 1) / (max_ticks - 1))
+        if idx not in indices:
+            indices.append(idx)
+    return indices
+
+
+def build_date_ticks(dates: list[date], max_ticks: int = 7) -> tuple[list[date], list[str]]:
+    indices = pick_tick_indices(len(dates), max_ticks=max_ticks)
+    selected_dates = [dates[idx] for idx in indices]
+
+    labels: list[str] = []
+    prev_year: int | None = None
+    for dt in selected_dates:
+        include_year = prev_year is None or dt.year != prev_year
+        labels.append(format_day_month_label(dt, include_year=include_year))
+        prev_year = dt.year
+
+    return selected_dates, labels
+
+
+def rub_axis_formatter(value: float, _pos: int | None = None) -> str:
+    return fmt_compact_rub(float(value), precision=1)
+
+
+def pct_axis_formatter(value: float, _pos: int | None = None) -> str:
+    return fmt_compact_pct(float(value), precision=0)
+
+
+def set_chart_header(fig, title: str, subtitle: str | None = None):
+    fig.patch.set_facecolor("white")
+    fig.suptitle(
+        title,
+        x=0.125,
+        y=0.972,
+        ha="left",
+        fontsize=14,
+        fontweight="bold",
+        color=CHART_COLORS["text"],
+    )
+    if subtitle:
+        fig.text(
+            0.125,
+            0.905,
+            subtitle,
+            ha="left",
+            va="top",
+            fontsize=9,
+            color=CHART_COLORS["muted"],
+        )
+
+
+def apply_chart_style(ax, y_formatter=None):
+    ax.set_facecolor("white")
+    ax.grid(axis="y", color=CHART_COLORS["grid"], linewidth=0.8, alpha=0.7)
+    ax.grid(axis="x", visible=False)
+    ax.tick_params(axis="both", labelsize=9, colors=CHART_COLORS["muted"])
+    ax.yaxis.set_major_locator(MaxNLocator(nbins=5))
+
+    for side in ("top", "right"):
+        ax.spines[side].set_visible(False)
+    ax.spines["left"].set_color(CHART_COLORS["spine"])
+    ax.spines["bottom"].set_color(CHART_COLORS["spine"])
+
+    if y_formatter is not None:
+        ax.yaxis.set_major_formatter(FuncFormatter(y_formatter))
+
+
+def annotate_series_last_point(
+    ax,
+    x_values: list,
+    y_values: list[float],
+    label: str,
+    color: str,
+    y_offset: int = 0,
+):
+    if not x_values or not y_values:
+        return
+
+    last_x = x_values[-1]
+    last_y = y_values[-1]
+    ax.scatter([last_x], [last_y], color=color, s=28, zorder=5)
+    ax.annotate(
+        label,
+        xy=(last_x, last_y),
+        xytext=(10, y_offset),
+        textcoords="offset points",
+        ha="left",
+        va="center",
+        fontsize=9,
+        color=CHART_COLORS["text"],
+        bbox={
+            "boxstyle": "round,pad=0.3",
+            "fc": "white",
+            "ec": color,
+            "lw": 1,
+            "alpha": 0.96,
+        },
+        clip_on=False,
+        zorder=6,
+    )
+
+
+def annotate_bar_values(ax, x_values: list[int], values: list[float], formatter, text_color: str | None = None):
+    visible_values = [abs(value) for value in values if value is not None]
+    if not visible_values:
+        return
+
+    offset = max(max(visible_values) * 0.04, 1.0)
+    for x, value in zip(x_values, values):
+        if value is None:
+            continue
+
+        label_y = value + offset if value >= 0 else value - offset
+        va = "bottom" if value >= 0 else "top"
+        color = text_color
+        if color is None:
+            if value > 0:
+                color = CHART_COLORS["positive"]
+            elif value < 0:
+                color = CHART_COLORS["negative"]
+            else:
+                color = CHART_COLORS["neutral"]
+
+        ax.text(
+            x,
+            label_y,
+            formatter(value),
+            ha="center",
+            va=va,
+            fontsize=8,
+            color=color,
+        )
+
+
+def set_value_axis_limits(
+    ax,
+    values: list[float],
+    min_padding_ratio: float = 0.12,
+    flat_padding_ratio: float = 0.05,
+):
+    if not values:
+        return
+
+    min_value = min(values)
+    max_value = max(values)
+    span = max_value - min_value
+
+    if span <= 0:
+        pad = max(abs(max_value) * flat_padding_ratio, 1.0)
+        ax.set_ylim(min_value - pad, max_value + pad)
+        return
+
+    pad = max(span * min_padding_ratio, 1.0)
+    ax.set_ylim(min_value - pad, max_value + pad)
+
+
 def last_day_of_month(d: date) -> date:
     if d.month == 12:
         return date(d.year, 12, 31)
@@ -257,18 +851,39 @@ def get_year_period(year: int | None) -> tuple[datetime, datetime, str, bool]:
 # ============ DB QUERIES (CORE) ===========
 
 
-def get_latest_snapshots(session, limit: int = 2):
+def get_latest_snapshot_account_id(session) -> str | None:
+    return session.execute(
+        text(
+            """
+            SELECT account_id
+            FROM portfolio_snapshots
+            ORDER BY snapshot_date DESC, snapshot_at DESC, id DESC
+            LIMIT 1
+            """
+        )
+    ).scalar()
+
+
+def resolve_reporting_account_id(session) -> str | None:
+    return choose_reporting_account_id(
+        TINKOFF_ACCOUNT_ID,
+        get_latest_snapshot_account_id(session),
+    )
+
+
+def get_latest_snapshots(session, account_id: str, limit: int = 2):
     rows = (
         session.execute(
             text(
                 """
         SELECT snapshot_date, snapshot_at, total_value
         FROM portfolio_snapshots
+        WHERE account_id = :account_id
         ORDER BY snapshot_date DESC, snapshot_at DESC
         LIMIT :limit
         """
             ),
-            {"limit": limit},
+            {"account_id": account_id, "limit": limit},
         )
         .mappings()
         .all()
@@ -276,64 +891,88 @@ def get_latest_snapshots(session, limit: int = 2):
     return list(rows)
 
 
-def get_latest_snapshot_date(session):
+def get_latest_snapshot_date(session, account_id: str):
     return session.execute(
-        text("SELECT MAX(snapshot_date) FROM portfolio_snapshots")
+        text("SELECT MAX(snapshot_date) FROM portfolio_snapshots WHERE account_id = :account_id"),
+        {"account_id": account_id},
     ).scalar_one()
 
 
 def get_latest_deposit_date(
     session,
+    account_id: str,
     operation_types: tuple[str, ...] = DEPOSIT_OPERATION_TYPES,
 ):
     return session.execute(
         text(
-            """
+            f"""
+            {OPERATIONS_DEDUP_CTE}
             SELECT MAX(date::date)
-            FROM operations
-            WHERE operation_type IN :operation_types
+            FROM operations_dedup
+            WHERE account_id = :account_id
+              AND operation_type IN :operation_types
+              AND state = :executed_state
             """
         ).bindparams(bindparam("operation_types", expanding=True)),
-        {"operation_types": operation_types},
+        {
+            "account_id": account_id,
+            "operation_types": operation_types,
+            "executed_state": EXECUTED_OPERATION_STATE,
+        },
     ).scalar_one()
 
 
 def get_total_deposits(
     session,
+    account_id: str,
     operation_types: tuple[str, ...] = DEPOSIT_OPERATION_TYPES,
 ) -> float:
     row = session.execute(
         text(
-            """
+            f"""
+            {OPERATIONS_DEDUP_CTE}
             SELECT COALESCE(SUM(amount), 0) AS s
-            FROM operations
-            WHERE operation_type IN :operation_types
+            FROM operations_dedup
+            WHERE account_id = :account_id
+              AND operation_type IN :operation_types
+              AND state = :executed_state
             """
         ).bindparams(bindparam("operation_types", expanding=True)),
-        {"operation_types": operation_types},
+        {
+            "account_id": account_id,
+            "operation_types": operation_types,
+            "executed_state": EXECUTED_OPERATION_STATE,
+        },
     ).scalar_one()
     return float(row or 0)
 
 
 def get_deposits_for_period(
     session,
+    account_id: str,
     start_dt: datetime,
     end_dt: datetime,
     operation_types: tuple[str, ...] = DEPOSIT_OPERATION_TYPES,
 ) -> float:
     row = session.execute(
         text(
-            """
+            f"""
+        {OPERATIONS_DEDUP_CTE}
         SELECT COALESCE(SUM(amount), 0) AS s
-        FROM operations
-        WHERE date >= :start_dt AND date < :end_dt
+        FROM operations_dedup
+        WHERE account_id = :account_id
+          AND date >= :start_dt
+          AND date < :end_dt
           AND operation_type IN :operation_types
+          AND state = :executed_state
         """
         ).bindparams(bindparam("operation_types", expanding=True)),
         {
+            "account_id": account_id,
             "start_dt": start_dt,
             "end_dt": end_dt,
             "operation_types": operation_types,
+            "executed_state": EXECUTED_OPERATION_STATE,
         },
     ).scalar_one()
     return float(row or 0)
@@ -347,7 +986,7 @@ def _is_undefined_table_error(exc: Exception, table_name: str) -> bool:
     return f'relation "{table_name}" does not exist' in str(exc).lower()
 
 
-def get_income_for_period(db, start_date, end_date) -> tuple[Decimal, Decimal]:
+def get_income_for_period(db, account_id: str, start_date, end_date) -> tuple[Decimal, Decimal]:
     try:
         row = db.execute(
             text(
@@ -356,11 +995,12 @@ def get_income_for_period(db, start_date, end_date) -> tuple[Decimal, Decimal]:
                     COALESCE(SUM(CASE WHEN event_type = 'coupon' THEN net_amount ELSE 0 END), 0) AS coupons,
                     COALESCE(SUM(CASE WHEN event_type = 'dividend' THEN net_amount ELSE 0 END), 0) AS dividends
                 FROM income_events
-                WHERE event_date >= :start_date
+                WHERE account_id = :account_id
+                  AND event_date >= :start_date
                   AND event_date <= :end_date
                 """
             ),
-            {"start_date": start_date, "end_date": end_date},
+            {"account_id": account_id, "start_date": start_date, "end_date": end_date},
         ).mappings().one()
     except Exception as exc:
         if _is_undefined_table_error(exc, "income_events"):
@@ -370,27 +1010,32 @@ def get_income_for_period(db, start_date, end_date) -> tuple[Decimal, Decimal]:
     return Decimal(row["coupons"] or 0), Decimal(row["dividends"] or 0)
 
 
-def get_commissions_for_period(db, start_date, end_date) -> Decimal:
+def get_commissions_for_period(db, account_id: str, start_date, end_date) -> Decimal:
     total = db.execute(
         text(
-            """
+            f"""
+            {OPERATIONS_DEDUP_CTE}
             SELECT COALESCE(SUM(amount), 0) AS total
-            FROM operations
-            WHERE date >= :start_date
+            FROM operations_dedup
+            WHERE account_id = :account_id
+              AND date >= :start_date
               AND date <= :end_date
               AND operation_type IN :operation_types
+              AND state = :executed_state
             """
         ).bindparams(bindparam("operation_types", expanding=True)),
         {
+            "account_id": account_id,
             "start_date": start_date,
             "end_date": end_date,
             "operation_types": COMMISSION_OPERATION_TYPES,
+            "executed_state": EXECUTED_OPERATION_STATE,
         },
     ).scalar_one()
     return abs(Decimal(total or 0))
 
 
-def get_taxes_for_period(db, start_date, end_date) -> Decimal:
+def get_taxes_for_period(db, account_id: str, start_date, end_date) -> Decimal:
     income_taxes = Decimal("0")
     try:
         income_taxes_row = db.execute(
@@ -398,11 +1043,12 @@ def get_taxes_for_period(db, start_date, end_date) -> Decimal:
                 """
                 SELECT COALESCE(SUM(tax_amount), 0) AS total
                 FROM income_events
-                WHERE event_date >= :start_date
+                WHERE account_id = :account_id
+                  AND event_date >= :start_date
                   AND event_date <= :end_date
                 """
             ),
-            {"start_date": start_date, "end_date": end_date},
+            {"account_id": account_id, "start_date": start_date, "end_date": end_date},
         ).scalar_one()
         income_taxes = Decimal(income_taxes_row or 0)
     except Exception as exc:
@@ -411,24 +1057,29 @@ def get_taxes_for_period(db, start_date, end_date) -> Decimal:
 
     operation_taxes = db.execute(
         text(
-            """
+            f"""
+            {OPERATIONS_DEDUP_CTE}
             SELECT COALESCE(SUM(ABS(amount)), 0) AS total
-            FROM operations
-            WHERE date >= :start_date
+            FROM operations_dedup
+            WHERE account_id = :account_id
+              AND date >= :start_date
               AND date <= :end_date
               AND operation_type IN :operation_types
+              AND state = :executed_state
             """
         ).bindparams(bindparam("operation_types", expanding=True)),
         {
+            "account_id": account_id,
             "start_date": start_date,
             "end_date": end_date,
             "operation_types": TAX_OPERATION_TYPES,
+            "executed_state": EXECUTED_OPERATION_STATE,
         },
     ).scalar_one()
     return income_taxes + Decimal(operation_taxes or 0)
 
 
-def get_month_snapshots(session, year: int, month: int):
+def get_month_snapshots(session, account_id: str, year: int, month: int):
     month_start = date(year, month, 1)
     if month == 12:
         next_month_start = date(year + 1, 1, 1)
@@ -442,12 +1093,13 @@ def get_month_snapshots(session, year: int, month: int):
                 """
         SELECT id, snapshot_date, snapshot_at, total_value
         FROM portfolio_snapshots
-        WHERE snapshot_date < :start
+        WHERE account_id = :account_id
+          AND snapshot_date < :start
         ORDER BY snapshot_date DESC, snapshot_at DESC
         LIMIT 1
         """
             ),
-            {"start": month_start, "end": next_month_start},
+            {"account_id": account_id, "start": month_start, "end": next_month_start},
         )
         .mappings()
         .first()
@@ -460,13 +1112,14 @@ def get_month_snapshots(session, year: int, month: int):
                 """
         SELECT id, snapshot_date, snapshot_at, total_value
         FROM portfolio_snapshots
-        WHERE snapshot_date >= :start
+        WHERE account_id = :account_id
+          AND snapshot_date >= :start
           AND snapshot_date < :end
         ORDER BY snapshot_date DESC, snapshot_at DESC
         LIMIT 1
         """
             ),
-            {"start": month_start, "end": next_month_start},
+            {"account_id": account_id, "start": month_start, "end": next_month_start},
         )
         .mappings()
         .first()
@@ -475,7 +1128,7 @@ def get_month_snapshots(session, year: int, month: int):
     return start_row, end_row
 
 
-def get_period_snapshots(session, start_date: date, end_date_exclusive: date):
+def get_period_snapshots(session, account_id: str, start_date: date, end_date_exclusive: date):
     """
     Возвращает пару снапшотов для периода:
     - start_row: последний снапшот строго до start_date
@@ -487,12 +1140,13 @@ def get_period_snapshots(session, start_date: date, end_date_exclusive: date):
                 """
         SELECT id, snapshot_date, snapshot_at, total_value
         FROM portfolio_snapshots
-        WHERE snapshot_date < :start
+        WHERE account_id = :account_id
+          AND snapshot_date < :start
         ORDER BY snapshot_date DESC, snapshot_at DESC
         LIMIT 1
         """
             ),
-            {"start": start_date},
+            {"account_id": account_id, "start": start_date},
         )
         .mappings()
         .first()
@@ -504,13 +1158,14 @@ def get_period_snapshots(session, start_date: date, end_date_exclusive: date):
                 """
         SELECT id, snapshot_date, snapshot_at, total_value
         FROM portfolio_snapshots
-        WHERE snapshot_date >= :start
+        WHERE account_id = :account_id
+          AND snapshot_date >= :start
           AND snapshot_date < :end
         ORDER BY snapshot_date DESC, snapshot_at DESC
         LIMIT 1
         """
             ),
-            {"start": start_date, "end": end_date_exclusive},
+            {"account_id": account_id, "start": start_date, "end": end_date_exclusive},
         )
         .mappings()
         .first()
@@ -519,17 +1174,30 @@ def get_period_snapshots(session, start_date: date, end_date_exclusive: date):
     return start_row, end_row
 
 
-def get_latest_snapshot_with_id(session):
+def get_latest_snapshot_with_id(session, account_id: str):
     row = (
         session.execute(
             text(
                 """
-        SELECT id, snapshot_date, snapshot_at, total_value
+        SELECT
+            id,
+            account_id,
+            snapshot_date,
+            snapshot_at,
+            total_value,
+            currency,
+            total_shares,
+            total_bonds,
+            total_etf,
+            total_currencies,
+            total_futures
         FROM portfolio_snapshots
+        WHERE account_id = :account_id
         ORDER BY snapshot_date DESC, snapshot_at DESC
         LIMIT 1
         """
-            )
+            ),
+            {"account_id": account_id},
         )
         .mappings()
         .first()
@@ -537,18 +1205,81 @@ def get_latest_snapshot_with_id(session):
     return row
 
 
-def get_positions_for_snapshot(session, snapshot_id: int):
+def get_dataset_bounds(session, account_id: str):
+    row = (
+        session.execute(
+            text(
+                """
+                SELECT
+                    MIN(snapshot_date) AS min_date,
+                    MAX(snapshot_date) AS max_date
+                FROM portfolio_snapshots
+                WHERE account_id = :account_id
+                """
+            ),
+            {"account_id": account_id},
+        )
+        .mappings()
+        .one()
+    )
+    return row
+
+
+def get_daily_snapshot_rows(session, account_id: str):
     rows = (
         session.execute(
             text(
                 """
+                SELECT
+                    id,
+                    snapshot_date,
+                    snapshot_at,
+                    currency,
+                    total_value,
+                    expected_yield,
+                    expected_yield_pct
+                FROM (
+                    SELECT
+                        id,
+                        snapshot_date,
+                        snapshot_at,
+                        currency,
+                        total_value,
+                        expected_yield,
+                        expected_yield_pct,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY snapshot_date
+                            ORDER BY snapshot_at DESC, id DESC
+                        ) AS rn
+                    FROM portfolio_snapshots
+                    WHERE account_id = :account_id
+                ) daily
+                WHERE rn = 1
+                ORDER BY snapshot_date ASC
+                """
+            ),
+            {"account_id": account_id},
+        )
+        .mappings()
+        .all()
+    )
+    return rows
+
+
+def get_positions_for_snapshot(session, snapshot_id: int):
+    query = """
         SELECT
             figi,
             COALESCE(ticker, '') AS ticker,
             COALESCE(name, '')   AS name,
+            instrument_uid,
+            position_uid,
+            asset_uid,
             instrument_type,
             quantity,
+            currency,
             current_price,
+            current_nkd,
             position_value,
             expected_yield,
             expected_yield_pct,
@@ -556,14 +1287,227 @@ def get_positions_for_snapshot(session, snapshot_id: int):
         FROM portfolio_positions
         WHERE snapshot_id = :sid
         ORDER BY position_value DESC
-        """
+    """
+    fallback_query = """
+        SELECT
+            figi,
+            COALESCE(ticker, '') AS ticker,
+            COALESCE(name, '')   AS name,
+            NULL AS instrument_uid,
+            NULL AS position_uid,
+            NULL AS asset_uid,
+            instrument_type,
+            quantity,
+            currency,
+            current_price,
+            NULL AS current_nkd,
+            position_value,
+            expected_yield,
+            expected_yield_pct,
+            weight_pct
+        FROM portfolio_positions
+        WHERE snapshot_id = :sid
+        ORDER BY position_value DESC
+    """
+    try:
+        rows = (
+            session.execute(text(query), {"sid": snapshot_id})
+            .mappings()
+            .all()
+        )
+    except Exception as exc:
+        if not _is_undefined_table_error(exc, "portfolio_positions") and "column" not in str(exc).lower():
+            raise
+        session.rollback()
+        rows = (
+            session.execute(text(fallback_query), {"sid": snapshot_id})
+            .mappings()
+            .all()
+        )
+    return rows
+
+
+def get_dataset_operations(session, account_id: str, start_dt: datetime, end_dt: datetime):
+    rows = (
+        session.execute(
+            text(
+                """
+                WITH operations_dedup AS (
+                    SELECT DISTINCT ON (account_id, COALESCE(operation_id, id::text))
+                        account_id,
+                        operation_id,
+                        date,
+                        amount,
+                        currency,
+                        operation_type,
+                        state,
+                        instrument_uid,
+                        asset_uid,
+                        figi,
+                        name,
+                        commission,
+                        yield,
+                        description,
+                        source,
+                        price,
+                        quantity
+                    FROM operations
+                    ORDER BY account_id, COALESCE(operation_id, id::text), id DESC
+                )
+                SELECT
+                    operation_id,
+                    date,
+                    amount,
+                    currency,
+                    operation_type,
+                    state,
+                    instrument_uid,
+                    asset_uid,
+                    figi,
+                    name,
+                    commission,
+                    yield,
+                    description,
+                    source,
+                    price,
+                    quantity
+                FROM operations_dedup
+                WHERE account_id = :account_id
+                  AND date >= :start_dt
+                  AND date < :end_dt
+                  AND state = :executed_state
+                ORDER BY date ASC, operation_id ASC NULLS LAST
+                """
             ),
-            {"sid": snapshot_id},
+            {
+                "account_id": account_id,
+                "start_dt": start_dt,
+                "end_dt": end_dt,
+                "executed_state": EXECUTED_OPERATION_STATE,
+            },
         )
         .mappings()
         .all()
     )
     return rows
+
+
+def get_asset_alias_rows(session):
+    try:
+        rows = (
+            session.execute(
+                text(
+                    """
+                    SELECT
+                        asset_uid,
+                        instrument_uid,
+                        figi,
+                        ticker,
+                        name,
+                        first_seen_at,
+                        last_seen_at
+                    FROM asset_aliases
+                    ORDER BY asset_uid ASC, last_seen_at DESC
+                    """
+                )
+            )
+            .mappings()
+            .all()
+        )
+    except Exception as exc:
+        if _is_undefined_table_error(exc, "asset_aliases"):
+            session.rollback()
+            return []
+        raise
+    return rows
+
+
+def get_income_events_for_period(session, account_id: str, start_date: date, end_date: date):
+    try:
+        rows = (
+            session.execute(
+                text(
+                    """
+                    SELECT
+                        ie.event_date,
+                        ie.event_type,
+                        ie.figi,
+                        COALESCE(i.ticker, '') AS ticker,
+                        COALESCE(i.name, ie.figi) AS instrument_name,
+                        ie.gross_amount,
+                        ie.tax_amount,
+                        ie.net_amount,
+                        ie.net_yield_pct,
+                        ie.notified
+                    FROM income_events ie
+                    LEFT JOIN instruments i ON i.figi = ie.figi
+                    WHERE ie.account_id = :account_id
+                      AND ie.event_date >= :start_date
+                      AND ie.event_date <= :end_date
+                    ORDER BY ie.event_date ASC, ie.figi ASC, ie.event_type ASC
+                    """
+                ),
+                {"account_id": account_id, "start_date": start_date, "end_date": end_date},
+            )
+            .mappings()
+            .all()
+        )
+    except Exception as exc:
+        if _is_undefined_table_error(exc, "income_events"):
+            session.rollback()
+            return []
+        raise
+    return rows
+
+
+def build_asset_alias_lookup(alias_rows: list[dict]) -> tuple[dict[str, dict], dict[str, dict]]:
+    by_instrument_uid: dict[str, dict] = {}
+    by_figi: dict[str, dict] = {}
+    for row in alias_rows:
+        instrument_uid = row.get("instrument_uid")
+        figi = row.get("figi")
+        if instrument_uid and instrument_uid not in by_instrument_uid:
+            by_instrument_uid[instrument_uid] = row
+        if figi and figi not in by_figi:
+            by_figi[figi] = row
+    return by_instrument_uid, by_figi
+
+
+def build_reconciliation_by_asset_type(
+    latest_snapshot: dict,
+    positions_rows: list[dict],
+) -> tuple[list[dict], Decimal, Decimal]:
+    positions_sum_total = Decimal("0")
+    grouped_position_sums: dict[str, Decimal] = {}
+    grouped_current_nkd_sums: dict[str, Decimal] = {}
+
+    for row in positions_rows:
+        instrument_type = (row.get("instrument_type") or "other").strip().lower()
+        position_value = normalize_decimal(row.get("position_value"))
+        current_nkd = normalize_decimal(row.get("current_nkd"))
+        positions_sum_total += position_value
+        grouped_position_sums[instrument_type] = grouped_position_sums.get(instrument_type, Decimal("0")) + position_value
+        grouped_current_nkd_sums[instrument_type] = grouped_current_nkd_sums.get(instrument_type, Decimal("0")) + current_nkd
+
+    reconciliation_rows: list[dict] = []
+    for instrument_type, snapshot_field in SNAPSHOT_TOTAL_FIELDS.items():
+        if instrument_type == "future":
+            continue
+        snapshot_total = normalize_decimal(latest_snapshot.get(snapshot_field))
+        positions_sum = grouped_position_sums.get(instrument_type, Decimal("0"))
+        current_nkd_sum = grouped_current_nkd_sums.get(instrument_type, Decimal("0"))
+        reconciliation_rows.append(
+            {
+                "asset_type": instrument_type,
+                "snapshot_total": snapshot_total,
+                "positions_sum": positions_sum,
+                "gap_abs": snapshot_total - positions_sum,
+                "observed_current_nkd_sum": current_nkd_sum,
+            }
+        )
+
+    reconciliation_gap_abs = normalize_decimal(latest_snapshot.get("total_value")) - positions_sum_total
+    return reconciliation_rows, positions_sum_total, reconciliation_gap_abs
 
 
 def compute_positions_diff_lines(start_positions, end_positions) -> list[str]:
@@ -630,7 +1574,12 @@ def compute_positions_diff_lines(start_positions, end_positions) -> list[str]:
     return new_lines + closed_lines + up_lines + down_lines
 
 
-def compute_positions_diff_grouped(session, from_dt: datetime, to_dt: datetime) -> tuple[list[str], str | None]:
+def compute_positions_diff_grouped(
+    session,
+    account_id: str,
+    from_dt: datetime,
+    to_dt: datetime,
+) -> tuple[list[str], str | None]:
     def _qty(value) -> float:
         if value is None:
             return 0.0
@@ -668,12 +1617,13 @@ def compute_positions_diff_grouped(session, from_dt: datetime, to_dt: datetime) 
             """
             SELECT id, snapshot_date, snapshot_at
             FROM portfolio_snapshots
-            WHERE snapshot_at >= :from_dt
+            WHERE account_id = :account_id
+              AND snapshot_at >= :from_dt
               AND snapshot_at < :to_dt
             ORDER BY snapshot_date ASC, snapshot_at ASC
             """
         ),
-        {"from_dt": from_dt, "to_dt": to_dt},
+        {"account_id": account_id, "from_dt": from_dt, "to_dt": to_dt},
     ).mappings().all()
 
     if len(snapshot_bounds) < 2:
@@ -764,16 +1714,18 @@ def compute_positions_diff_grouped(session, from_dt: datetime, to_dt: datetime) 
     return grouped_lines, None
 
 
-def get_portfolio_timeseries(session):
+def get_portfolio_timeseries(session, account_id: str):
     rows = (
         session.execute(
             text(
                 """
         SELECT snapshot_date, total_value
         FROM portfolio_snapshots
+        WHERE account_id = :account_id
         ORDER BY snapshot_date ASC
         """
-            )
+            ),
+            {"account_id": account_id},
         )
         .mappings()
         .all()
@@ -783,20 +1735,28 @@ def get_portfolio_timeseries(session):
 
 def get_deposits_by_date(
     session,
+    account_id: str,
     operation_types: tuple[str, ...] = DEPOSIT_OPERATION_TYPES,
 ):
     rows = (
         session.execute(
             text(
-                """
+                f"""
+        {OPERATIONS_DEDUP_CTE}
         SELECT date::date AS d, SUM(amount) AS s
-        FROM operations
-        WHERE operation_type IN :operation_types
+        FROM operations_dedup
+        WHERE account_id = :account_id
+          AND operation_type IN :operation_types
+          AND state = :executed_state
         GROUP BY date::date
         ORDER BY d ASC
         """
             ).bindparams(bindparam("operation_types", expanding=True)),
-            {"operation_types": operation_types},
+            {
+                "account_id": account_id,
+                "operation_types": operation_types,
+                "executed_state": EXECUTED_OPERATION_STATE,
+            },
         )
         .mappings()
         .all()
@@ -804,7 +1764,7 @@ def get_deposits_by_date(
     return rows
 
 
-def get_year_financials_from_operations(session, start_dt: datetime, end_dt: datetime) -> dict[str, Decimal]:
+def get_year_financials_from_operations(session, account_id: str, start_dt: datetime, end_dt: datetime) -> dict[str, Decimal]:
     row = session.execute(
         text(
             f"""
@@ -820,7 +1780,8 @@ def get_year_financials_from_operations(session, start_dt: datetime, end_dt: dat
                     ELSE 0
                 END), 0) AS coupon_net
             FROM operations_dedup
-            WHERE date >= :start_dt
+            WHERE account_id = :account_id
+              AND date >= :start_dt
               AND date < :end_dt
               AND state = :executed_state
             """
@@ -828,6 +1789,7 @@ def get_year_financials_from_operations(session, start_dt: datetime, end_dt: dat
             bindparam("deposit_types", expanding=True),
         ),
         {
+            "account_id": account_id,
             "start_dt": start_dt,
             "end_dt": end_dt,
             "deposit_types": DEPOSIT_OPERATION_TYPES,
@@ -847,7 +1809,7 @@ def get_year_financials_from_operations(session, start_dt: datetime, end_dt: dat
     }
 
 
-def compute_realized_by_asset(session, start_dt: datetime, end_dt: datetime) -> tuple[list[dict], Decimal]:
+def compute_realized_by_asset(session, account_id: str, start_dt: datetime, end_dt: datetime) -> tuple[list[dict], Decimal]:
     rows = (
         session.execute(
             text(
@@ -860,7 +1822,8 @@ def compute_realized_by_asset(session, start_dt: datetime, end_dt: datetime) -> 
                     COALESCE(SUM(COALESCE(od.yield, 0) + COALESCE(od.commission, 0)), 0) AS amount
                 FROM operations_dedup od
                 LEFT JOIN instruments i ON i.figi = od.figi
-                WHERE od.date >= :start_dt
+                WHERE od.account_id = :account_id
+                  AND od.date >= :start_dt
                   AND od.date < :end_dt
                   AND od.state = :executed_state
                   AND od.operation_type = 'OPERATION_TYPE_SELL'
@@ -870,6 +1833,7 @@ def compute_realized_by_asset(session, start_dt: datetime, end_dt: datetime) -> 
                 """
             ),
             {
+                "account_id": account_id,
                 "start_dt": start_dt,
                 "end_dt": end_dt,
                 "executed_state": EXECUTED_OPERATION_STATE,
@@ -895,7 +1859,7 @@ def compute_realized_by_asset(session, start_dt: datetime, end_dt: datetime) -> 
     return parsed, total
 
 
-def compute_income_by_asset_net(session, start_dt: datetime, end_dt: datetime) -> tuple[list[dict], Decimal]:
+def compute_income_by_asset_net(session, account_id: str, start_dt: datetime, end_dt: datetime) -> tuple[list[dict], Decimal]:
     rows = (
         session.execute(
             text(
@@ -914,7 +1878,8 @@ def compute_income_by_asset_net(session, start_dt: datetime, end_dt: datetime) -
                     ), 0) AS net_amount
                 FROM operations_dedup od
                 LEFT JOIN instruments i ON i.figi = od.figi
-                WHERE od.date >= :start_dt
+                WHERE od.account_id = :account_id
+                  AND od.date >= :start_dt
                   AND od.date < :end_dt
                   AND od.state = :executed_state
                   AND od.operation_type IN (
@@ -929,6 +1894,7 @@ def compute_income_by_asset_net(session, start_dt: datetime, end_dt: datetime) -
                 """
             ),
             {
+                'account_id': account_id,
                 'start_dt': start_dt,
                 'end_dt': end_dt,
                 'executed_state': EXECUTED_OPERATION_STATE,
@@ -954,7 +1920,7 @@ def compute_income_by_asset_net(session, start_dt: datetime, end_dt: datetime) -
     return parsed, total
 
 
-def get_unrealized_at_period_end(session, to_dt: datetime) -> Decimal:
+def get_unrealized_at_period_end(session, account_id: str, to_dt: datetime) -> Decimal:
     to_date = to_dt.date() - timedelta(days=1)
     snap = (
         session.execute(
@@ -962,12 +1928,13 @@ def get_unrealized_at_period_end(session, to_dt: datetime) -> Decimal:
                 """
                 SELECT id, expected_yield
                 FROM portfolio_snapshots
-                WHERE snapshot_date <= :to_date
+                WHERE account_id = :account_id
+                  AND snapshot_date <= :to_date
                 ORDER BY snapshot_date DESC, snapshot_at DESC
                 LIMIT 1
                 """
             ),
-            {'to_date': to_date},
+            {'account_id': account_id, 'to_date': to_date},
         )
         .mappings()
         .first()
@@ -997,6 +1964,7 @@ def get_unrealized_at_period_end(session, to_dt: datetime) -> Decimal:
 
 def get_year_deposits_by_date(
     session,
+    account_id: str,
     start_dt: datetime,
     end_dt: datetime,
 ):
@@ -1007,7 +1975,8 @@ def get_year_deposits_by_date(
                 {OPERATIONS_DEDUP_CTE}
                 SELECT date::date AS d, SUM(amount) AS s
                 FROM operations_dedup
-                WHERE date >= :start_dt
+                WHERE account_id = :account_id
+                  AND date >= :start_dt
                   AND date < :end_dt
                   AND operation_type IN :operation_types
                   AND state = :executed_state
@@ -1016,6 +1985,7 @@ def get_year_deposits_by_date(
                 """
             ).bindparams(bindparam("operation_types", expanding=True)),
             {
+                "account_id": account_id,
                 "start_dt": start_dt,
                 "end_dt": end_dt,
                 "operation_types": DEPOSIT_OPERATION_TYPES,
@@ -1030,6 +2000,7 @@ def get_year_deposits_by_date(
 
 def get_monthly_portfolio_values(
     session,
+    account_id: str,
     from_dt: datetime,
     to_dt: datetime,
     is_ytd: bool,
@@ -1048,7 +2019,8 @@ def get_monthly_portfolio_values(
                             ORDER BY snapshot_date DESC, snapshot_at DESC
                         ) AS rn
                     FROM portfolio_snapshots
-                    WHERE snapshot_date >= :from_date
+                    WHERE account_id = :account_id
+                      AND snapshot_date >= :from_date
                       AND snapshot_date < :to_date
                 ) month_snaps
                 WHERE rn = 1
@@ -1056,6 +2028,7 @@ def get_monthly_portfolio_values(
                 """
             ),
             {
+                "account_id": account_id,
                 "from_date": from_dt.date(),
                 "to_date": to_dt.date(),
             },
@@ -1066,7 +2039,7 @@ def get_monthly_portfolio_values(
     return rows
 
 
-def get_monthly_deposits(session, from_dt: datetime, to_dt: datetime):
+def get_monthly_deposits(session, account_id: str, from_dt: datetime, to_dt: datetime):
     rows = (
         session.execute(
             text(
@@ -1076,7 +2049,8 @@ def get_monthly_deposits(session, from_dt: datetime, to_dt: datetime):
                     date_trunc('month', date)::date AS month_start,
                     SUM(amount) AS amount
                 FROM operations_dedup
-                WHERE date >= :from_dt
+                WHERE account_id = :account_id
+                  AND date >= :from_dt
                   AND date < :to_dt
                   AND state = :executed_state
                   AND operation_type = 'OPERATION_TYPE_INPUT'
@@ -1085,6 +2059,7 @@ def get_monthly_deposits(session, from_dt: datetime, to_dt: datetime):
                 """
             ),
             {
+                "account_id": account_id,
                 "from_dt": from_dt,
                 "to_dt": to_dt,
                 "executed_state": EXECUTED_OPERATION_STATE,
@@ -1096,59 +2071,63 @@ def get_monthly_deposits(session, from_dt: datetime, to_dt: datetime):
     return rows
 
 
-def get_last_snapshot_before_date(session, d: date):
+def get_last_snapshot_before_date(session, account_id: str, d: date):
     return (
         session.execute(
             text(
                 """
                 SELECT snapshot_date, total_value
                 FROM portfolio_snapshots
-                WHERE snapshot_date < :d
+                WHERE account_id = :account_id
+                  AND snapshot_date < :d
                 ORDER BY snapshot_date DESC, snapshot_at DESC
                 LIMIT 1
                 """
             ),
-            {"d": d},
+            {"account_id": account_id, "d": d},
         )
         .mappings()
         .first()
     )
 
 
-def get_first_snapshot_in_period(session, from_date: date, to_date: date):
+def get_first_snapshot_in_period(session, account_id: str, from_date: date, to_date: date):
     return (
         session.execute(
             text(
                 """
                 SELECT snapshot_date, total_value
                 FROM portfolio_snapshots
-                WHERE snapshot_date >= :from_date
+                WHERE account_id = :account_id
+                  AND snapshot_date >= :from_date
                   AND snapshot_date < :to_date
                 ORDER BY snapshot_date ASC, snapshot_at ASC
                 LIMIT 1
                 """
             ),
-            {"from_date": from_date, "to_date": to_date},
+            {"account_id": account_id, "from_date": from_date, "to_date": to_date},
         )
         .mappings()
         .first()
     )
 
 
-def get_deposits_sum_for_period(session, start_dt: datetime, end_dt: datetime) -> float:
+def get_deposits_sum_for_period(session, account_id: str, start_dt: datetime, end_dt: datetime) -> float:
     row = session.execute(
         text(
             f"""
             {OPERATIONS_DEDUP_CTE}
             SELECT COALESCE(SUM(amount), 0) AS s
             FROM operations_dedup
-            WHERE date >= :start_dt
+            WHERE account_id = :account_id
+              AND date >= :start_dt
               AND date < :end_dt
               AND state = :executed_state
               AND operation_type = 'OPERATION_TYPE_INPUT'
             """
         ),
         {
+            "account_id": account_id,
             "start_dt": start_dt,
             "end_dt": end_dt,
             "executed_state": EXECUTED_OPERATION_STATE,
@@ -1156,17 +2135,28 @@ def get_deposits_sum_for_period(session, start_dt: datetime, end_dt: datetime) -
     ).scalar_one()
     return float(row or 0)
 
-def get_portfolio_timeseries_agg_by_date(session):
+def get_portfolio_timeseries_agg_by_date(session, account_id: str):
     rows = (
         session.execute(
             text(
                 """
-        SELECT snapshot_date, SUM(total_value) AS total_value
-        FROM portfolio_snapshots
-        GROUP BY snapshot_date
+        SELECT snapshot_date, total_value
+        FROM (
+            SELECT
+                snapshot_date,
+                total_value,
+                ROW_NUMBER() OVER (
+                    PARTITION BY snapshot_date
+                    ORDER BY snapshot_at DESC, id DESC
+                ) AS rn
+            FROM portfolio_snapshots
+            WHERE account_id = :account_id
+        ) daily
+        WHERE rn = 1
         ORDER BY snapshot_date ASC
         """
-            )
+            ),
+            {"account_id": account_id},
         )
         .mappings()
         .all()
@@ -1174,21 +2164,25 @@ def get_portfolio_timeseries_agg_by_date(session):
     return rows
 
 
-def get_deposits_raw(
-    session,
-    operation_types: tuple[str, ...] = DEPOSIT_OPERATION_TYPES,
-):
+def get_external_cashflows_raw(session, account_id: str):
     rows = (
         session.execute(
             text(
-                """
-        SELECT date, amount
-        FROM operations
-        WHERE operation_type IN :operation_types
+                f"""
+        {OPERATIONS_DEDUP_CTE}
+        SELECT date, amount, operation_type
+        FROM operations_dedup
+        WHERE account_id = :account_id
+          AND operation_type IN :operation_types
+          AND state = :executed_state
         ORDER BY date ASC
         """
             ).bindparams(bindparam("operation_types", expanding=True)),
-            {"operation_types": operation_types},
+            {
+                "account_id": account_id,
+                "operation_types": DEPOSIT_OPERATION_TYPES + WITHDRAWAL_OPERATION_TYPES,
+                "executed_state": EXECUTED_OPERATION_STATE,
+            },
         )
         .mappings()
         .all()
@@ -1196,7 +2190,7 @@ def get_deposits_raw(
     return rows
 
 
-def get_max_value_before_date(session, d: date | None):
+def get_max_value_before_date(session, account_id: str, d: date | None):
     if d is None:
         return None
     row = session.execute(
@@ -1204,15 +2198,16 @@ def get_max_value_before_date(session, d: date | None):
             """
         SELECT MAX(total_value) AS m
         FROM portfolio_snapshots
-        WHERE snapshot_date < :d
+        WHERE account_id = :account_id
+          AND snapshot_date < :d
         """
         ),
-        {"d": d},
+        {"account_id": account_id, "d": d},
     ).scalar_one()
     return float(row) if row is not None else None
 
 
-def get_max_value_to_date(session, d: date | None):
+def get_max_value_to_date(session, account_id: str, d: date | None):
     if d is None:
         return None
     row = session.execute(
@@ -1220,10 +2215,11 @@ def get_max_value_to_date(session, d: date | None):
             """
         SELECT MAX(total_value) AS m
         FROM portfolio_snapshots
-        WHERE snapshot_date <= :d
+        WHERE account_id = :account_id
+          AND snapshot_date <= :d
         """
         ),
-        {"d": d},
+        {"account_id": account_id, "d": d},
     ).scalar_one()
     return float(row) if row is not None else None
 
@@ -1241,11 +2237,15 @@ def build_today_summary() -> str:
     day_end = day_end_exclusive - timedelta(microseconds=1)
 
     with db_session() as session:
-        snaps = get_latest_snapshots(session, limit=2)
-        total_deposits = get_total_deposits(session)
-        coupons, dividends = get_income_for_period(session, day_start, day_end)
-        commissions = get_commissions_for_period(session, day_start, day_end)
-        taxes = get_taxes_for_period(session, day_start, day_end)
+        account_id = resolve_reporting_account_id(session)
+        if account_id is None:
+            return REPORTING_ACCOUNT_UNAVAILABLE_TEXT
+
+        snaps = get_latest_snapshots(session, account_id, limit=2)
+        total_deposits = get_total_deposits(session, account_id)
+        coupons, dividends = get_income_for_period(session, account_id, day_start, day_end)
+        commissions = get_commissions_for_period(session, account_id, day_start, day_end)
+        taxes = get_taxes_for_period(session, account_id, day_start, day_end)
 
     if not snaps:
         return "Пока нет ни одного снапшота портфеля."
@@ -1310,8 +2310,12 @@ def build_week_summary() -> str:
     week_end = week_end_exclusive - timedelta(microseconds=1)
 
     with db_session() as session:
+        account_id = resolve_reporting_account_id(session)
+        if account_id is None:
+            return REPORTING_ACCOUNT_UNAVAILABLE_TEXT
+
         # 1. Определяем даты текущей рабочей недели (понедельник–пятница)
-        latest_snap = get_latest_snapshot_with_id(session)
+        latest_snap = get_latest_snapshot_with_id(session, account_id)
         if not latest_snap:
             return "Пока нет ни одного снапшота портфеля."
 
@@ -1334,18 +2338,8 @@ def build_week_summary() -> str:
         # Ищем снапшот до начала недели, чтобы посчитать дельту
         # Если снапшота ровно в start_date нет, берем ближайший предыдущий
         # Если портфель моложе недели, берем самый первый
-        start_val_row = session.execute(
-            text(
-                """
-            SELECT total_value
-            FROM portfolio_snapshots
-            WHERE snapshot_date < :d
-            ORDER BY snapshot_date DESC, snapshot_at DESC
-            LIMIT 1
-            """
-            ),
-            {"d": week_start_date},
-        ).scalar()
+        start_row = get_last_snapshot_before_date(session, account_id, week_start_date)
+        start_val_row = start_row["total_value"] if start_row is not None else None
 
         start_value = float(start_val_row) if start_val_row is not None else 0.0
 
@@ -1364,14 +2358,14 @@ def build_week_summary() -> str:
             week_delta_pct = 0.0 # Или None, как удобнее
 
         # 4. Пополнения/доходы/расходы за текущую рабочую неделю
-        dep_week = get_deposits_for_period(session, week_start, week_end_exclusive)
-        coupons, dividends = get_income_for_period(session, week_start, week_end)
-        commissions = get_commissions_for_period(session, week_start, week_end)
-        taxes = get_taxes_for_period(session, week_start, week_end)
+        dep_week = get_deposits_for_period(session, account_id, week_start, week_end_exclusive)
+        coupons, dividends = get_income_for_period(session, account_id, week_start, week_end)
+        commissions = get_commissions_for_period(session, account_id, week_start, week_end)
+        taxes = get_taxes_for_period(session, account_id, week_start, week_end)
 
         # 5. Прогресс по годовому плану
         year_start = datetime(week_end_date.year, 1, 1)
-        dep_year = get_deposits_for_period(session, year_start, week_end_exclusive)
+        dep_year = get_deposits_for_period(session, account_id, year_start, week_end_exclusive)
         
         plan = PLAN_ANNUAL_CONTRIB_RUB
         plan_pct = (dep_year / plan * 100.0) if plan > 0 else 0.0
@@ -1441,26 +2435,32 @@ def build_month_summary() -> str:
     next_year_start = date(year + 1, 1, 1)
 
     with db_session() as session:
+        account_id = resolve_reporting_account_id(session)
+        if account_id is None:
+            return REPORTING_ACCOUNT_UNAVAILABLE_TEXT
+
         # Пополнения за месяц
         dep_month = get_deposits_for_period(
             session,
+            account_id=account_id,
             start_dt=month_start_dt,
             end_dt=month_end_exclusive,
         )
 
-        coupons, dividends = get_income_for_period(session, month_start_dt, month_end_dt)
-        commissions = get_commissions_for_period(session, month_start_dt, month_end_dt)
-        taxes = get_taxes_for_period(session, month_start_dt, month_end_dt)
+        coupons, dividends = get_income_for_period(session, account_id, month_start_dt, month_end_dt)
+        commissions = get_commissions_for_period(session, account_id, month_start_dt, month_end_dt)
+        taxes = get_taxes_for_period(session, account_id, month_start_dt, month_end_dt)
 
         # Пополнения за год
         dep_year = get_deposits_for_period(
             session,
+            account_id=account_id,
             start_dt=datetime(year, 1, 1),
             end_dt=month_end_exclusive,
         )
 
         # Снапшоты для изменения стоимости за месяц
-        start_snap, end_snap = get_month_snapshots(session, year, month)
+        start_snap, end_snap = get_month_snapshots(session, account_id, year, month)
 
         start_positions = []
         end_positions = []
@@ -1552,6 +2552,644 @@ def _instrument_type_to_group(instr_type: str | None) -> str:
     return "Другое"
 
 
+def quantize_ruble_amount(value: Decimal | float | int | None) -> Decimal:
+    return normalize_decimal(value).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+
+
+def format_decimal_number(
+    value: Decimal | float | int | None,
+    *,
+    precision: int = 2,
+    signed: bool = False,
+) -> str:
+    decimal_value = normalize_decimal(value)
+    quantizer = Decimal("1") if precision == 0 else Decimal(f"1.{'0' * precision}")
+    quantized = decimal_value.quantize(quantizer, rounding=ROUND_HALF_UP)
+    text_value = format(quantized, "f")
+    if "." in text_value:
+        text_value = text_value.rstrip("0").rstrip(".")
+    if signed and quantized >= 0:
+        text_value = f"+{text_value}"
+    return text_value
+
+
+def format_decimal_pct(
+    value: Decimal | float | int | None,
+    *,
+    precision: int = 2,
+    signed: bool = False,
+) -> str:
+    return f"{format_decimal_number(value, precision=precision, signed=signed)} %"
+
+
+def format_decimal_pp(
+    value: Decimal | float | int | None,
+    *,
+    precision: int = 2,
+    signed: bool = False,
+) -> str:
+    return f"{format_decimal_number(value, precision=precision, signed=signed)} п.п."
+
+
+def format_rebalance_weight(value: Decimal | float | int | None) -> str:
+    decimal_value = normalize_decimal(value).quantize(Decimal("1.0"), rounding=ROUND_HALF_UP)
+    return f"{format(decimal_value, '.1f').replace('.', ',')}%"
+
+
+def format_human_date_ru(value: date | None) -> str:
+    if value is None:
+        return ""
+    return f"{value.day} {MONTHS_RU_GENITIVE[value.month]} {value.year}"
+
+
+def parse_decimal_input(raw_value: str, *, allow_zero: bool = True) -> Decimal:
+    cleaned = raw_value.strip().replace(" ", "").replace(",", ".")
+    if cleaned.endswith("%"):
+        cleaned = cleaned[:-1]
+    if cleaned.endswith("₽"):
+        cleaned = cleaned[:-1]
+    if not cleaned:
+        raise ValueError("Пустое значение недопустимо.")
+    try:
+        value = Decimal(cleaned)
+    except InvalidOperation as exc:
+        raise ValueError(f"Не удалось разобрать число: {raw_value}") from exc
+    if not allow_zero and value <= 0:
+        raise ValueError("Сумма должна быть положительной.")
+    return value
+
+
+def parse_rebalance_targets_args(args: list[str]) -> dict[str, Decimal]:
+    if not args:
+        raise ValueError(TARGETS_USAGE_TEXT)
+
+    targets: dict[str, Decimal] = {}
+    for token in args:
+        if "=" not in token:
+            raise ValueError(TARGETS_USAGE_TEXT)
+        raw_key, raw_value = token.split("=", 1)
+        key = raw_key.strip().lower()
+        asset_class = REBALANCE_TARGET_ALIASES.get(key)
+        if asset_class is None:
+            raise ValueError(f"Неизвестный класс `{raw_key}`. Поддерживаются: stocks, bonds, etf, cash.")
+        if asset_class in targets:
+            raise ValueError(f"Класс `{asset_class}` указан несколько раз.")
+
+        value = parse_decimal_input(raw_value)
+        if value < 0:
+            raise ValueError("Таргеты не могут быть отрицательными.")
+        targets[asset_class] = value
+
+    normalized = {
+        asset_class: targets.get(asset_class, Decimal("0"))
+        for asset_class in REBALANCE_ASSET_CLASSES
+    }
+    if sum(normalized.values()) != Decimal("100"):
+        raise ValueError("Сумма таргетов должна быть ровно 100.")
+    return normalized
+
+
+def aggregate_rebalance_values_by_class(
+    positions: list[dict] | None,
+) -> tuple[dict[str, Decimal], dict[str, Decimal]]:
+    class_values = {
+        asset_class: Decimal("0")
+        for asset_class in REBALANCE_ASSET_CLASSES
+    }
+    other_groups: dict[str, Decimal] = {}
+
+    for pos in positions or []:
+        group_name = _instrument_type_to_group(pos.get("instrument_type"))
+        position_value = normalize_decimal(pos.get("position_value"))
+        asset_class = REBALANCE_GROUP_TO_CLASS.get(group_name)
+        if asset_class is not None:
+            class_values[asset_class] += position_value
+            continue
+        other_groups[group_name] = other_groups.get(group_name, Decimal("0")) + position_value
+
+    return class_values, other_groups
+
+
+def compute_rebalance_plan(
+    class_values: dict[str, Decimal],
+    target_weights: dict[str, Decimal],
+) -> dict[str, Decimal | list[dict[str, Decimal | str]]]:
+    rebalanceable_base = sum(class_values.get(asset_class, Decimal("0")) for asset_class in REBALANCE_ASSET_CLASSES)
+    rows: list[dict[str, Decimal | str]] = []
+
+    for asset_class in REBALANCE_ASSET_CLASSES:
+        current_value = normalize_decimal(class_values.get(asset_class))
+        target_pct = normalize_decimal(target_weights.get(asset_class))
+        current_pct = (
+            current_value * Decimal("100") / rebalanceable_base
+            if rebalanceable_base > 0
+            else Decimal("0")
+        )
+        delta_pct = current_pct - target_pct
+        target_value = rebalanceable_base * target_pct / Decimal("100")
+        delta_value = target_value - current_value
+        rows.append(
+            {
+                "asset_class": asset_class,
+                "label": REBALANCE_CLASS_LABELS[asset_class],
+                "current_value": current_value,
+                "current_pct": current_pct,
+                "target_pct": target_pct,
+                "delta_pct": delta_pct,
+                "target_value": target_value,
+                "delta_value": delta_value,
+                "status": "в норме" if abs(delta_pct) <= REBALANCE_TOLERANCE_PCT else "вне нормы",
+            }
+        )
+
+    return {
+        "rebalanceable_base": rebalanceable_base,
+        "rows": rows,
+    }
+
+
+def compute_invest_plan(
+    class_values: dict[str, Decimal],
+    target_weights: dict[str, Decimal],
+    deposit_amount: Decimal | float | int,
+) -> dict[str, Decimal | dict[str, Decimal]]:
+    rounded_deposit = quantize_ruble_amount(deposit_amount)
+    if rounded_deposit <= 0:
+        raise ValueError("Сумма должна быть положительной и не меньше 1 ₽.")
+
+    rebalanceable_base = sum(class_values.get(asset_class, Decimal("0")) for asset_class in REBALANCE_ASSET_CLASSES)
+    deficits = {asset_class: Decimal("0") for asset_class in REBALANCE_ASSET_CLASSES}
+    raw_allocations = {asset_class: Decimal("0") for asset_class in REBALANCE_ASSET_CLASSES}
+
+    if rebalanceable_base <= 0:
+        for asset_class in REBALANCE_ASSET_CLASSES:
+            raw_allocations[asset_class] = rounded_deposit * normalize_decimal(target_weights.get(asset_class)) / Decimal("100")
+            deficits[asset_class] = raw_allocations[asset_class]
+    else:
+        new_base = rebalanceable_base + rounded_deposit
+        for asset_class in REBALANCE_ASSET_CLASSES:
+            desired_value = new_base * normalize_decimal(target_weights.get(asset_class)) / Decimal("100")
+            deficits[asset_class] = max(desired_value - normalize_decimal(class_values.get(asset_class)), Decimal("0"))
+
+        total_deficit = sum(deficits.values())
+        if total_deficit > 0:
+            for asset_class in REBALANCE_ASSET_CLASSES:
+                raw_allocations[asset_class] = rounded_deposit * deficits[asset_class] / total_deficit
+        else:
+            for asset_class in REBALANCE_ASSET_CLASSES:
+                raw_allocations[asset_class] = rounded_deposit * normalize_decimal(target_weights.get(asset_class)) / Decimal("100")
+                deficits[asset_class] = raw_allocations[asset_class]
+
+    allocations = {
+        asset_class: quantize_ruble_amount(raw_allocations.get(asset_class))
+        for asset_class in REBALANCE_ASSET_CLASSES
+    }
+    residue = rounded_deposit - sum(allocations.values())
+    if residue != 0:
+        residue_asset_class = max(
+            REBALANCE_ASSET_CLASSES,
+            key=lambda asset_class: (
+                deficits.get(asset_class, Decimal("0")),
+                normalize_decimal(target_weights.get(asset_class)),
+            ),
+        )
+        allocations[residue_asset_class] += residue
+
+    return {
+        "deposit_amount": rounded_deposit,
+        "rebalanceable_base": rebalanceable_base,
+        "deficits": deficits,
+        "allocations": allocations,
+    }
+
+
+def get_rebalance_targets(session, account_id: str) -> dict[str, Decimal] | None:
+    try:
+        rows = (
+            session.execute(
+                text(
+                    """
+                    SELECT asset_class, target_weight_pct
+                    FROM rebalance_targets
+                    WHERE account_id = :account_id
+                    """
+                ),
+                {"account_id": account_id},
+            )
+            .mappings()
+            .all()
+        )
+    except Exception as exc:
+        if _is_undefined_table_error(exc, "rebalance_targets"):
+            session.rollback()
+            return None
+        raise
+
+    if not rows:
+        return {}
+
+    targets = {
+        asset_class: Decimal("0")
+        for asset_class in REBALANCE_ASSET_CLASSES
+    }
+    for row in rows:
+        asset_class = row["asset_class"]
+        if asset_class in targets:
+            targets[asset_class] = normalize_decimal(row["target_weight_pct"])
+    return targets
+
+
+def replace_rebalance_targets(session, account_id: str, targets: dict[str, Decimal]) -> bool:
+    try:
+        now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
+        session.execute(
+            text("DELETE FROM rebalance_targets WHERE account_id = :account_id"),
+            {"account_id": account_id},
+        )
+        session.execute(
+            text(
+                """
+                INSERT INTO rebalance_targets (
+                    account_id,
+                    asset_class,
+                    target_weight_pct,
+                    created_at,
+                    updated_at
+                )
+                VALUES (
+                    :account_id,
+                    :asset_class,
+                    :target_weight_pct,
+                    :created_at,
+                    :updated_at
+                )
+                """
+            ),
+            [
+                {
+                    "account_id": account_id,
+                    "asset_class": asset_class,
+                    "target_weight_pct": decimal_to_str(targets[asset_class]),
+                    "created_at": now_utc,
+                    "updated_at": now_utc,
+                }
+                for asset_class in REBALANCE_ASSET_CLASSES
+            ],
+        )
+        session.commit()
+    except Exception as exc:
+        session.rollback()
+        if _is_undefined_table_error(exc, "rebalance_targets"):
+            return False
+        raise
+    return True
+
+
+def bootstrap_invest_notifications(session, account_id: str) -> bool:
+    try:
+        existing_count = session.execute(
+            text(
+                """
+                SELECT COUNT(*)
+                FROM invest_notifications
+                WHERE account_id = :account_id
+                """
+            ),
+            {"account_id": account_id},
+        ).scalar_one()
+    except Exception as exc:
+        if _is_undefined_table_error(exc, "invest_notifications"):
+            session.rollback()
+            return False
+        raise
+
+    if existing_count:
+        return True
+
+    bootstrap_cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(minutes=2)
+    created_at = datetime.now(timezone.utc).replace(tzinfo=None)
+    session.execute(
+        text(
+            f"""
+            {OPERATIONS_DEDUP_CTE}
+            INSERT INTO invest_notifications (
+                account_id,
+                operation_id,
+                operation_date,
+                amount,
+                created_at
+            )
+            SELECT
+                operations_dedup.account_id,
+                operations_dedup.operation_id,
+                operations_dedup.date,
+                ABS(operations_dedup.amount),
+                :created_at
+            FROM operations_dedup
+            WHERE operations_dedup.account_id = :account_id
+              AND operations_dedup.operation_type IN :operation_types
+              AND operations_dedup.state = :executed_state
+              AND operations_dedup.date < :bootstrap_cutoff
+            ON CONFLICT (account_id, operation_id) DO NOTHING
+            """
+        ).bindparams(bindparam("operation_types", expanding=True)),
+        {
+            "account_id": account_id,
+            "operation_types": DEPOSIT_OPERATION_TYPES,
+            "executed_state": EXECUTED_OPERATION_STATE,
+            "bootstrap_cutoff": bootstrap_cutoff,
+            "created_at": created_at,
+        },
+    )
+    session.commit()
+    return True
+
+
+def get_pending_invest_notifications(session, account_id: str) -> list[dict] | None:
+    bootstrapped = bootstrap_invest_notifications(session, account_id)
+    if not bootstrapped:
+        return None
+
+    try:
+        rows = (
+            session.execute(
+                text(
+                    f"""
+                    {OPERATIONS_DEDUP_CTE}
+                    SELECT
+                        operations_dedup.operation_id,
+                        operations_dedup.date,
+                        ABS(operations_dedup.amount) AS amount
+                    FROM operations_dedup
+                    LEFT JOIN invest_notifications notified
+                      ON notified.account_id = operations_dedup.account_id
+                     AND notified.operation_id = operations_dedup.operation_id
+                    WHERE operations_dedup.account_id = :account_id
+                      AND operations_dedup.operation_type IN :operation_types
+                      AND operations_dedup.state = :executed_state
+                      AND notified.operation_id IS NULL
+                    ORDER BY operations_dedup.date ASC
+                    """
+                ).bindparams(bindparam("operation_types", expanding=True)),
+                {
+                    "account_id": account_id,
+                    "operation_types": DEPOSIT_OPERATION_TYPES,
+                    "executed_state": EXECUTED_OPERATION_STATE,
+                },
+            )
+            .mappings()
+            .all()
+        )
+    except Exception as exc:
+        if _is_undefined_table_error(exc, "invest_notifications"):
+            session.rollback()
+            return None
+        raise
+    return rows
+
+
+def mark_invest_notification_sent(
+    session,
+    *,
+    account_id: str,
+    operation_id: str,
+    operation_date: datetime,
+    amount: Decimal,
+) -> bool:
+    try:
+        created_at = datetime.now(timezone.utc).replace(tzinfo=None)
+        session.execute(
+            text(
+                """
+                INSERT INTO invest_notifications (
+                    account_id,
+                    operation_id,
+                    operation_date,
+                    amount,
+                    created_at
+                )
+                VALUES (
+                    :account_id,
+                    :operation_id,
+                    :operation_date,
+                    :amount,
+                    :created_at
+                )
+                ON CONFLICT (account_id, operation_id) DO NOTHING
+                """
+            ),
+            {
+                "account_id": account_id,
+                "operation_id": operation_id,
+                "operation_date": operation_date,
+                "amount": decimal_to_str(amount),
+                "created_at": created_at,
+            },
+        )
+        session.commit()
+    except Exception as exc:
+        session.rollback()
+        if _is_undefined_table_error(exc, "invest_notifications"):
+            return False
+        raise
+    return True
+
+
+def get_latest_rebalance_snapshot(session, account_id: str) -> dict:
+    latest_snapshot = get_latest_snapshot_with_id(session, account_id)
+    positions: list[dict] = []
+    snapshot_date: date | None = None
+    total_portfolio_value = Decimal("0")
+    if latest_snapshot:
+        snapshot_date = latest_snapshot["snapshot_date"]
+        total_portfolio_value = normalize_decimal(latest_snapshot["total_value"])
+        positions = get_positions_for_snapshot(session, latest_snapshot["id"])
+
+    class_values, other_groups = aggregate_rebalance_values_by_class(positions)
+    if total_portfolio_value <= 0:
+        total_portfolio_value = sum(class_values.values()) + sum(other_groups.values())
+
+    return {
+        "snapshot_date": snapshot_date,
+        "total_portfolio_value": total_portfolio_value,
+        "class_values": class_values,
+        "other_groups": other_groups,
+    }
+
+
+def _build_rebalance_diff_lines(rows: list[dict[str, Decimal | str]]) -> list[str]:
+    lines: list[str] = []
+    for row in rows:
+        lines.append(
+            f"- {'✅' if row['status'] == 'в норме' else '⚠️'} "
+            f"{row['label']}: {format_rebalance_weight(row['current_pct'])} / "
+            f"{format_rebalance_weight(row['target_pct'])}"
+        )
+    return lines
+
+
+def _build_out_of_model_lines(
+    other_groups: dict[str, Decimal],
+    total_portfolio_value: Decimal,
+) -> list[str]:
+    if not other_groups:
+        return []
+
+    lines = ["Вне модели:"]
+    sorted_groups = sorted(other_groups.items(), key=lambda item: item[1], reverse=True)
+    for group_name, group_value in sorted_groups:
+        share_pct = (
+            group_value * Decimal("100") / total_portfolio_value
+            if total_portfolio_value > 0
+            else Decimal("0")
+        )
+        lines.append(
+            f"- {group_name}: {fmt_decimal_rub(group_value, precision=0)} "
+            f"({format_decimal_pct(share_pct, precision=1)} портфеля)"
+        )
+    return lines
+
+
+def build_targets_text_for_account(session, account_id: str) -> str:
+    targets = get_rebalance_targets(session, account_id)
+    if targets is None:
+        return REBALANCE_FEATURE_UNAVAILABLE_TEXT
+    if not targets:
+        return REBALANCE_TARGETS_NOT_CONFIGURED_TEXT
+
+    snapshot = get_latest_rebalance_snapshot(session, account_id)
+    rebalance_plan = compute_rebalance_plan(snapshot["class_values"], targets)
+    snapshot_date = snapshot["snapshot_date"]
+
+    header = "🎯 Таргеты аллокации"
+    if snapshot_date is not None:
+        header += f" (на {snapshot_date.isoformat()})"
+
+    lines = [header, "", "Текущие таргеты (факт / план):"]
+    lines.extend(_build_rebalance_diff_lines(rebalance_plan["rows"]))
+
+    out_of_model_lines = _build_out_of_model_lines(
+        snapshot["other_groups"],
+        snapshot["total_portfolio_value"],
+    )
+    if out_of_model_lines:
+        lines.append("")
+        lines.extend(out_of_model_lines)
+
+    if snapshot_date is None:
+        lines.append("")
+        lines.append("Фактическая структура появится после первого снапшота.")
+
+    return "\n".join(lines)
+
+
+def build_rebalance_text_for_account(session, account_id: str) -> str:
+    targets = get_rebalance_targets(session, account_id)
+    if targets is None:
+        return REBALANCE_FEATURE_UNAVAILABLE_TEXT
+    if not targets:
+        return REBALANCE_TARGETS_NOT_CONFIGURED_TEXT
+
+    snapshot = get_latest_rebalance_snapshot(session, account_id)
+    rebalance_plan = compute_rebalance_plan(snapshot["class_values"], targets)
+    snapshot_date = snapshot["snapshot_date"]
+
+    header = "⚖️ Ребаланс"
+    lines = [header]
+    if snapshot_date is not None:
+        lines.extend(["", format_human_date_ru(snapshot_date)])
+    lines.extend(["", "Текущие таргеты (факт / план):"])
+    lines.extend(_build_rebalance_diff_lines(rebalance_plan["rows"]))
+
+    out_of_model_lines = _build_out_of_model_lines(
+        snapshot["other_groups"],
+        snapshot["total_portfolio_value"],
+    )
+    if out_of_model_lines:
+        lines.append("")
+        lines.extend(out_of_model_lines)
+
+    sell_rows: list[tuple[str, Decimal]] = []
+    buy_rows: list[tuple[str, Decimal]] = []
+    for row in rebalance_plan["rows"]:
+        delta_value = quantize_ruble_amount(row["delta_value"])
+        if delta_value > 0:
+            buy_rows.append((row["label"], delta_value))
+        elif delta_value < 0:
+            sell_rows.append((row["label"], abs(delta_value)))
+
+    sell_rows.sort(key=lambda item: item[1], reverse=True)
+    buy_rows.sort(key=lambda item: item[1], reverse=True)
+
+    lines.append("")
+    lines.append("Чтобы поймать баланс сейчас:")
+    if sell_rows:
+        lines.extend(["", "📉 Продать:"])
+        for label, amount in sell_rows:
+            lines.append(f"- {label}: {fmt_decimal_rub(amount, precision=0)}")
+    if buy_rows:
+        lines.extend(["", "📈 Купить:"])
+        for label, amount in buy_rows:
+            lines.append(f"- {label}: {fmt_decimal_rub(amount, precision=0)}")
+    if not sell_rows and not buy_rows:
+        lines.append("")
+        lines.append("Баланс уже близок к целевому, действий не требуется.")
+
+    if snapshot["other_groups"]:
+        lines.append("")
+        lines.append(
+            "Расчёт buy/sell сделан по ребалансируемой части портфеля: "
+            f"{fmt_decimal_rub(rebalance_plan['rebalanceable_base'], precision=0)}."
+        )
+
+    return "\n".join(lines)
+
+
+def build_invest_text_for_account(
+    session,
+    account_id: str,
+    deposit_amount: Decimal | float | int,
+    *,
+    header: str | None = None,
+) -> str:
+    targets = get_rebalance_targets(session, account_id)
+    if targets is None:
+        return REBALANCE_FEATURE_UNAVAILABLE_TEXT
+    if not targets:
+        return REBALANCE_TARGETS_NOT_CONFIGURED_TEXT
+
+    snapshot = get_latest_rebalance_snapshot(session, account_id)
+    rebalance_plan = compute_rebalance_plan(snapshot["class_values"], targets)
+    invest_plan = compute_invest_plan(snapshot["class_values"], targets, deposit_amount)
+
+    lines = [header or f"💸 Как распределить пополнение {fmt_decimal_rub(invest_plan['deposit_amount'], precision=0)}"]
+    lines.append("")
+    lines.append("Текущие таргеты (факт / план):")
+    lines.extend(_build_rebalance_diff_lines(rebalance_plan["rows"]))
+
+    out_of_model_lines = _build_out_of_model_lines(
+        snapshot["other_groups"],
+        snapshot["total_portfolio_value"],
+    )
+    if out_of_model_lines:
+        lines.append("")
+        lines.extend(out_of_model_lines)
+
+    lines.append("")
+    lines.append(f"Распределение пополнения {fmt_decimal_rub(invest_plan['deposit_amount'], precision=0)}:")
+    for asset_class in REBALANCE_ASSET_CLASSES:
+        allocation = invest_plan["allocations"][asset_class]
+        lines.append(
+            f"- {REBALANCE_CLASS_LABELS[asset_class]}: {fmt_decimal_rub(allocation, precision=0)}"
+        )
+
+    if snapshot["other_groups"]:
+        lines.append("")
+        lines.append("Классы вне модели не участвуют в распределении пополнения.")
+
+    return "\n".join(lines)
+
+
 def build_structure_text() -> str:
     """
     Структура портфеля по последнему снапшоту, с разбивкой по типам:
@@ -1561,7 +3199,11 @@ def build_structure_text() -> str:
     - внутри блока — бумаги по убыванию суммы
     """
     with db_session() as session:
-        snap = get_latest_snapshot_with_id(session)
+        account_id = resolve_reporting_account_id(session)
+        if account_id is None:
+            return REPORTING_ACCOUNT_UNAVAILABLE_TEXT
+
+        snap = get_latest_snapshot_with_id(session, account_id)
         if not snap:
             return "Нет ни одного снапшота портфеля."
 
@@ -1699,8 +3341,12 @@ def build_history_chart(path: str) -> str | None:
     Ось X — понедельная разметка.
     """
     with db_session() as session:
-        ts = get_portfolio_timeseries(session)
-        deps = get_deposits_by_date(session)
+        account_id = resolve_reporting_account_id(session)
+        if account_id is None:
+            raise ValueError(REPORTING_ACCOUNT_UNAVAILABLE_TEXT)
+
+        ts = get_portfolio_timeseries(session, account_id)
+        deps = get_deposits_by_date(session, account_id)
 
     if len(ts) < 2:
         return None
@@ -1745,19 +3391,86 @@ def build_history_chart(path: str) -> str | None:
         total_d = sum(relevant_deps)
         cum_deps.append(total_d)
 
-    fig, ax = plt.subplots(figsize=(10, 4))
+    fig, ax = plt.subplots(figsize=(10.5, 4.8))
+    set_chart_header(
+        fig,
+        f"{ACCOUNT_FRIENDLY_NAME}: портфель и пополнения",
+        "Разница между линиями показывает результат сверх пополнений.",
+    )
+    apply_chart_style(ax, rub_axis_formatter)
 
-    ax.plot(week_dates, values, label="Стоимость портфеля")
     if cum_deps:
-        ax.plot(week_dates, cum_deps, linestyle="--", label="Сумма пополнений")
+        positive_gap = [value >= dep for value, dep in zip(values, cum_deps)]
+        negative_gap = [value < dep for value, dep in zip(values, cum_deps)]
+        ax.fill_between(
+            week_dates,
+            values,
+            cum_deps,
+            where=positive_gap,
+            color=CHART_COLORS["positive_fill"],
+            alpha=0.8,
+            interpolate=True,
+            zorder=1,
+        )
+        ax.fill_between(
+            week_dates,
+            values,
+            cum_deps,
+            where=negative_gap,
+            color=CHART_COLORS["negative_fill"],
+            alpha=0.8,
+            interpolate=True,
+            zorder=1,
+        )
+        ax.plot(
+            week_dates,
+            cum_deps,
+            color=CHART_COLORS["deposits"],
+            linewidth=2.0,
+            linestyle=(0, (4, 3)),
+            zorder=2,
+        )
 
-    ax.set_title(ACCOUNT_FRIENDLY_NAME)
-    ax.set_ylabel("₽")
-    ax.grid(True, alpha=0.3)
-    ax.legend()
-    fig.autofmt_xdate()
-    fig.tight_layout()
-    fig.savefig(path, dpi=150)
+    ax.plot(
+        week_dates,
+        values,
+        color=CHART_COLORS["portfolio"],
+        linewidth=2.6,
+        zorder=3,
+    )
+
+    tick_dates, tick_labels = build_date_ticks(week_dates, max_ticks=7)
+    ax.set_xticks(tick_dates)
+    ax.set_xticklabels(tick_labels)
+    ax.set_ylabel("Стоимость")
+    ax.margins(x=0.03, y=0.14)
+
+    portfolio_offset = 12
+    deposits_offset = -14 if values[-1] >= cum_deps[-1] else 12
+    if abs(values[-1] - cum_deps[-1]) < max(values[-1], cum_deps[-1], 1.0) * 0.07:
+        portfolio_offset = 18
+        deposits_offset = -18
+
+    annotate_series_last_point(
+        ax,
+        week_dates,
+        values,
+        f"Портфель {fmt_compact_rub(values[-1])}",
+        CHART_COLORS["portfolio"],
+        y_offset=portfolio_offset,
+    )
+    if cum_deps:
+        annotate_series_last_point(
+            ax,
+            week_dates,
+            cum_deps,
+            f"Пополнения {fmt_compact_rub(cum_deps[-1])}",
+            CHART_COLORS["deposits"],
+            y_offset=deposits_offset,
+        )
+
+    fig.tight_layout(rect=(0, 0, 1, 0.9))
+    fig.savefig(path, dpi=170, facecolor=fig.get_facecolor())
     plt.close(fig)
 
     return path
@@ -1770,8 +3483,12 @@ def build_year_chart(path: str, year: int, end_date_exclusive: date) -> str | No
     is_ytd = end_date_exclusive.year == year and end_date_exclusive <= (datetime.now(TZ).date() + timedelta(days=1))
 
     with db_session() as session:
-        portfolio_rows = get_monthly_portfolio_values(session, period_start_dt, period_end_dt_exclusive, is_ytd)
-        deposits_rows = get_monthly_deposits(session, period_start_dt, period_end_dt_exclusive)
+        account_id = resolve_reporting_account_id(session)
+        if account_id is None:
+            raise ValueError(REPORTING_ACCOUNT_UNAVAILABLE_TEXT)
+
+        portfolio_rows = get_monthly_portfolio_values(session, account_id, period_start_dt, period_end_dt_exclusive, is_ytd)
+        deposits_rows = get_monthly_deposits(session, account_id, period_start_dt, period_end_dt_exclusive)
 
     if not portfolio_rows:
         return None
@@ -1788,21 +3505,94 @@ def build_year_chart(path: str, year: int, end_date_exclusive: date) -> str | No
     months = sorted(portfolio_by_month.keys())
     portfolio_values = [portfolio_by_month[m] for m in months]
     deposits_values = [deposits_by_month.get(m, 0.0) for m in months]
-    labels = [m.strftime("%Y-%m") for m in months]
 
-    fig, ax = plt.subplots(figsize=(10, 4))
     x = list(range(len(months)))
-    ax.bar(x, portfolio_values, width=0.8, label="Стоимость портфеля")
-    ax.bar(x, deposits_values, width=0.45, label="Пополнения")
+    chart_title = f"{year} YTD: как рос портфель" if is_ytd else f"{year}: как рос портфель"
+    has_deposits = any(value != 0 for value in deposits_values)
+    chart_subtitle = (
+        "Сверху — стоимость на конец месяца, снизу — пополнения за месяц."
+        if has_deposits
+        else "Пополнений за этот период не было, поэтому показана только динамика портфеля."
+    )
 
-    ax.set_title(f"{year}: стоимость портфеля и пополнения")
-    ax.set_ylabel("₽")
-    ax.set_xticks(x)
-    ax.set_xticklabels(labels, rotation=45, ha="right")
-    ax.grid(True, alpha=0.3)
-    ax.legend()
-    fig.tight_layout()
-    fig.savefig(path, dpi=150)
+    if has_deposits:
+        fig, (ax_portfolio, ax_deposits) = plt.subplots(
+            2,
+            1,
+            figsize=(10.5, 5.9),
+            sharex=True,
+            gridspec_kw={"height_ratios": [2.2, 1.25]},
+        )
+    else:
+        fig, ax_portfolio = plt.subplots(figsize=(10.5, 4.6))
+        ax_deposits = None
+    set_chart_header(
+        fig,
+        chart_title,
+        chart_subtitle,
+    )
+
+    apply_chart_style(ax_portfolio, rub_axis_formatter)
+    if ax_deposits is not None:
+        apply_chart_style(ax_deposits, rub_axis_formatter)
+
+    if ax_deposits is not None:
+        ax_portfolio.fill_between(x, portfolio_values, color=CHART_COLORS["portfolio_fill"], alpha=0.65, zorder=1)
+    ax_portfolio.plot(
+        x,
+        portfolio_values,
+        color=CHART_COLORS["portfolio"],
+        linewidth=2.6,
+        marker="o",
+        markersize=4,
+        zorder=3,
+    )
+    ax_portfolio.set_ylabel("Портфель")
+    ax_portfolio.margins(x=0.04)
+    if ax_deposits is None:
+        set_value_axis_limits(ax_portfolio, portfolio_values, min_padding_ratio=0.18, flat_padding_ratio=0.03)
+    else:
+        ax_portfolio.margins(y=0.16)
+    annotate_series_last_point(
+        ax_portfolio,
+        x,
+        portfolio_values,
+        f"{fmt_compact_rub(portfolio_values[-1])}",
+        CHART_COLORS["portfolio"],
+        y_offset=12,
+    )
+
+    labels = build_month_tick_labels(months)
+    if ax_deposits is not None:
+        ax_deposits.bar(
+            x,
+            deposits_values,
+            width=0.58,
+            color=CHART_COLORS["deposits"],
+            edgecolor="none",
+            zorder=3,
+        )
+        ax_deposits.set_ylabel("Пополнения")
+        ax_deposits.margins(x=0.04)
+        max_deposit = max(deposits_values) if deposits_values else 0.0
+        upper_limit = max_deposit * 1.2 if max_deposit > 0 else 1.0
+        ax_deposits.set_ylim(0, upper_limit)
+        annotate_bar_values(
+            ax_deposits,
+            x,
+            deposits_values,
+            lambda value: fmt_compact_rub(value, precision=0),
+            text_color=CHART_COLORS["muted"],
+        )
+        ax_deposits.set_xticks(x)
+        ax_deposits.set_xticklabels(labels)
+        fig.tight_layout(rect=(0, 0, 1, 0.86), h_pad=1.2)
+    else:
+        ax_portfolio.set_xticks(x)
+        ax_portfolio.set_xticklabels(labels)
+        fig.tight_layout(rect=(0, 0, 1, 0.83))
+
+    fig.savefig(path, dpi=170, facecolor=fig.get_facecolor())
     plt.close(fig)
 
     return path
@@ -1815,8 +3605,12 @@ def build_year_monthly_delta_chart(path: str, year: int, end_date_exclusive: dat
     is_ytd = end_date_exclusive.year == year and end_date_exclusive <= (datetime.now(TZ).date() + timedelta(days=1))
 
     with db_session() as session:
-        portfolio_rows = get_monthly_portfolio_values(session, period_start_dt, period_end_dt_exclusive, is_ytd)
-        deposits_rows = get_monthly_deposits(session, period_start_dt, period_end_dt_exclusive)
+        account_id = resolve_reporting_account_id(session)
+        if account_id is None:
+            raise ValueError(REPORTING_ACCOUNT_UNAVAILABLE_TEXT)
+
+        portfolio_rows = get_monthly_portfolio_values(session, account_id, period_start_dt, period_end_dt_exclusive, is_ytd)
+        deposits_rows = get_monthly_deposits(session, account_id, period_start_dt, period_end_dt_exclusive)
 
         if not portfolio_rows:
             return None
@@ -1829,7 +3623,7 @@ def build_year_monthly_delta_chart(path: str, year: int, end_date_exclusive: dat
         months = [row["month_start"] for row in portfolio_rows]
         values = [float(row["total_value"] or 0) for row in portfolio_rows]
 
-        delta_points: list[tuple[str, float]] = []
+        delta_points: list[tuple[date, float]] = []
         first_month_start = months[0]
         first_month_end_exclusive = (
             date(first_month_start.year + 1, 1, 1)
@@ -1837,12 +3631,12 @@ def build_year_monthly_delta_chart(path: str, year: int, end_date_exclusive: dat
             else date(first_month_start.year, first_month_start.month + 1, 1)
         )
 
-        first_snapshot = get_first_snapshot_in_period(session, first_month_start, first_month_end_exclusive)
+        first_snapshot = get_first_snapshot_in_period(session, account_id, first_month_start, first_month_end_exclusive)
         first_month_base = float(first_snapshot["total_value"] or 0) if first_snapshot is not None else values[0]
         first_period_start = first_snapshot["snapshot_date"] if first_snapshot is not None else first_month_start
 
         if first_month_start.month == 1:
-            prev_snapshot = get_last_snapshot_before_date(session, first_month_start)
+            prev_snapshot = get_last_snapshot_before_date(session, account_id, first_month_start)
             if prev_snapshot is not None:
                 first_month_base = float(prev_snapshot["total_value"] or 0)
                 first_period_start = first_month_start
@@ -1852,39 +3646,65 @@ def build_year_monthly_delta_chart(path: str, year: int, end_date_exclusive: dat
         else:
             first_month_deposits = get_deposits_sum_for_period(
                 session,
+                account_id,
                 datetime.combine(first_period_start, time.min),
                 datetime.combine(first_month_end_exclusive, time.min),
             )
 
         first_month_delta = values[0] - first_month_base - first_month_deposits
-        delta_points.append((months[0].strftime("%Y-%m"), first_month_delta))
+        delta_points.append((months[0], first_month_delta))
 
         for idx in range(1, len(months)):
             month_start = months[idx]
             month_deposits = deposits_by_month.get(month_start, 0.0)
             month_delta = values[idx] - values[idx - 1] - month_deposits
-            delta_points.append((month_start.strftime("%Y-%m"), month_delta))
+            delta_points.append((month_start, month_delta))
 
     if not delta_points:
         return None
 
-    labels = [label for label, _ in delta_points]
+    month_labels = [month for month, _ in delta_points]
     deltas = [delta for _, delta in delta_points]
-    x = list(range(len(labels)))
-
-    fig, ax = plt.subplots(figsize=(10, 4))
-    ax.bar(x, deltas)
-    ax.axhline(0, linewidth=1)
+    x = list(range(len(month_labels)))
 
     title_prefix = f"{year} YTD" if is_ytd else str(year)
-    ax.set_title(f"{title_prefix}: прирост/падение по месяцам")
-    ax.set_ylabel("₽")
-    ax.set_xticks(x)
-    ax.set_xticklabels(labels, rotation=45, ha="right")
-    ax.grid(True, alpha=0.3)
+    best_idx = max(range(len(deltas)), key=lambda idx: deltas[idx])
+    worst_idx = min(range(len(deltas)), key=lambda idx: deltas[idx])
+    subtitle = (
+        f"Без пополнений. Лучший месяц: {format_month_short_label(month_labels[best_idx])} "
+        f"{fmt_compact_rub(deltas[best_idx], signed=True)}, "
+        f"худший: {format_month_short_label(month_labels[worst_idx])} "
+        f"{fmt_compact_rub(deltas[worst_idx], signed=True)}."
+    )
 
-    fig.tight_layout()
-    fig.savefig(path, dpi=150)
+    fig, ax = plt.subplots(figsize=(10.5, 4.8))
+    set_chart_header(fig, f"{title_prefix}: результат по месяцам", subtitle)
+    apply_chart_style(ax, rub_axis_formatter)
+
+    bar_colors = []
+    for delta in deltas:
+        if delta > 0:
+            bar_colors.append(CHART_COLORS["positive"])
+        elif delta < 0:
+            bar_colors.append(CHART_COLORS["negative"])
+        else:
+            bar_colors.append(CHART_COLORS["neutral"])
+
+    ax.bar(x, deltas, width=0.62, color=bar_colors, edgecolor="none", zorder=3)
+    ax.axhline(0, linewidth=1, color=CHART_COLORS["spine"], zorder=2)
+    ax.set_ylabel("Результат")
+    ax.set_xticks(x)
+    ax.set_xticklabels(build_month_tick_labels(month_labels))
+    ax.margins(x=0.04, y=0.18)
+    annotate_bar_values(
+        ax,
+        x,
+        deltas,
+        lambda value: fmt_compact_rub(value, signed=True),
+    )
+
+    fig.tight_layout(rect=(0, 0, 1, 0.9))
+    fig.savefig(path, dpi=170, facecolor=fig.get_facecolor())
     plt.close(fig)
 
     return path
@@ -1907,25 +3727,32 @@ def build_year_summary(year: int | None) -> tuple[str, str, str | None]:
     period_end_inclusive = period_end_dt_exclusive.date() - timedelta(days=1)
 
     with db_session() as session:
+        account_id = resolve_reporting_account_id(session)
+        if account_id is None:
+            raise ValueError(REPORTING_ACCOUNT_UNAVAILABLE_TEXT)
+
         year_financials = get_year_financials_from_operations(
             session,
+            account_id,
             period_start_dt,
             period_end_dt_exclusive,
         )
 
-        start_snap, end_snap = get_period_snapshots(session, period_start, period_end_dt_exclusive.date())
-        diff_lines, diff_error = compute_positions_diff_grouped(session, period_start_dt, period_end_dt_exclusive)
+        start_snap, end_snap = get_period_snapshots(session, account_id, period_start, period_end_dt_exclusive.date())
+        diff_lines, diff_error = compute_positions_diff_grouped(session, account_id, period_start_dt, period_end_dt_exclusive)
         realized_by_asset, realized_total = compute_realized_by_asset(
             session,
+            account_id,
             period_start_dt,
             period_end_dt_exclusive,
         )
         income_by_asset_net, income_total_net = compute_income_by_asset_net(
             session,
+            account_id,
             period_start_dt,
             period_end_dt_exclusive,
         )
-        unrealized = get_unrealized_at_period_end(session, period_end_dt_exclusive)
+        unrealized = get_unrealized_at_period_end(session, account_id, period_end_dt_exclusive)
 
     dep_year = float(year_financials["deposits"])
     income_total_net = year_financials["income_net"]
@@ -1982,75 +3809,635 @@ def build_year_summary(year: int | None) -> tuple[str, str, str | None]:
     return summary_text, diff_text, label
 
 
-def compute_twr_timeseries(session):
-    ts = get_portfolio_timeseries_agg_by_date(session)
-    if len(ts) < 2:
-        return None
+def build_net_external_flow_by_day(external_cashflows: list[dict]) -> dict[date, float]:
+    net_external_flow_by_day: dict[date, float] = {}
+    for row in external_cashflows:
+        dt = row.get("date")
+        local_date = to_local_market_date(dt)
+        if local_date is None:
+            continue
 
-    deps = get_deposits_raw(session)
-    dep_by_day: dict[date, float] = {}
-    for row in deps:
+        amount = abs(float(row.get("amount") or 0.0))
+        operation_type = (row.get("operation_type") or "").strip()
+        if operation_type in DEPOSIT_OPERATION_TYPES:
+            signed_amount = amount
+        elif operation_type in WITHDRAWAL_OPERATION_TYPES:
+            signed_amount = -amount
+        else:
+            continue
+
+        net_external_flow_by_day[local_date] = net_external_flow_by_day.get(local_date, 0.0) + signed_amount
+
+    return net_external_flow_by_day
+
+
+def compute_twr_timeseries(session, account_id: str):
+    snapshot_rows = get_portfolio_timeseries_agg_by_date(session, account_id)
+    external_cashflows = get_external_cashflows_raw(session, account_id)
+    net_external_flow_by_day = build_net_external_flow_by_day(external_cashflows)
+    return compute_twr_series(snapshot_rows, net_external_flow_by_day)
+
+
+def compute_portfolio_xirr_and_run_rate(
+    session,
+    account_id: str,
+) -> tuple[float | None, float | None, date | None]:
+    latest_snapshot = get_latest_snapshot_with_id(session, account_id)
+    if latest_snapshot is None or latest_snapshot.get("total_value") is None:
+        return None, None, None
+
+    cashflows: list[tuple[datetime, float]] = []
+    for row in get_external_cashflows_raw(session, account_id):
         dt = row.get("date")
         if dt is None:
             continue
-        # В БД date хранится как naive UTC
-        dt_utc = dt.replace(tzinfo=timezone.utc)
-        d_local = dt_utc.astimezone(TZ).date()
-        amt = float(row.get("amount") or 0)
-        dep_by_day[d_local] = dep_by_day.get(d_local, 0.0) + amt
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
 
-    dates: list[date] = []
-    values: list[float | None] = []
-    for row in ts:
-        dates.append(row["snapshot_date"])
-        v = row["total_value"]
-        values.append(float(v) if v is not None else None)
+        amount = abs(float(row.get("amount") or 0.0))
+        operation_type = (row.get("operation_type") or "").strip()
+        if operation_type in DEPOSIT_OPERATION_TYPES:
+            cashflows.append((dt, -amount))
+        elif operation_type in WITHDRAWAL_OPERATION_TYPES:
+            cashflows.append((dt, amount))
 
-    M = 1.0
-    twr: list[float] = [0.0]  # на первой точке TWR = 0
-    for i in range(1, len(dates)):
-        V_prev = values[i - 1]
-        V = values[i]
-        CF = dep_by_day.get(dates[i], 0.0)
+    if latest_snapshot["snapshot_at"] is not None:
+        terminal_dt = latest_snapshot["snapshot_at"]
+        if terminal_dt.tzinfo is None:
+            terminal_dt = terminal_dt.replace(tzinfo=timezone.utc)
+    else:
+        terminal_dt = datetime.combine(
+            latest_snapshot["snapshot_date"],
+            time.max,
+        ).replace(tzinfo=timezone.utc)
 
-        if V_prev in (None, 0) or V is None:
-            # Не пересчитываем, но точку рисуем (последнее известное значение)
-            twr.append(M - 1.0)
-            continue
+    current_value = float(latest_snapshot["total_value"])
+    cashflows.append((terminal_dt, current_value))
 
-        r = (V - CF) / V_prev - 1.0
-        M *= (1.0 + r)
-        twr.append(M - 1.0)
-
-    return dates, values, twr
+    xirr_value = compute_xirr(cashflows)
+    projection_date = date(latest_snapshot["snapshot_date"].year, 12, 31)
+    projected_value = project_run_rate_value(
+        current_value,
+        xirr_value,
+        latest_snapshot["snapshot_date"],
+        projection_date,
+    )
+    return xirr_value, projected_value, projection_date
 
 
 def render_twr_chart(path: str, dates: list[date], values: list[float | None], twr: list[float]) -> str:
     twr_pct = [x * 100.0 for x in twr]
 
-    fig, ax1 = plt.subplots(figsize=(10, 4))
-    ax2 = ax1.twinx()
+    value_points = [(dt, value) for dt, value in zip(dates, values) if value is not None]
+    value_dates = [dt for dt, _ in value_points]
+    value_series = [float(value) for _, value in value_points]
 
-    values_plot = [v if v is not None else float("nan") for v in values]
+    fig, (ax_value, ax_twr) = plt.subplots(
+        2,
+        1,
+        figsize=(10.5, 5.9),
+        sharex=True,
+        gridspec_kw={"height_ratios": [2.1, 1.45]},
+    )
+    set_chart_header(
+        fig,
+        ACCOUNT_FRIENDLY_NAME + ": динамика и TWR",
+        "Нижний график показывает доходность без искажения пополнениями.",
+    )
 
-    ax1.plot(dates, values_plot, label="Стоимость портфеля")
-    ax2.plot(dates, twr_pct, linestyle="--", label="TWR")
+    apply_chart_style(ax_value, rub_axis_formatter)
+    apply_chart_style(ax_twr, pct_axis_formatter)
 
-    ax1.set_title(ACCOUNT_FRIENDLY_NAME + " — TWR")
-    ax1.set_ylabel("₽")
-    ax2.set_ylabel("TWR, %")
-    ax1.grid(True, alpha=0.3)
+    if value_series:
+        ax_value.fill_between(value_dates, value_series, color=CHART_COLORS["portfolio_fill"], alpha=0.65, zorder=1)
+        ax_value.plot(
+            value_dates,
+            value_series,
+            color=CHART_COLORS["portfolio"],
+            linewidth=2.6,
+            zorder=3,
+        )
+        ax_value.set_ylabel("Портфель")
+        ax_value.margins(x=0.03, y=0.16)
+        annotate_series_last_point(
+            ax_value,
+            value_dates,
+            value_series,
+            f"{fmt_compact_rub(value_series[-1])}",
+            CHART_COLORS["portfolio"],
+            y_offset=12,
+        )
 
-    h1, l1 = ax1.get_legend_handles_labels()
-    h2, l2 = ax2.get_legend_handles_labels()
-    ax1.legend(h1 + h2, l1 + l2, loc="best")
+    positive_twr = [value >= 0 for value in twr_pct]
+    negative_twr = [value < 0 for value in twr_pct]
+    ax_twr.fill_between(
+        dates,
+        twr_pct,
+        0,
+        where=positive_twr,
+        color=CHART_COLORS["positive_fill"],
+        alpha=0.8,
+        interpolate=True,
+        zorder=1,
+    )
+    ax_twr.fill_between(
+        dates,
+        twr_pct,
+        0,
+        where=negative_twr,
+        color=CHART_COLORS["negative_fill"],
+        alpha=0.8,
+        interpolate=True,
+        zorder=1,
+    )
+    ax_twr.plot(
+        dates,
+        twr_pct,
+        color=CHART_COLORS["twr"],
+        linewidth=2.2,
+        zorder=3,
+    )
+    ax_twr.axhline(0, linewidth=1, color=CHART_COLORS["spine"], zorder=2)
+    ax_twr.set_ylabel("TWR")
+    ax_twr.margins(x=0.03, y=0.18)
+    annotate_series_last_point(
+        ax_twr,
+        dates,
+        twr_pct,
+        f"TWR {fmt_compact_pct(twr_pct[-1], signed=True)}",
+        CHART_COLORS["twr"],
+        y_offset=12 if twr_pct[-1] >= 0 else -12,
+    )
 
-    fig.autofmt_xdate()
-    fig.tight_layout()
-    fig.savefig(path, dpi=150)
+    tick_dates, tick_labels = build_date_ticks(dates, max_ticks=7)
+    ax_twr.set_xticks(tick_dates)
+    ax_twr.set_xticklabels(tick_labels)
+
+    fig.tight_layout(rect=(0, 0, 1, 0.9), h_pad=1.15)
+    fig.savefig(path, dpi=170, facecolor=fig.get_facecolor())
     plt.close(fig)
 
     return path
+
+
+def build_dataset_export(session) -> tuple[dict, list[dict], list[dict], list[dict], list[dict]]:
+    account_id = resolve_reporting_account_id(session)
+    if account_id is None:
+        raise ValueError(REPORTING_ACCOUNT_UNAVAILABLE_TEXT)
+
+    bounds = get_dataset_bounds(session, account_id)
+    min_date = bounds["min_date"]
+    max_date = bounds["max_date"]
+    if min_date is None or max_date is None:
+        raise ValueError("Пока нет данных для экспорта датасета.")
+
+    latest_snapshot = get_latest_snapshot_with_id(session, account_id)
+    if latest_snapshot is None:
+        raise ValueError("Пока нет данных для экспорта датасета.")
+
+    daily_rows = get_daily_snapshot_rows(session, account_id)
+    positions_rows = list(get_positions_for_snapshot(session, latest_snapshot["id"]))
+    asset_alias_rows = list(get_asset_alias_rows(session))
+    asset_alias_by_instrument_uid, asset_alias_by_figi = build_asset_alias_lookup(asset_alias_rows)
+    operations_rows = list(
+        get_dataset_operations(
+            session,
+            account_id=account_id,
+            start_dt=datetime.combine(min_date, time.min),
+            end_dt=datetime.combine(max_date + timedelta(days=1), time.min),
+        )
+    )
+    income_rows = list(get_income_events_for_period(session, account_id, min_date, max_date))
+    twr_data = compute_twr_timeseries(session, account_id)
+
+    twr_by_date: dict[date, float] = {}
+    if twr_data is not None:
+        dates, _values, twr_series = twr_data
+        twr_by_date = {dt: round(value * 100.0, 6) for dt, value in zip(dates, twr_series)}
+
+    deposits_by_day: dict[date, Decimal] = {}
+    withdrawals_by_day: dict[date, Decimal] = {}
+    commissions_by_day: dict[date, Decimal] = {}
+    taxes_by_day: dict[date, Decimal] = {}
+    operations_csv_rows: list[dict] = []
+    unknown_operation_groups = 0
+    mojibake_detected_count = 0
+
+    for row in operations_rows:
+        dt = row["date"]
+        local_date = to_local_market_date(dt)
+        group = classify_operation_group(row["operation_type"])
+        if group == "other":
+            unknown_operation_groups += 1
+
+        alias_row = None
+        instrument_uid = row.get("instrument_uid")
+        figi = row.get("figi")
+        if instrument_uid:
+            alias_row = asset_alias_by_instrument_uid.get(instrument_uid)
+        if alias_row is None and figi:
+            alias_row = asset_alias_by_figi.get(figi)
+
+        asset_uid = row.get("asset_uid") or (alias_row.get("asset_uid") if alias_row is not None else None)
+        logical_asset_id = build_logical_asset_id(
+            asset_uid=asset_uid,
+            instrument_uid=instrument_uid,
+            figi=figi,
+        )
+        description = row["description"]
+        description_has_mojibake = has_mojibake(description)
+        if description_has_mojibake:
+            mojibake_detected_count += 1
+
+        amount = normalize_decimal(row["amount"])
+        amount_abs = abs(amount)
+        if local_date is not None:
+            if group == "deposit":
+                deposits_by_day[local_date] = deposits_by_day.get(local_date, Decimal("0")) + amount
+            elif group == "withdrawal":
+                withdrawals_by_day[local_date] = withdrawals_by_day.get(local_date, Decimal("0")) + amount_abs
+            elif group == "commission":
+                commissions_by_day[local_date] = commissions_by_day.get(local_date, Decimal("0")) + amount_abs
+            elif group == "income_tax" and not is_income_event_backed_tax_operation(row["operation_type"]):
+                taxes_by_day[local_date] = taxes_by_day.get(local_date, Decimal("0")) + amount_abs
+
+        operations_csv_rows.append(
+            {
+                "operation_id": row["operation_id"],
+                "date_utc": to_iso_datetime(dt),
+                "local_date": local_date.isoformat() if local_date is not None else None,
+                "operation_type": row["operation_type"],
+                "operation_group": group,
+                "state": row["state"],
+                "logical_asset_id": logical_asset_id,
+                "asset_uid": asset_uid,
+                "instrument_uid": instrument_uid,
+                "figi": figi,
+                "name": row["name"],
+                "amount": amount,
+                "currency": row["currency"],
+                "price": row["price"],
+                "quantity": row["quantity"],
+                "commission": row["commission"],
+                "yield_amount": row["yield"],
+                "description": description,
+                "description_has_mojibake": description_has_mojibake,
+                "source": row["source"],
+            }
+        )
+
+    income_net_by_day: dict[date, Decimal] = {}
+    income_tax_by_day: dict[date, Decimal] = {}
+    income_csv_rows: list[dict] = []
+    for row in income_rows:
+        event_date = row["event_date"]
+        alias_row = asset_alias_by_figi.get(row["figi"]) if row.get("figi") else None
+        asset_uid = alias_row.get("asset_uid") if alias_row is not None else None
+        logical_asset_id = build_logical_asset_id(
+            asset_uid=asset_uid,
+            instrument_uid=alias_row.get("instrument_uid") if alias_row is not None else None,
+            figi=row.get("figi"),
+        )
+        net_amount = normalize_decimal(row["net_amount"])
+        tax_amount = normalize_decimal(row["tax_amount"])
+        income_net_by_day[event_date] = income_net_by_day.get(event_date, Decimal("0")) + net_amount
+        income_tax_by_day[event_date] = income_tax_by_day.get(event_date, Decimal("0")) + abs(tax_amount)
+        income_csv_rows.append(
+            {
+                "event_date": event_date,
+                "event_type": row["event_type"],
+                "logical_asset_id": logical_asset_id,
+                "asset_uid": asset_uid,
+                "figi": row["figi"],
+                "ticker": row["ticker"],
+                "instrument_name": row["instrument_name"],
+                "gross_amount": row["gross_amount"],
+                "tax_amount": row["tax_amount"],
+                "net_amount": row["net_amount"],
+                "net_yield_pct": row["net_yield_pct"],
+                "notified": row["notified"],
+            }
+        )
+
+    daily_csv_rows: list[dict] = []
+    previous_value: Decimal | None = None
+    for row in daily_rows:
+        snapshot_date = row["snapshot_date"]
+        portfolio_value = normalize_decimal(row["total_value"])
+        deposits = deposits_by_day.get(snapshot_date, Decimal("0"))
+        withdrawals = withdrawals_by_day.get(snapshot_date, Decimal("0"))
+        income_net = income_net_by_day.get(snapshot_date, Decimal("0"))
+        commissions = commissions_by_day.get(snapshot_date, Decimal("0"))
+        taxes = taxes_by_day.get(snapshot_date, Decimal("0"))
+        income_tax = income_tax_by_day.get(snapshot_date, Decimal("0"))
+        net_cashflow = deposits - withdrawals + income_net - commissions - taxes
+        day_pnl = Decimal("0")
+        if previous_value is not None:
+            day_pnl = portfolio_value - previous_value - net_cashflow
+        previous_value = portfolio_value
+
+        daily_csv_rows.append(
+            {
+                "date": snapshot_date,
+                "snapshot_at_utc": to_iso_datetime(row["snapshot_at"]),
+                "portfolio_value": portfolio_value,
+                "expected_yield": row["expected_yield"],
+                "expected_yield_pct": row["expected_yield_pct"],
+                "deposits": deposits,
+                "withdrawals": withdrawals,
+                "income_net": income_net,
+                "commissions": commissions,
+                "operation_taxes": taxes,
+                "income_taxes": income_tax,
+                "net_cashflow": net_cashflow,
+                "day_pnl": day_pnl,
+                "twr_pct": twr_by_date.get(snapshot_date),
+            }
+        )
+
+    positions_csv_rows: list[dict] = []
+    for row in positions_rows:
+        alias_row = None
+        instrument_uid = row.get("instrument_uid")
+        figi = row.get("figi")
+        if instrument_uid:
+            alias_row = asset_alias_by_instrument_uid.get(instrument_uid)
+        if alias_row is None and figi:
+            alias_row = asset_alias_by_figi.get(figi)
+
+        asset_uid = row.get("asset_uid") or (alias_row.get("asset_uid") if alias_row is not None else None)
+        logical_asset_id = build_logical_asset_id(
+            asset_uid=asset_uid,
+            instrument_uid=instrument_uid,
+            figi=figi,
+        )
+        positions_csv_rows.append(
+            {
+                "snapshot_date": latest_snapshot["snapshot_date"],
+                "snapshot_at_utc": to_iso_datetime(latest_snapshot["snapshot_at"]),
+                "logical_asset_id": logical_asset_id,
+                "asset_uid": asset_uid,
+                "instrument_uid": instrument_uid,
+                "position_uid": row["position_uid"],
+                "figi": figi,
+                "ticker": row["ticker"],
+                "name": row["name"],
+                "instrument_type": row["instrument_type"],
+                "quantity": row["quantity"],
+                "currency": row["currency"],
+                "current_price": row["current_price"],
+                "current_nkd": row["current_nkd"],
+                "position_value": row["position_value"],
+                "expected_yield": row["expected_yield"],
+                "expected_yield_pct": row["expected_yield_pct"],
+                "weight_pct": row["weight_pct"],
+                "value_source": "quantity_x_current_price",
+            }
+        )
+
+    deposits_total = sum((row["deposits"] for row in daily_csv_rows), Decimal("0"))
+    withdrawals_total = sum((row["withdrawals"] for row in daily_csv_rows), Decimal("0"))
+    income_net_total = sum((row["income_net"] for row in daily_csv_rows), Decimal("0"))
+    commissions_total = sum((row["commissions"] for row in daily_csv_rows), Decimal("0"))
+    operation_taxes_total = sum((row["operation_taxes"] for row in daily_csv_rows), Decimal("0"))
+    income_taxes_total = sum((row["income_taxes"] for row in daily_csv_rows), Decimal("0"))
+    current_value = normalize_decimal(latest_snapshot["total_value"])
+    net_contributions = deposits_total - withdrawals_total
+    period_start_value = normalize_decimal(daily_csv_rows[0]["portfolio_value"])
+    period_end_value = current_value
+    period_net_cashflow = sum((row["net_cashflow"] for row in daily_csv_rows[1:]), Decimal("0"))
+    period_pnl_abs = period_end_value - period_start_value - period_net_cashflow
+    has_full_history_from_zero = period_start_value == Decimal("0")
+    reconciliation_rows, positions_value_sum, reconciliation_gap_abs = build_reconciliation_by_asset_type(
+        latest_snapshot,
+        positions_rows,
+    )
+    alias_groups_count = len({row["asset_uid"] for row in asset_alias_rows if row.get("asset_uid")})
+
+    positions_missing_labels = sum(1 for row in positions_csv_rows if not (row["ticker"] or row["name"]))
+
+    dataset = {
+        "meta": {
+            "dataset_version": 2,
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "timezone": TZ_NAME,
+            "account_name": ACCOUNT_FRIENDLY_NAME,
+            "period_start": min_date.isoformat(),
+            "period_end": max_date.isoformat(),
+            "base_currency": latest_snapshot["currency"],
+            "latest_snapshot_at": to_iso_datetime(latest_snapshot["snapshot_at"]),
+        },
+        "summary": {
+            "current_value": current_value,
+            "net_contributions": net_contributions,
+            "deposits_total": deposits_total,
+            "withdrawals_total": withdrawals_total,
+            "income_net_total": income_net_total,
+            "commissions_total": commissions_total,
+            "income_taxes_total": income_taxes_total,
+            "operation_taxes_total": operation_taxes_total,
+            "taxes_total": income_taxes_total + operation_taxes_total,
+            "period_start_value": period_start_value,
+            "period_end_value": period_end_value,
+            "period_net_cashflow": period_net_cashflow,
+            "period_pnl_abs": period_pnl_abs,
+            "period_twr_pct": twr_by_date.get(max_date),
+            "has_full_history_from_zero": has_full_history_from_zero,
+            "positions_value_sum": positions_value_sum,
+            "reconciliation_gap_abs": reconciliation_gap_abs,
+            "reconciliation_by_asset_type": reconciliation_rows,
+            "snapshot_count": len(daily_csv_rows),
+            "positions_count": len(positions_csv_rows),
+            "operations_count": len(operations_csv_rows),
+            "income_events_count": len(income_csv_rows),
+        },
+        "timeseries_daily": daily_csv_rows,
+        "positions_current": positions_csv_rows,
+        "operations": operations_csv_rows,
+        "income_events": income_csv_rows,
+        "asset_aliases": [
+            {
+                "logical_asset_id": row["asset_uid"],
+                "asset_uid": row["asset_uid"],
+                "instrument_uid": row["instrument_uid"],
+                "figi": row["figi"],
+                "ticker": row["ticker"],
+                "name": row["name"],
+                "first_seen_at": row["first_seen_at"],
+                "last_seen_at": row["last_seen_at"],
+            }
+            for row in asset_alias_rows
+        ],
+        "data_quality": {
+            "unknown_operation_group_count": unknown_operation_groups,
+            "mojibake_detected_count": mojibake_detected_count,
+            "positions_missing_label_count": positions_missing_labels,
+            "has_full_history_from_zero": has_full_history_from_zero,
+            "alias_groups_count": alias_groups_count,
+            "income_events_available": True,
+        },
+        "assumptions": [
+            "В operations включены только исполненные операции после дедупликации по operation_id.",
+            "Дневные cashflow-агрегаты привязаны к локальной дате Europe/Moscow.",
+            "income_net в daily timeseries уже учитывает удержанный налог из income_events.",
+            "operation_taxes_total не включает dividend/coupon tax, если тот же налог уже представлен в income_events.",
+            "Архив считается period-first: lifetime return не вычисляется без полной истории с нуля.",
+            "reconciliation_by_asset_type строится от snapshot totals по классам активов; нераскрытый остаток остаётся residual.",
+        ],
+    }
+
+    return dataset, daily_csv_rows, positions_csv_rows, operations_csv_rows, income_csv_rows
+
+
+def build_dataset_readme(dataset: dict) -> str:
+    summary = dataset["summary"]
+    meta = dataset["meta"]
+    return (
+        "# FinanceTracker AI Dataset\n\n"
+        "Этот архив подготовлен командой `/dataset` для передачи ИИ-модели.\n\n"
+        "## Контекст\n\n"
+        f"- Счёт: {meta['account_name']}\n"
+        f"- Таймзона агрегации: {meta['timezone']}\n"
+        f"- Период: {meta['period_start']} .. {meta['period_end']}\n"
+        f"- Базовая валюта: {meta['base_currency']}\n"
+        f"- Сформировано: {meta['generated_at']}\n\n"
+        "## Файлы\n\n"
+        "- `dataset.json` — основной структурированный датасет для ИИ.\n"
+        "- `daily_timeseries.csv` — дневной ряд стоимости и денежных потоков.\n"
+        "- `positions_current.csv` — текущие позиции на последнем снапшоте.\n"
+        "- `operations.csv` — исполненные операции после дедупликации.\n"
+        "- `income_events.csv` — купоны и дивиденды в нормализованном виде.\n\n"
+        "## Ключевые поля\n\n"
+        f"- Current value: {decimal_to_str(summary['current_value'])} {meta['base_currency']}\n"
+        f"- Period start value: {decimal_to_str(summary['period_start_value'])} {meta['base_currency']}\n"
+        f"- Period end value: {decimal_to_str(summary['period_end_value'])} {meta['base_currency']}\n"
+        f"- Period net cashflow: {decimal_to_str(summary['period_net_cashflow'])} {meta['base_currency']}\n"
+        f"- Period pnl abs: {decimal_to_str(summary['period_pnl_abs'])} {meta['base_currency']}\n"
+        f"- Period twr pct: {summary['period_twr_pct']}\n"
+        f"- Positions value sum: {decimal_to_str(summary['positions_value_sum'])} {meta['base_currency']}\n"
+        f"- Reconciliation gap abs: {decimal_to_str(summary['reconciliation_gap_abs'])} {meta['base_currency']}\n"
+        f"- Full history from zero: {summary['has_full_history_from_zero']}\n\n"
+        "## Правила интерпретации\n\n"
+        "- Денежные значения в JSON сохраняются как строки, чтобы не терять точность.\n"
+        "- `operation_group` нормализует сырые типы операций; налоги по операциям экспортируются как `income_tax`.\n"
+        "- `logical_asset_id` строится из `asset_uid` и нужен для склейки бумаг при смене FIGI.\n"
+        "- `income_net` в дневном ряду уже очищен от удержанного налога по income_events.\n"
+        "- `taxes_total` дедуплицирован: dividend/coupon tax не суммируется второй раз из operations, если он уже попал в income_events.\n"
+        "- Если `has_full_history_from_zero=false`, архив нельзя трактовать как полную lifetime-историю портфеля.\n"
+        "- Если `reconciliation_gap_abs` не равен нулю, смотрите `reconciliation_by_asset_type`: это residual между snapshot totals и суммой позиционных оценок.\n"
+        "- Для подробного анализа сначала читайте `dataset.json`, затем CSV-файлы как табличную детализацию.\n"
+    )
+
+
+def create_dataset_archive() -> tuple[str, str]:
+    with db_session() as session:
+        dataset, daily_rows, positions_rows, operations_rows, income_rows = build_dataset_export(session)
+
+    archive_name = f"fintracker_dataset_{dataset['meta']['period_end']}.zip"
+    archive_tmp = tempfile.NamedTemporaryFile(prefix="fintracker_dataset_", suffix=".zip", delete=False)
+    archive_path = archive_tmp.name
+    archive_tmp.close()
+
+    json_text = json.dumps(dataset, ensure_ascii=False, indent=2, default=json_default)
+    readme_text = build_dataset_readme(dataset)
+
+    daily_fields = [
+        "date",
+        "snapshot_at_utc",
+        "portfolio_value",
+        "expected_yield",
+        "expected_yield_pct",
+        "deposits",
+        "withdrawals",
+        "income_net",
+        "commissions",
+        "operation_taxes",
+        "income_taxes",
+        "net_cashflow",
+        "day_pnl",
+        "twr_pct",
+    ]
+    positions_fields = [
+        "snapshot_date",
+        "snapshot_at_utc",
+        "logical_asset_id",
+        "asset_uid",
+        "instrument_uid",
+        "position_uid",
+        "figi",
+        "ticker",
+        "name",
+        "instrument_type",
+        "quantity",
+        "currency",
+        "current_price",
+        "current_nkd",
+        "position_value",
+        "expected_yield",
+        "expected_yield_pct",
+        "weight_pct",
+        "value_source",
+    ]
+    operations_fields = [
+        "operation_id",
+        "date_utc",
+        "local_date",
+        "operation_type",
+        "operation_group",
+        "state",
+        "logical_asset_id",
+        "asset_uid",
+        "instrument_uid",
+        "figi",
+        "name",
+        "amount",
+        "currency",
+        "price",
+        "quantity",
+        "commission",
+        "yield_amount",
+        "description",
+        "description_has_mojibake",
+        "source",
+    ]
+    income_fields = [
+        "event_date",
+        "event_type",
+        "logical_asset_id",
+        "asset_uid",
+        "figi",
+        "ticker",
+        "instrument_name",
+        "gross_amount",
+        "tax_amount",
+        "net_amount",
+        "net_yield_pct",
+        "notified",
+    ]
+
+    with tempfile.TemporaryDirectory(prefix="fintracker_dataset_") as temp_dir:
+        dataset_json_path = os.path.join(temp_dir, "dataset.json")
+        with open(dataset_json_path, "w", encoding="utf-8") as f:
+            f.write(json_text)
+
+        readme_path = os.path.join(temp_dir, "README_AI.md")
+        with open(readme_path, "w", encoding="utf-8") as f:
+            f.write(readme_text)
+
+        write_csv_file(os.path.join(temp_dir, "daily_timeseries.csv"), daily_fields, daily_rows)
+        write_csv_file(os.path.join(temp_dir, "positions_current.csv"), positions_fields, positions_rows)
+        write_csv_file(os.path.join(temp_dir, "operations.csv"), operations_fields, operations_rows)
+        write_csv_file(os.path.join(temp_dir, "income_events.csv"), income_fields, income_rows)
+
+        with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            archive.write(dataset_json_path, arcname="dataset.json")
+            archive.write(readme_path, arcname="README_AI.md")
+            archive.write(os.path.join(temp_dir, "daily_timeseries.csv"), arcname="daily_timeseries.csv")
+            archive.write(os.path.join(temp_dir, "positions_current.csv"), arcname="positions_current.csv")
+            archive.write(os.path.join(temp_dir, "operations.csv"), arcname="operations.csv")
+            archive.write(os.path.join(temp_dir, "income_events.csv"), arcname="income_events.csv")
+
+    return archive_path, archive_name
 
 
 def build_triggers_messages() -> list[str]:
@@ -2066,7 +4453,11 @@ def build_triggers_messages() -> list[str]:
     messages: list[str] = []
 
     with db_session() as session:
-        snaps = get_latest_snapshots(session, limit=2)
+        account_id = resolve_reporting_account_id(session)
+        if account_id is None:
+            return messages
+
+        snaps = get_latest_snapshots(session, account_id, limit=2)
         if not snaps:
             return messages
 
@@ -2083,15 +4474,15 @@ def build_triggers_messages() -> list[str]:
 
         # Исторический максимум на все даты строго ДО текущей даты last_date.
         # Если его нет, значит это самый первый день — "новый максимум" не шлём, чтобы не спамить.
-        max_before_last = get_max_value_before_date(session, last_date)
+        max_before_last = get_max_value_before_date(session, account_id, last_date)
 
         # Для годового плана — сравниваем сумму пополнений до вчера и до сегодня
         year_start = datetime(year, 1, 1)
         today_start = datetime(year, today.month, today.day)
         tomorrow_start = today_start + timedelta(days=1)
 
-        dep_prev = get_deposits_for_period(session, year_start, today_start)
-        dep_now = get_deposits_for_period(session, year_start, tomorrow_start)
+        dep_prev = get_deposits_for_period(session, account_id, year_start, today_start)
+        dep_now = get_deposits_for_period(session, account_id, year_start, tomorrow_start)
 
     # Новый максимум: текущая стоимость должна быть строго больше
     # исторического максимума до сегодняшнего дня.
@@ -2164,21 +4555,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_authorized(update):
         return
 
-    text = (
-        "Доступные команды:\n\n"
-        "/today — сводка по портфелю на сегодня\n"
-        "/week — сводка по текущей неделе\n"
-        "/month — отчёт по текущему месяцу\n"
-        "/year [YYYY] — отчёт за год (без аргумента: текущий год YTD)\n"
-        "/structure — текущая структура портфеля по позициям\n"
-        "/history — график стоимости портфеля и суммы пополнений\n"
-        "/twr — TWR (time-weighted return) и график по дням\n"
-        "/help — эта подсказка\n\n"
-        "Автоматически:\n"
-        "• каждый день в 18:00 (по времени хоста) — проверка триггеров (максимум, годовой план)\n"
-        "• по пятницам в 18:00 (по времени хоста) — недельный отчёт\n"
-        "• в последний день месяца в 18:00 (по времени хоста) — дополнительный отчёт за месяц."
-    )
+    text = build_help_text()
     await update.message.reply_text(text)
 
 
@@ -2223,7 +4600,11 @@ async def cmd_year(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("Формат: /year или /year YYYY")
             return
 
-    summary_text, diff_text, label = build_year_summary(year)
+    try:
+        summary_text, diff_text, label = build_year_summary(year)
+    except ValueError as exc:
+        await update.message.reply_text(str(exc))
+        return
     await safe_send_message(context.bot, update.effective_chat.id, summary_text, parse_mode="Markdown")
 
     _, period_end_dt_exclusive, _, _ = get_year_period(year)
@@ -2231,11 +4612,17 @@ async def cmd_year(update: Update, context: ContextTypes.DEFAULT_TYPE):
     temp_chart = tempfile.NamedTemporaryFile(prefix=f"year_{chart_year}_", suffix=".png", delete=False)
     chart_path = temp_chart.name
     temp_chart.close()
-    chart = build_year_chart(
-        chart_path,
-        year=chart_year,
-        end_date_exclusive=period_end_dt_exclusive.date(),
-    )
+    try:
+        chart = build_year_chart(
+            chart_path,
+            year=chart_year,
+            end_date_exclusive=period_end_dt_exclusive.date(),
+        )
+    except ValueError as exc:
+        if os.path.exists(chart_path):
+            os.remove(chart_path)
+        await update.message.reply_text(str(exc))
+        return
     if chart:
         try:
             with open(chart, "rb") as f:
@@ -2249,11 +4636,17 @@ async def cmd_year(update: Update, context: ContextTypes.DEFAULT_TYPE):
     temp_delta_chart = tempfile.NamedTemporaryFile(prefix=f"year_delta_{chart_year}_", suffix=".png", delete=False)
     delta_chart_path = temp_delta_chart.name
     temp_delta_chart.close()
-    delta_chart = build_year_monthly_delta_chart(
-        delta_chart_path,
-        year=chart_year,
-        end_date_exclusive=period_end_dt_exclusive.date(),
-    )
+    try:
+        delta_chart = build_year_monthly_delta_chart(
+            delta_chart_path,
+            year=chart_year,
+            end_date_exclusive=period_end_dt_exclusive.date(),
+        )
+    except ValueError as exc:
+        if os.path.exists(delta_chart_path):
+            os.remove(delta_chart_path)
+        await update.message.reply_text(str(exc))
+        return
     if delta_chart:
         try:
             with open(delta_chart, "rb") as f:
@@ -2263,6 +4656,31 @@ async def cmd_year(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 os.remove(delta_chart)
 
     await safe_send_message(context.bot, update.effective_chat.id, diff_text, parse_mode="Markdown")
+
+
+async def cmd_dataset(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_authorized(update):
+        return
+
+    if context.args:
+        await update.message.reply_text("Формат: /dataset")
+        return
+
+    try:
+        archive_path, archive_name = create_dataset_archive()
+    except ValueError as exc:
+        await update.message.reply_text(str(exc))
+        return
+
+    try:
+        with open(archive_path, "rb") as f:
+            await update.message.reply_document(
+                document=InputFile(f, filename=archive_name),
+                caption="Архив для AI-анализа: JSON, CSV и README с контекстом.",
+            )
+    finally:
+        if os.path.exists(archive_path):
+            os.remove(archive_path)
 
 
 async def cmd_structure(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2277,7 +4695,11 @@ async def cmd_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     path = "/tmp/history.png"
-    p = build_history_chart(path)
+    try:
+        p = build_history_chart(path)
+    except ValueError as exc:
+        await update.message.reply_text(str(exc))
+        return
     if not p:
         await update.message.reply_text(
             "Недостаточно данных для построения графика."
@@ -2296,7 +4718,16 @@ async def cmd_twr(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     with db_session() as session:
-        data = compute_twr_timeseries(session)
+        account_id = resolve_reporting_account_id(session)
+        if account_id is None:
+            await update.message.reply_text(REPORTING_ACCOUNT_UNAVAILABLE_TEXT)
+            return
+
+        data = compute_twr_timeseries(session, account_id)
+        xirr_value, projected_value, projection_date = compute_portfolio_xirr_and_run_rate(
+            session,
+            account_id,
+        )
 
     if not data:
         await update.message.reply_text("Недостаточно данных")
@@ -2306,11 +4737,15 @@ async def cmd_twr(update: Update, context: ContextTypes.DEFAULT_TYPE):
     last_date = dates[-1]
     last_value = values[-1]
     last_twr_pct = twr[-1] * 100.0
-
-    await update.message.reply_text(
-        f"TWR на {last_date.isoformat()}: {fmt_pct(last_twr_pct, precision=2)}\n"
-        f"Стоимость портфеля: {fmt_rub(last_value)}"
+    summary_text = render_twr_summary_text(
+        last_date=last_date,
+        last_value=last_value,
+        last_twr_pct=last_twr_pct,
+        xirr_value=xirr_value,
+        projected_value=projected_value,
+        projection_date=projection_date,
     )
+    await safe_send_message(context.bot, update.effective_chat.id, summary_text, parse_mode="Markdown")
 
     path = "/tmp/twr.png"
     render_twr_chart(path, dates, values, twr)
@@ -2319,6 +4754,94 @@ async def cmd_twr(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_photo(
             photo=InputFile(f)
         )
+
+
+async def cmd_targets(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_authorized(update):
+        return
+
+    args = context.args or []
+    if not args:
+        with db_session() as session:
+            account_id = resolve_reporting_account_id(session)
+            if account_id is None:
+                await update.message.reply_text(REPORTING_ACCOUNT_UNAVAILABLE_TEXT)
+                return
+            text = build_targets_text_for_account(session, account_id)
+        await safe_send_message(context.bot, update.effective_chat.id, text, parse_mode="Markdown")
+        return
+
+    if args[0].lower() != "set":
+        await update.message.reply_text(TARGETS_USAGE_TEXT)
+        return
+
+    try:
+        targets = parse_rebalance_targets_args(args[1:])
+    except ValueError as exc:
+        await update.message.reply_text(str(exc))
+        return
+
+    with db_session() as session:
+        account_id = resolve_reporting_account_id(session)
+        if account_id is None:
+            await update.message.reply_text(REPORTING_ACCOUNT_UNAVAILABLE_TEXT)
+            return
+        saved = replace_rebalance_targets(session, account_id, targets)
+        if not saved:
+            await update.message.reply_text(REBALANCE_FEATURE_UNAVAILABLE_TEXT)
+            return
+
+    with db_session() as session:
+        text = build_targets_text_for_account(session, account_id)
+    await safe_send_message(context.bot, update.effective_chat.id, text, parse_mode="Markdown")
+
+
+async def cmd_rebalance(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_authorized(update):
+        return
+    if context.args:
+        await update.message.reply_text("Формат: /rebalance")
+        return
+
+    with db_session() as session:
+        account_id = resolve_reporting_account_id(session)
+        if account_id is None:
+            await update.message.reply_text(REPORTING_ACCOUNT_UNAVAILABLE_TEXT)
+            return
+        text = build_rebalance_text_for_account(session, account_id)
+    await safe_send_message(context.bot, update.effective_chat.id, text, parse_mode="Markdown")
+
+
+async def cmd_invest(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_authorized(update):
+        return
+
+    args = context.args or []
+    if len(args) != 1:
+        await update.message.reply_text(INVEST_USAGE_TEXT)
+        return
+
+    try:
+        amount = parse_decimal_input(args[0], allow_zero=False)
+        if quantize_ruble_amount(amount) <= 0:
+            raise ValueError("Сумма должна быть положительной и не меньше 1 ₽.")
+    except ValueError as exc:
+        await update.message.reply_text(str(exc))
+        return
+
+    rounded_amount = quantize_ruble_amount(amount)
+    with db_session() as session:
+        account_id = resolve_reporting_account_id(session)
+        if account_id is None:
+            await update.message.reply_text(REPORTING_ACCOUNT_UNAVAILABLE_TEXT)
+            return
+        text = build_invest_text_for_account(
+            session,
+            account_id,
+            rounded_amount,
+            header=f"💸 Как распределить пополнение {fmt_decimal_rub(rounded_amount, precision=0)}",
+        )
+    await safe_send_message(context.bot, update.effective_chat.id, text, parse_mode="Markdown")
 
 
 # ============ DAILY JOB (JOBQUEUE) ========
@@ -2443,6 +4966,10 @@ async def daily_job(context: ContextTypes.DEFAULT_TYPE):
 async def check_income_events(context: ContextTypes.DEFAULT_TYPE):
     rows: list[dict] = []
     with db_session() as session:
+        account_id = resolve_reporting_account_id(session)
+        if account_id is None:
+            return
+
         rows = (
             session.execute(
                 text(
@@ -2456,10 +4983,12 @@ async def check_income_events(context: ContextTypes.DEFAULT_TYPE):
                         COALESCE(i.name, i.ticker, ie.figi) AS instrument_name
                     FROM income_events ie
                     LEFT JOIN instruments i ON i.figi = ie.figi
-                    WHERE ie.notified = false
+                    WHERE ie.account_id = :account_id
+                      AND ie.notified = false
                     ORDER BY ie.created_at ASC
                     """
-                )
+                ),
+                {"account_id": account_id},
             )
             .mappings()
             .all()
@@ -2519,6 +5048,68 @@ async def check_income_events(context: ContextTypes.DEFAULT_TYPE):
             session.commit()
 
 
+async def check_invest_notifications(context: ContextTypes.DEFAULT_TYPE):
+    with db_session() as session:
+        account_id = resolve_reporting_account_id(session)
+        if account_id is None:
+            return
+        rows = get_pending_invest_notifications(session, account_id)
+
+    if rows is None:
+        return
+
+    for row in rows:
+        amount = normalize_decimal(row["amount"])
+        with db_session() as session:
+            text_msg = build_invest_text_for_account(
+                session,
+                account_id,
+                amount,
+                header=f"💸 Получено пополнение: {fmt_decimal_rub(amount, precision=0)}",
+            )
+
+        sent_ok = True
+        for chat_id in TARGET_CHAT_IDS:
+            try:
+                await safe_send_message(context.bot, chat_id, text_msg, parse_mode="Markdown")
+                logger.info(
+                    "invest_notification_sent",
+                    extra={
+                        "ctx": {
+                            "operation_id": row["operation_id"],
+                            "chat_id": chat_id,
+                            "amount": decimal_to_str(amount),
+                        }
+                    },
+                )
+            except Exception:
+                sent_ok = False
+                logger.exception(
+                    "invest_notification_failed",
+                    extra={
+                        "ctx": {
+                            "operation_id": row["operation_id"],
+                            "chat_id": chat_id,
+                            "amount": decimal_to_str(amount),
+                        }
+                    },
+                )
+
+        if not sent_ok:
+            continue
+
+        with db_session() as session:
+            marked = mark_invest_notification_sent(
+                session,
+                account_id=account_id,
+                operation_id=row["operation_id"],
+                operation_date=row["date"],
+                amount=amount,
+            )
+        if not marked:
+            return
+
+
 def main():
     if not TELEGRAM_BOT_TOKEN:
         raise RuntimeError(
@@ -2533,9 +5124,13 @@ def main():
     app.add_handler(CommandHandler("week", cmd_week))
     app.add_handler(CommandHandler("month", cmd_month))
     app.add_handler(CommandHandler("year", cmd_year))
+    app.add_handler(CommandHandler("dataset", cmd_dataset))
     app.add_handler(CommandHandler("structure", cmd_structure))
     app.add_handler(CommandHandler("history", cmd_history))
     app.add_handler(CommandHandler("twr", cmd_twr))
+    app.add_handler(CommandHandler("targets", cmd_targets))
+    app.add_handler(CommandHandler("rebalance", cmd_rebalance))
+    app.add_handler(CommandHandler("invest", cmd_invest))
 
     # Ежедневный джоб
     job_time = time(
@@ -2551,6 +5146,7 @@ def main():
 
     app.job_queue.run_daily(daily_job, time=job_time, name="daily_summary")
     app.job_queue.run_repeating(check_income_events, interval=60, first=10, name="income_events_notifier")
+    app.job_queue.run_repeating(check_invest_notifications, interval=60, first=15, name="invest_notifier")
 
     if JOBQUEUE_SMOKE_TEST_ON_START:
         app.job_queue.run_once(
