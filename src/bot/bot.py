@@ -34,7 +34,7 @@ import csv
 import json
 import zipfile
 from contextlib import contextmanager
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from datetime import datetime, date, time, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -119,6 +119,21 @@ MONTHS_RU = {
     10: "октябрь",
     11: "ноябрь",
     12: "декабрь",
+}
+
+MONTHS_RU_GENITIVE = {
+    1: "января",
+    2: "февраля",
+    3: "марта",
+    4: "апреля",
+    5: "мая",
+    6: "июня",
+    7: "июля",
+    8: "августа",
+    9: "сентября",
+    10: "октября",
+    11: "ноября",
+    12: "декабря",
 }
 
 SHORT_MONTHS_RU = {
@@ -225,6 +240,38 @@ SNAPSHOT_TOTAL_FIELDS = {
     "futures": "total_futures",
     "future": "total_futures",
 }
+
+REBALANCE_ASSET_CLASSES: tuple[str, ...] = ("stocks", "bonds", "etf", "currency")
+REBALANCE_TARGET_ALIASES = {
+    "stocks": "stocks",
+    "bonds": "bonds",
+    "etf": "etf",
+    "cash": "currency",
+    "currency": "currency",
+}
+REBALANCE_CLASS_LABELS = {
+    "stocks": "Акции",
+    "bonds": "Облигации",
+    "etf": "ETF",
+    "currency": "Валюта",
+}
+REBALANCE_GROUP_TO_CLASS = {
+    "Акции": "stocks",
+    "Облигации": "bonds",
+    "ETF": "etf",
+    "Валюта": "currency",
+}
+REBALANCE_TOLERANCE_PCT = Decimal("5.0")
+REBALANCE_FEATURE_UNAVAILABLE_TEXT = (
+    "Функция таргетов пока недоступна: таблицы ещё не созданы. "
+    "Перезапустите tracker и bot или примените миграцию, затем попробуйте снова."
+)
+REBALANCE_TARGETS_NOT_CONFIGURED_TEXT = (
+    "Таргеты пока не настроены.\n\n"
+    "Пример: `/targets set stocks=50 bonds=30 cash=20`"
+)
+TARGETS_USAGE_TEXT = "Формат: /targets или /targets set stocks=50 bonds=30 cash=20"
+INVEST_USAGE_TEXT = "Формат: /invest 30000"
 
 
 @contextmanager
@@ -412,6 +459,30 @@ def fmt_compact_pct(x: float | None, precision: int = 1, signed: bool = False) -
     if "." in value:
         value = value.rstrip("0").rstrip(".")
     return f"{value} %"
+
+
+def build_help_text() -> str:
+    return (
+        "Доступные команды:\n\n"
+        "/today — сводка по портфелю на сегодня\n"
+        "/week — сводка по текущей неделе\n"
+        "/month — отчёт по текущему месяцу\n"
+        "/year [YYYY] — отчёт за год (без аргумента: текущий год YTD)\n"
+        "/dataset — архив json+csv+md для AI-анализа\n"
+        "/structure — текущая структура портфеля по позициям\n"
+        "/history — график стоимости портфеля и суммы пополнений\n"
+        "/twr — TWR, XIRR и run-rate на конец года + график по дням\n"
+        "/targets — показать текущие таргеты аллокации\n"
+        "/targets set stocks=50 bonds=30 cash=20 — задать таргеты по классам\n"
+        "/rebalance — показать отклонения и buy/sell для возврата к таргетам\n"
+        "/invest <sum> — подсказать, как распределить новое пополнение\n"
+        "/help — эта подсказка\n\n"
+        "Автоматически:\n"
+        "• каждый день в 18:00 (по времени хоста) — проверка триггеров (максимум, годовой план)\n"
+        "• по пятницам в 18:00 (по времени хоста) — недельный отчёт\n"
+        "• в последний день месяца в 18:00 (по времени хоста) — дополнительный отчёт за месяц\n"
+        "• каждое новое пополнение счёта — подсказка, как распределить пополнение по таргетам."
+    )
 
 
 REPORTING_ACCOUNT_UNAVAILABLE_TEXT = (
@@ -2481,6 +2552,644 @@ def _instrument_type_to_group(instr_type: str | None) -> str:
     return "Другое"
 
 
+def quantize_ruble_amount(value: Decimal | float | int | None) -> Decimal:
+    return normalize_decimal(value).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+
+
+def format_decimal_number(
+    value: Decimal | float | int | None,
+    *,
+    precision: int = 2,
+    signed: bool = False,
+) -> str:
+    decimal_value = normalize_decimal(value)
+    quantizer = Decimal("1") if precision == 0 else Decimal(f"1.{'0' * precision}")
+    quantized = decimal_value.quantize(quantizer, rounding=ROUND_HALF_UP)
+    text_value = format(quantized, "f")
+    if "." in text_value:
+        text_value = text_value.rstrip("0").rstrip(".")
+    if signed and quantized >= 0:
+        text_value = f"+{text_value}"
+    return text_value
+
+
+def format_decimal_pct(
+    value: Decimal | float | int | None,
+    *,
+    precision: int = 2,
+    signed: bool = False,
+) -> str:
+    return f"{format_decimal_number(value, precision=precision, signed=signed)} %"
+
+
+def format_decimal_pp(
+    value: Decimal | float | int | None,
+    *,
+    precision: int = 2,
+    signed: bool = False,
+) -> str:
+    return f"{format_decimal_number(value, precision=precision, signed=signed)} п.п."
+
+
+def format_rebalance_weight(value: Decimal | float | int | None) -> str:
+    decimal_value = normalize_decimal(value).quantize(Decimal("1.0"), rounding=ROUND_HALF_UP)
+    return f"{format(decimal_value, '.1f').replace('.', ',')}%"
+
+
+def format_human_date_ru(value: date | None) -> str:
+    if value is None:
+        return ""
+    return f"{value.day} {MONTHS_RU_GENITIVE[value.month]} {value.year}"
+
+
+def parse_decimal_input(raw_value: str, *, allow_zero: bool = True) -> Decimal:
+    cleaned = raw_value.strip().replace(" ", "").replace(",", ".")
+    if cleaned.endswith("%"):
+        cleaned = cleaned[:-1]
+    if cleaned.endswith("₽"):
+        cleaned = cleaned[:-1]
+    if not cleaned:
+        raise ValueError("Пустое значение недопустимо.")
+    try:
+        value = Decimal(cleaned)
+    except InvalidOperation as exc:
+        raise ValueError(f"Не удалось разобрать число: {raw_value}") from exc
+    if not allow_zero and value <= 0:
+        raise ValueError("Сумма должна быть положительной.")
+    return value
+
+
+def parse_rebalance_targets_args(args: list[str]) -> dict[str, Decimal]:
+    if not args:
+        raise ValueError(TARGETS_USAGE_TEXT)
+
+    targets: dict[str, Decimal] = {}
+    for token in args:
+        if "=" not in token:
+            raise ValueError(TARGETS_USAGE_TEXT)
+        raw_key, raw_value = token.split("=", 1)
+        key = raw_key.strip().lower()
+        asset_class = REBALANCE_TARGET_ALIASES.get(key)
+        if asset_class is None:
+            raise ValueError(f"Неизвестный класс `{raw_key}`. Поддерживаются: stocks, bonds, etf, cash.")
+        if asset_class in targets:
+            raise ValueError(f"Класс `{asset_class}` указан несколько раз.")
+
+        value = parse_decimal_input(raw_value)
+        if value < 0:
+            raise ValueError("Таргеты не могут быть отрицательными.")
+        targets[asset_class] = value
+
+    normalized = {
+        asset_class: targets.get(asset_class, Decimal("0"))
+        for asset_class in REBALANCE_ASSET_CLASSES
+    }
+    if sum(normalized.values()) != Decimal("100"):
+        raise ValueError("Сумма таргетов должна быть ровно 100.")
+    return normalized
+
+
+def aggregate_rebalance_values_by_class(
+    positions: list[dict] | None,
+) -> tuple[dict[str, Decimal], dict[str, Decimal]]:
+    class_values = {
+        asset_class: Decimal("0")
+        for asset_class in REBALANCE_ASSET_CLASSES
+    }
+    other_groups: dict[str, Decimal] = {}
+
+    for pos in positions or []:
+        group_name = _instrument_type_to_group(pos.get("instrument_type"))
+        position_value = normalize_decimal(pos.get("position_value"))
+        asset_class = REBALANCE_GROUP_TO_CLASS.get(group_name)
+        if asset_class is not None:
+            class_values[asset_class] += position_value
+            continue
+        other_groups[group_name] = other_groups.get(group_name, Decimal("0")) + position_value
+
+    return class_values, other_groups
+
+
+def compute_rebalance_plan(
+    class_values: dict[str, Decimal],
+    target_weights: dict[str, Decimal],
+) -> dict[str, Decimal | list[dict[str, Decimal | str]]]:
+    rebalanceable_base = sum(class_values.get(asset_class, Decimal("0")) for asset_class in REBALANCE_ASSET_CLASSES)
+    rows: list[dict[str, Decimal | str]] = []
+
+    for asset_class in REBALANCE_ASSET_CLASSES:
+        current_value = normalize_decimal(class_values.get(asset_class))
+        target_pct = normalize_decimal(target_weights.get(asset_class))
+        current_pct = (
+            current_value * Decimal("100") / rebalanceable_base
+            if rebalanceable_base > 0
+            else Decimal("0")
+        )
+        delta_pct = current_pct - target_pct
+        target_value = rebalanceable_base * target_pct / Decimal("100")
+        delta_value = target_value - current_value
+        rows.append(
+            {
+                "asset_class": asset_class,
+                "label": REBALANCE_CLASS_LABELS[asset_class],
+                "current_value": current_value,
+                "current_pct": current_pct,
+                "target_pct": target_pct,
+                "delta_pct": delta_pct,
+                "target_value": target_value,
+                "delta_value": delta_value,
+                "status": "в норме" if abs(delta_pct) <= REBALANCE_TOLERANCE_PCT else "вне нормы",
+            }
+        )
+
+    return {
+        "rebalanceable_base": rebalanceable_base,
+        "rows": rows,
+    }
+
+
+def compute_invest_plan(
+    class_values: dict[str, Decimal],
+    target_weights: dict[str, Decimal],
+    deposit_amount: Decimal | float | int,
+) -> dict[str, Decimal | dict[str, Decimal]]:
+    rounded_deposit = quantize_ruble_amount(deposit_amount)
+    if rounded_deposit <= 0:
+        raise ValueError("Сумма должна быть положительной и не меньше 1 ₽.")
+
+    rebalanceable_base = sum(class_values.get(asset_class, Decimal("0")) for asset_class in REBALANCE_ASSET_CLASSES)
+    deficits = {asset_class: Decimal("0") for asset_class in REBALANCE_ASSET_CLASSES}
+    raw_allocations = {asset_class: Decimal("0") for asset_class in REBALANCE_ASSET_CLASSES}
+
+    if rebalanceable_base <= 0:
+        for asset_class in REBALANCE_ASSET_CLASSES:
+            raw_allocations[asset_class] = rounded_deposit * normalize_decimal(target_weights.get(asset_class)) / Decimal("100")
+            deficits[asset_class] = raw_allocations[asset_class]
+    else:
+        new_base = rebalanceable_base + rounded_deposit
+        for asset_class in REBALANCE_ASSET_CLASSES:
+            desired_value = new_base * normalize_decimal(target_weights.get(asset_class)) / Decimal("100")
+            deficits[asset_class] = max(desired_value - normalize_decimal(class_values.get(asset_class)), Decimal("0"))
+
+        total_deficit = sum(deficits.values())
+        if total_deficit > 0:
+            for asset_class in REBALANCE_ASSET_CLASSES:
+                raw_allocations[asset_class] = rounded_deposit * deficits[asset_class] / total_deficit
+        else:
+            for asset_class in REBALANCE_ASSET_CLASSES:
+                raw_allocations[asset_class] = rounded_deposit * normalize_decimal(target_weights.get(asset_class)) / Decimal("100")
+                deficits[asset_class] = raw_allocations[asset_class]
+
+    allocations = {
+        asset_class: quantize_ruble_amount(raw_allocations.get(asset_class))
+        for asset_class in REBALANCE_ASSET_CLASSES
+    }
+    residue = rounded_deposit - sum(allocations.values())
+    if residue != 0:
+        residue_asset_class = max(
+            REBALANCE_ASSET_CLASSES,
+            key=lambda asset_class: (
+                deficits.get(asset_class, Decimal("0")),
+                normalize_decimal(target_weights.get(asset_class)),
+            ),
+        )
+        allocations[residue_asset_class] += residue
+
+    return {
+        "deposit_amount": rounded_deposit,
+        "rebalanceable_base": rebalanceable_base,
+        "deficits": deficits,
+        "allocations": allocations,
+    }
+
+
+def get_rebalance_targets(session, account_id: str) -> dict[str, Decimal] | None:
+    try:
+        rows = (
+            session.execute(
+                text(
+                    """
+                    SELECT asset_class, target_weight_pct
+                    FROM rebalance_targets
+                    WHERE account_id = :account_id
+                    """
+                ),
+                {"account_id": account_id},
+            )
+            .mappings()
+            .all()
+        )
+    except Exception as exc:
+        if _is_undefined_table_error(exc, "rebalance_targets"):
+            session.rollback()
+            return None
+        raise
+
+    if not rows:
+        return {}
+
+    targets = {
+        asset_class: Decimal("0")
+        for asset_class in REBALANCE_ASSET_CLASSES
+    }
+    for row in rows:
+        asset_class = row["asset_class"]
+        if asset_class in targets:
+            targets[asset_class] = normalize_decimal(row["target_weight_pct"])
+    return targets
+
+
+def replace_rebalance_targets(session, account_id: str, targets: dict[str, Decimal]) -> bool:
+    try:
+        now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
+        session.execute(
+            text("DELETE FROM rebalance_targets WHERE account_id = :account_id"),
+            {"account_id": account_id},
+        )
+        session.execute(
+            text(
+                """
+                INSERT INTO rebalance_targets (
+                    account_id,
+                    asset_class,
+                    target_weight_pct,
+                    created_at,
+                    updated_at
+                )
+                VALUES (
+                    :account_id,
+                    :asset_class,
+                    :target_weight_pct,
+                    :created_at,
+                    :updated_at
+                )
+                """
+            ),
+            [
+                {
+                    "account_id": account_id,
+                    "asset_class": asset_class,
+                    "target_weight_pct": decimal_to_str(targets[asset_class]),
+                    "created_at": now_utc,
+                    "updated_at": now_utc,
+                }
+                for asset_class in REBALANCE_ASSET_CLASSES
+            ],
+        )
+        session.commit()
+    except Exception as exc:
+        session.rollback()
+        if _is_undefined_table_error(exc, "rebalance_targets"):
+            return False
+        raise
+    return True
+
+
+def bootstrap_invest_notifications(session, account_id: str) -> bool:
+    try:
+        existing_count = session.execute(
+            text(
+                """
+                SELECT COUNT(*)
+                FROM invest_notifications
+                WHERE account_id = :account_id
+                """
+            ),
+            {"account_id": account_id},
+        ).scalar_one()
+    except Exception as exc:
+        if _is_undefined_table_error(exc, "invest_notifications"):
+            session.rollback()
+            return False
+        raise
+
+    if existing_count:
+        return True
+
+    bootstrap_cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(minutes=2)
+    created_at = datetime.now(timezone.utc).replace(tzinfo=None)
+    session.execute(
+        text(
+            f"""
+            {OPERATIONS_DEDUP_CTE}
+            INSERT INTO invest_notifications (
+                account_id,
+                operation_id,
+                operation_date,
+                amount,
+                created_at
+            )
+            SELECT
+                operations_dedup.account_id,
+                operations_dedup.operation_id,
+                operations_dedup.date,
+                ABS(operations_dedup.amount),
+                :created_at
+            FROM operations_dedup
+            WHERE operations_dedup.account_id = :account_id
+              AND operations_dedup.operation_type IN :operation_types
+              AND operations_dedup.state = :executed_state
+              AND operations_dedup.date < :bootstrap_cutoff
+            ON CONFLICT (account_id, operation_id) DO NOTHING
+            """
+        ).bindparams(bindparam("operation_types", expanding=True)),
+        {
+            "account_id": account_id,
+            "operation_types": DEPOSIT_OPERATION_TYPES,
+            "executed_state": EXECUTED_OPERATION_STATE,
+            "bootstrap_cutoff": bootstrap_cutoff,
+            "created_at": created_at,
+        },
+    )
+    session.commit()
+    return True
+
+
+def get_pending_invest_notifications(session, account_id: str) -> list[dict] | None:
+    bootstrapped = bootstrap_invest_notifications(session, account_id)
+    if not bootstrapped:
+        return None
+
+    try:
+        rows = (
+            session.execute(
+                text(
+                    f"""
+                    {OPERATIONS_DEDUP_CTE}
+                    SELECT
+                        operations_dedup.operation_id,
+                        operations_dedup.date,
+                        ABS(operations_dedup.amount) AS amount
+                    FROM operations_dedup
+                    LEFT JOIN invest_notifications notified
+                      ON notified.account_id = operations_dedup.account_id
+                     AND notified.operation_id = operations_dedup.operation_id
+                    WHERE operations_dedup.account_id = :account_id
+                      AND operations_dedup.operation_type IN :operation_types
+                      AND operations_dedup.state = :executed_state
+                      AND notified.operation_id IS NULL
+                    ORDER BY operations_dedup.date ASC
+                    """
+                ).bindparams(bindparam("operation_types", expanding=True)),
+                {
+                    "account_id": account_id,
+                    "operation_types": DEPOSIT_OPERATION_TYPES,
+                    "executed_state": EXECUTED_OPERATION_STATE,
+                },
+            )
+            .mappings()
+            .all()
+        )
+    except Exception as exc:
+        if _is_undefined_table_error(exc, "invest_notifications"):
+            session.rollback()
+            return None
+        raise
+    return rows
+
+
+def mark_invest_notification_sent(
+    session,
+    *,
+    account_id: str,
+    operation_id: str,
+    operation_date: datetime,
+    amount: Decimal,
+) -> bool:
+    try:
+        created_at = datetime.now(timezone.utc).replace(tzinfo=None)
+        session.execute(
+            text(
+                """
+                INSERT INTO invest_notifications (
+                    account_id,
+                    operation_id,
+                    operation_date,
+                    amount,
+                    created_at
+                )
+                VALUES (
+                    :account_id,
+                    :operation_id,
+                    :operation_date,
+                    :amount,
+                    :created_at
+                )
+                ON CONFLICT (account_id, operation_id) DO NOTHING
+                """
+            ),
+            {
+                "account_id": account_id,
+                "operation_id": operation_id,
+                "operation_date": operation_date,
+                "amount": decimal_to_str(amount),
+                "created_at": created_at,
+            },
+        )
+        session.commit()
+    except Exception as exc:
+        session.rollback()
+        if _is_undefined_table_error(exc, "invest_notifications"):
+            return False
+        raise
+    return True
+
+
+def get_latest_rebalance_snapshot(session, account_id: str) -> dict:
+    latest_snapshot = get_latest_snapshot_with_id(session, account_id)
+    positions: list[dict] = []
+    snapshot_date: date | None = None
+    total_portfolio_value = Decimal("0")
+    if latest_snapshot:
+        snapshot_date = latest_snapshot["snapshot_date"]
+        total_portfolio_value = normalize_decimal(latest_snapshot["total_value"])
+        positions = get_positions_for_snapshot(session, latest_snapshot["id"])
+
+    class_values, other_groups = aggregate_rebalance_values_by_class(positions)
+    if total_portfolio_value <= 0:
+        total_portfolio_value = sum(class_values.values()) + sum(other_groups.values())
+
+    return {
+        "snapshot_date": snapshot_date,
+        "total_portfolio_value": total_portfolio_value,
+        "class_values": class_values,
+        "other_groups": other_groups,
+    }
+
+
+def _build_rebalance_diff_lines(rows: list[dict[str, Decimal | str]]) -> list[str]:
+    lines: list[str] = []
+    for row in rows:
+        lines.append(
+            f"- {'✅' if row['status'] == 'в норме' else '⚠️'} "
+            f"{row['label']}: {format_rebalance_weight(row['current_pct'])} / "
+            f"{format_rebalance_weight(row['target_pct'])}"
+        )
+    return lines
+
+
+def _build_out_of_model_lines(
+    other_groups: dict[str, Decimal],
+    total_portfolio_value: Decimal,
+) -> list[str]:
+    if not other_groups:
+        return []
+
+    lines = ["Вне модели:"]
+    sorted_groups = sorted(other_groups.items(), key=lambda item: item[1], reverse=True)
+    for group_name, group_value in sorted_groups:
+        share_pct = (
+            group_value * Decimal("100") / total_portfolio_value
+            if total_portfolio_value > 0
+            else Decimal("0")
+        )
+        lines.append(
+            f"- {group_name}: {fmt_decimal_rub(group_value, precision=0)} "
+            f"({format_decimal_pct(share_pct, precision=1)} портфеля)"
+        )
+    return lines
+
+
+def build_targets_text_for_account(session, account_id: str) -> str:
+    targets = get_rebalance_targets(session, account_id)
+    if targets is None:
+        return REBALANCE_FEATURE_UNAVAILABLE_TEXT
+    if not targets:
+        return REBALANCE_TARGETS_NOT_CONFIGURED_TEXT
+
+    snapshot = get_latest_rebalance_snapshot(session, account_id)
+    rebalance_plan = compute_rebalance_plan(snapshot["class_values"], targets)
+    snapshot_date = snapshot["snapshot_date"]
+
+    header = "🎯 Таргеты аллокации"
+    if snapshot_date is not None:
+        header += f" (на {snapshot_date.isoformat()})"
+
+    lines = [header, "", "Текущие таргеты (факт / план):"]
+    lines.extend(_build_rebalance_diff_lines(rebalance_plan["rows"]))
+
+    out_of_model_lines = _build_out_of_model_lines(
+        snapshot["other_groups"],
+        snapshot["total_portfolio_value"],
+    )
+    if out_of_model_lines:
+        lines.append("")
+        lines.extend(out_of_model_lines)
+
+    if snapshot_date is None:
+        lines.append("")
+        lines.append("Фактическая структура появится после первого снапшота.")
+
+    return "\n".join(lines)
+
+
+def build_rebalance_text_for_account(session, account_id: str) -> str:
+    targets = get_rebalance_targets(session, account_id)
+    if targets is None:
+        return REBALANCE_FEATURE_UNAVAILABLE_TEXT
+    if not targets:
+        return REBALANCE_TARGETS_NOT_CONFIGURED_TEXT
+
+    snapshot = get_latest_rebalance_snapshot(session, account_id)
+    rebalance_plan = compute_rebalance_plan(snapshot["class_values"], targets)
+    snapshot_date = snapshot["snapshot_date"]
+
+    header = "⚖️ Ребаланс"
+    lines = [header]
+    if snapshot_date is not None:
+        lines.extend(["", format_human_date_ru(snapshot_date)])
+    lines.extend(["", "Текущие таргеты (факт / план):"])
+    lines.extend(_build_rebalance_diff_lines(rebalance_plan["rows"]))
+
+    out_of_model_lines = _build_out_of_model_lines(
+        snapshot["other_groups"],
+        snapshot["total_portfolio_value"],
+    )
+    if out_of_model_lines:
+        lines.append("")
+        lines.extend(out_of_model_lines)
+
+    sell_rows: list[tuple[str, Decimal]] = []
+    buy_rows: list[tuple[str, Decimal]] = []
+    for row in rebalance_plan["rows"]:
+        delta_value = quantize_ruble_amount(row["delta_value"])
+        if delta_value > 0:
+            buy_rows.append((row["label"], delta_value))
+        elif delta_value < 0:
+            sell_rows.append((row["label"], abs(delta_value)))
+
+    sell_rows.sort(key=lambda item: item[1], reverse=True)
+    buy_rows.sort(key=lambda item: item[1], reverse=True)
+
+    lines.append("")
+    lines.append("Чтобы поймать баланс сейчас:")
+    if sell_rows:
+        lines.extend(["", "📉 Продать:"])
+        for label, amount in sell_rows:
+            lines.append(f"- {label}: {fmt_decimal_rub(amount, precision=0)}")
+    if buy_rows:
+        lines.extend(["", "📈 Купить:"])
+        for label, amount in buy_rows:
+            lines.append(f"- {label}: {fmt_decimal_rub(amount, precision=0)}")
+    if not sell_rows and not buy_rows:
+        lines.append("")
+        lines.append("Баланс уже близок к целевому, действий не требуется.")
+
+    if snapshot["other_groups"]:
+        lines.append("")
+        lines.append(
+            "Расчёт buy/sell сделан по ребалансируемой части портфеля: "
+            f"{fmt_decimal_rub(rebalance_plan['rebalanceable_base'], precision=0)}."
+        )
+
+    return "\n".join(lines)
+
+
+def build_invest_text_for_account(
+    session,
+    account_id: str,
+    deposit_amount: Decimal | float | int,
+    *,
+    header: str | None = None,
+) -> str:
+    targets = get_rebalance_targets(session, account_id)
+    if targets is None:
+        return REBALANCE_FEATURE_UNAVAILABLE_TEXT
+    if not targets:
+        return REBALANCE_TARGETS_NOT_CONFIGURED_TEXT
+
+    snapshot = get_latest_rebalance_snapshot(session, account_id)
+    rebalance_plan = compute_rebalance_plan(snapshot["class_values"], targets)
+    invest_plan = compute_invest_plan(snapshot["class_values"], targets, deposit_amount)
+
+    lines = [header or f"💸 Как распределить пополнение {fmt_decimal_rub(invest_plan['deposit_amount'], precision=0)}"]
+    lines.append("")
+    lines.append("Текущие таргеты (факт / план):")
+    lines.extend(_build_rebalance_diff_lines(rebalance_plan["rows"]))
+
+    out_of_model_lines = _build_out_of_model_lines(
+        snapshot["other_groups"],
+        snapshot["total_portfolio_value"],
+    )
+    if out_of_model_lines:
+        lines.append("")
+        lines.extend(out_of_model_lines)
+
+    lines.append("")
+    lines.append(f"Распределение пополнения {fmt_decimal_rub(invest_plan['deposit_amount'], precision=0)}:")
+    for asset_class in REBALANCE_ASSET_CLASSES:
+        allocation = invest_plan["allocations"][asset_class]
+        lines.append(
+            f"- {REBALANCE_CLASS_LABELS[asset_class]}: {fmt_decimal_rub(allocation, precision=0)}"
+        )
+
+    if snapshot["other_groups"]:
+        lines.append("")
+        lines.append("Классы вне модели не участвуют в распределении пополнения.")
+
+    return "\n".join(lines)
+
+
 def build_structure_text() -> str:
     """
     Структура портфеля по последнему снапшоту, с разбивкой по типам:
@@ -3846,22 +4555,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_authorized(update):
         return
 
-    text = (
-        "Доступные команды:\n\n"
-        "/today — сводка по портфелю на сегодня\n"
-        "/week — сводка по текущей неделе\n"
-        "/month — отчёт по текущему месяцу\n"
-        "/year [YYYY] — отчёт за год (без аргумента: текущий год YTD)\n"
-        "/dataset — архив json+csv+md для AI-анализа\n"
-        "/structure — текущая структура портфеля по позициям\n"
-        "/history — график стоимости портфеля и суммы пополнений\n"
-        "/twr — TWR, XIRR и run-rate на конец года + график по дням\n"
-        "/help — эта подсказка\n\n"
-        "Автоматически:\n"
-        "• каждый день в 18:00 (по времени хоста) — проверка триггеров (максимум, годовой план)\n"
-        "• по пятницам в 18:00 (по времени хоста) — недельный отчёт\n"
-        "• в последний день месяца в 18:00 (по времени хоста) — дополнительный отчёт за месяц."
-    )
+    text = build_help_text()
     await update.message.reply_text(text)
 
 
@@ -4060,6 +4754,94 @@ async def cmd_twr(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_photo(
             photo=InputFile(f)
         )
+
+
+async def cmd_targets(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_authorized(update):
+        return
+
+    args = context.args or []
+    if not args:
+        with db_session() as session:
+            account_id = resolve_reporting_account_id(session)
+            if account_id is None:
+                await update.message.reply_text(REPORTING_ACCOUNT_UNAVAILABLE_TEXT)
+                return
+            text = build_targets_text_for_account(session, account_id)
+        await safe_send_message(context.bot, update.effective_chat.id, text, parse_mode="Markdown")
+        return
+
+    if args[0].lower() != "set":
+        await update.message.reply_text(TARGETS_USAGE_TEXT)
+        return
+
+    try:
+        targets = parse_rebalance_targets_args(args[1:])
+    except ValueError as exc:
+        await update.message.reply_text(str(exc))
+        return
+
+    with db_session() as session:
+        account_id = resolve_reporting_account_id(session)
+        if account_id is None:
+            await update.message.reply_text(REPORTING_ACCOUNT_UNAVAILABLE_TEXT)
+            return
+        saved = replace_rebalance_targets(session, account_id, targets)
+        if not saved:
+            await update.message.reply_text(REBALANCE_FEATURE_UNAVAILABLE_TEXT)
+            return
+
+    with db_session() as session:
+        text = build_targets_text_for_account(session, account_id)
+    await safe_send_message(context.bot, update.effective_chat.id, text, parse_mode="Markdown")
+
+
+async def cmd_rebalance(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_authorized(update):
+        return
+    if context.args:
+        await update.message.reply_text("Формат: /rebalance")
+        return
+
+    with db_session() as session:
+        account_id = resolve_reporting_account_id(session)
+        if account_id is None:
+            await update.message.reply_text(REPORTING_ACCOUNT_UNAVAILABLE_TEXT)
+            return
+        text = build_rebalance_text_for_account(session, account_id)
+    await safe_send_message(context.bot, update.effective_chat.id, text, parse_mode="Markdown")
+
+
+async def cmd_invest(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_authorized(update):
+        return
+
+    args = context.args or []
+    if len(args) != 1:
+        await update.message.reply_text(INVEST_USAGE_TEXT)
+        return
+
+    try:
+        amount = parse_decimal_input(args[0], allow_zero=False)
+        if quantize_ruble_amount(amount) <= 0:
+            raise ValueError("Сумма должна быть положительной и не меньше 1 ₽.")
+    except ValueError as exc:
+        await update.message.reply_text(str(exc))
+        return
+
+    rounded_amount = quantize_ruble_amount(amount)
+    with db_session() as session:
+        account_id = resolve_reporting_account_id(session)
+        if account_id is None:
+            await update.message.reply_text(REPORTING_ACCOUNT_UNAVAILABLE_TEXT)
+            return
+        text = build_invest_text_for_account(
+            session,
+            account_id,
+            rounded_amount,
+            header=f"💸 Как распределить пополнение {fmt_decimal_rub(rounded_amount, precision=0)}",
+        )
+    await safe_send_message(context.bot, update.effective_chat.id, text, parse_mode="Markdown")
 
 
 # ============ DAILY JOB (JOBQUEUE) ========
@@ -4266,6 +5048,68 @@ async def check_income_events(context: ContextTypes.DEFAULT_TYPE):
             session.commit()
 
 
+async def check_invest_notifications(context: ContextTypes.DEFAULT_TYPE):
+    with db_session() as session:
+        account_id = resolve_reporting_account_id(session)
+        if account_id is None:
+            return
+        rows = get_pending_invest_notifications(session, account_id)
+
+    if rows is None:
+        return
+
+    for row in rows:
+        amount = normalize_decimal(row["amount"])
+        with db_session() as session:
+            text_msg = build_invest_text_for_account(
+                session,
+                account_id,
+                amount,
+                header=f"💸 Получено пополнение: {fmt_decimal_rub(amount, precision=0)}",
+            )
+
+        sent_ok = True
+        for chat_id in TARGET_CHAT_IDS:
+            try:
+                await safe_send_message(context.bot, chat_id, text_msg, parse_mode="Markdown")
+                logger.info(
+                    "invest_notification_sent",
+                    extra={
+                        "ctx": {
+                            "operation_id": row["operation_id"],
+                            "chat_id": chat_id,
+                            "amount": decimal_to_str(amount),
+                        }
+                    },
+                )
+            except Exception:
+                sent_ok = False
+                logger.exception(
+                    "invest_notification_failed",
+                    extra={
+                        "ctx": {
+                            "operation_id": row["operation_id"],
+                            "chat_id": chat_id,
+                            "amount": decimal_to_str(amount),
+                        }
+                    },
+                )
+
+        if not sent_ok:
+            continue
+
+        with db_session() as session:
+            marked = mark_invest_notification_sent(
+                session,
+                account_id=account_id,
+                operation_id=row["operation_id"],
+                operation_date=row["date"],
+                amount=amount,
+            )
+        if not marked:
+            return
+
+
 def main():
     if not TELEGRAM_BOT_TOKEN:
         raise RuntimeError(
@@ -4284,6 +5128,9 @@ def main():
     app.add_handler(CommandHandler("structure", cmd_structure))
     app.add_handler(CommandHandler("history", cmd_history))
     app.add_handler(CommandHandler("twr", cmd_twr))
+    app.add_handler(CommandHandler("targets", cmd_targets))
+    app.add_handler(CommandHandler("rebalance", cmd_rebalance))
+    app.add_handler(CommandHandler("invest", cmd_invest))
 
     # Ежедневный джоб
     job_time = time(
@@ -4299,6 +5146,7 @@ def main():
 
     app.job_queue.run_daily(daily_job, time=job_time, name="daily_summary")
     app.job_queue.run_repeating(check_income_events, interval=60, first=10, name="income_events_notifier")
+    app.job_queue.run_repeating(check_invest_notifications, interval=60, first=15, name="invest_notifier")
 
     if JOBQUEUE_SMOKE_TEST_ON_START:
         app.job_queue.run_once(

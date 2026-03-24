@@ -321,6 +321,42 @@ class AssetAlias(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
 
+class RebalanceTarget(Base):
+    __tablename__ = "rebalance_targets"
+    __table_args__ = (
+        UniqueConstraint(
+            "account_id",
+            "asset_class",
+            name="uq_rebalance_targets_account_class",
+        ),
+    )
+
+    id = Column(Integer, primary_key=True)
+    account_id = Column(String, nullable=False)
+    asset_class = Column(String, nullable=False)
+    target_weight_pct = Column(Numeric(9, 4), nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, server_default=func.now(), nullable=False)
+
+
+class InvestNotification(Base):
+    __tablename__ = "invest_notifications"
+    __table_args__ = (
+        UniqueConstraint(
+            "account_id",
+            "operation_id",
+            name="uq_invest_notifications_account_operation",
+        ),
+    )
+
+    id = Column(Integer, primary_key=True)
+    account_id = Column(String, nullable=False)
+    operation_id = Column(String, nullable=False)
+    operation_date = Column(DateTime, nullable=False)
+    amount = Column(Numeric(18, 2), nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, server_default=func.now(), nullable=False)
+
+
 # ============ INIT DB ============
 
 engine = create_engine(DB_DSN, echo=False, future=True)

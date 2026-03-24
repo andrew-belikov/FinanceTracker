@@ -9,6 +9,9 @@
   - недельный отчёт по пятницам в 18:00 (по времени хоста);
   - в дневных/недельных/месячных отчётах показываются доходы (купоны, дивиденды) и расходы (комиссии, налоги);
   - месячный отчёт в последний день месяца в 18:00 (по времени хоста);
+  - команда `/targets` показывает текущие таргеты аллокации, а `/targets set stocks=50 bonds=30 cash=20` сохраняет целевые доли по классам активов;
+  - команда `/rebalance` показывает текущие отклонения от таргетов и расчёт buy/sell по классам, чтобы вернуться к целевой структуре;
+  - команда `/invest <sum>` подсказывает, как распределить новое пополнение по таргетам;
   - команда `/twr` с corrected дневным period-first TWR по активному счёту, XIRR в годовых, run-rate на 31 декабря (без новых внешних cashflow) и графиком по дням в двух связанных панелях: стоимость портфеля и TWR;
   - команда `/dataset` отправляет один ZIP-архив для AI-анализа: внутри `dataset.json`, `daily_timeseries.csv`, `positions_current.csv`, `operations.csv`, `income_events.csv` и `README_AI.md`; summary в архиве period-first, а не lifetime-first, плюс есть `logical_asset_id`, `reconciliation_*` и quality flags;
   - команда `/year` работает в двух режимах: без аргумента — отчёт за текущий год (YTD), с аргументом `/year YYYY` — отчёт за указанный календарный год;
@@ -16,6 +19,7 @@
   - для `/year` финансовые суммы считаются только по исполненным операциям (`state = OPERATION_STATE_EXECUTED`) c дедупликацией по `operation_id` (последняя запись по `id`), чтобы не было задвоений;
   - в `/year` добавлены блоки top-N по активам (с строкой `Итого`) и ключевые формулы: realized net по продажам = `yield + commission`, income net по купонам/дивидендам = `gross + tax`, unrealized на конец периода берётся из последнего снапшота периода;
   - авто‑уведомления о зачислении купонов и дивидендов (по событиям из БД);
+  - авто‑подсказка по каждому новому пополнению счёта: бот автоматически отправляет рекомендацию в логике `/invest <сумма>`;
   - уведомление о новом максимуме портфеля «по итогу дня»;
   - уведомление о выполнении годового плана пополнений.
 - Ограничение доступа по списку доверенных Telegram user_id.
@@ -34,7 +38,7 @@
 ## Архитектура
 
 - `tracker` — сервис, который опрашивает Invest API и пишет снапшоты в БД.
-- `bot` — Telegram‑бот, который читает данные из БД и отправляет отчёты.
+- `bot` — Telegram‑бот, который читает данные из БД, хранит таргеты аллокации и отправляет отчёты.
 - `db` — Postgres.
 
 ```
@@ -272,6 +276,14 @@ Get-Content .\migrations\20260226_income_events.sql | docker compose exec -T db 
 
 ```powershell
 Get-Content .\migrations\20260324_dataset_source_fields.sql | docker compose exec -T db psql -U $env:POSTGRES_USER -d $env:POSTGRES_DB
+```
+
+Миграция `migrations/20260324_rebalance_targets_and_invest_notifications.sql` добавляет таблицы
+`rebalance_targets` и `invest_notifications` для `/targets`, `/rebalance`, `/invest`
+и автоматических подсказок по новым пополнениям.
+
+```powershell
+Get-Content .\migrations\20260324_rebalance_targets_and_invest_notifications.sql | docker compose exec -T db psql -U $env:POSTGRES_USER -d $env:POSTGRES_DB
 ```
 
 Важно: эту миграцию нужно применить **до** пересборки `tracker`, иначе новый код tracker
