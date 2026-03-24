@@ -10,7 +10,7 @@ Telegram-бот для проекта iis_tracker.
     /dataset    — архив json+csv+md для AI-анализа
     /structure  — текущая структура портфеля
     /history    — график стоимости портфеля и суммы пополнений
-    /twr        — TWR (time-weighted return) и график по дням
+    /twr        — TWR, XIRR и run-rate на конец года + график по дням
     /help       — список команд
 
 - Ежедневная задача (18:00 по времени хоста, через JobQueue):
@@ -91,6 +91,7 @@ JOBQUEUE_SMOKE_TEST_DELAY_SECONDS = int(os.getenv("JOBQUEUE_SMOKE_TEST_DELAY_SEC
 
 # Годовой план пополнений
 PLAN_ANNUAL_CONTRIB_RUB = float(os.getenv("PLAN_ANNUAL_CONTRIB_RUB", "400000"))
+TINKOFF_ACCOUNT_ID = os.getenv("TINKOFF_ACCOUNT_ID", "auto").strip()
 
 # Подключение к БД (та же, что у сервиса снапшотов)
 DB_HOST = os.getenv("DB_HOST", "db")
@@ -198,8 +199,9 @@ EXECUTED_OPERATION_STATE = "OPERATION_STATE_EXECUTED"
 
 OPERATIONS_DEDUP_CTE = """
 WITH operations_dedup AS (
-    SELECT DISTINCT ON (COALESCE(operation_id, id::text))
+    SELECT DISTINCT ON (account_id, COALESCE(operation_id, id::text))
         id,
+        account_id,
         operation_id,
         date,
         amount,
@@ -210,7 +212,7 @@ WITH operations_dedup AS (
         commission,
         yield
     FROM operations
-    ORDER BY COALESCE(operation_id, id::text), id DESC
+    ORDER BY account_id, COALESCE(operation_id, id::text), id DESC
 )
 """
 
@@ -410,6 +412,152 @@ def fmt_compact_pct(x: float | None, precision: int = 1, signed: bool = False) -
     if "." in value:
         value = value.rstrip("0").rstrip(".")
     return f"{value} %"
+
+
+REPORTING_ACCOUNT_UNAVAILABLE_TEXT = (
+    "Не удалось определить активный счёт для отчёта. "
+    "Укажите корректный TINKOFF_ACCOUNT_ID или дождитесь первого снапшота."
+)
+
+
+def normalize_reporting_account_id(raw_value: str | None) -> str | None:
+    value = (raw_value or "").strip()
+    if not value or value.lower() == "auto":
+        return None
+    return value
+
+
+def choose_reporting_account_id(
+    explicit_account_id: str | None,
+    latest_snapshot_account_id: str | None,
+) -> str | None:
+    normalized_explicit = normalize_reporting_account_id(explicit_account_id)
+    if normalized_explicit:
+        return normalized_explicit
+
+    latest_value = (latest_snapshot_account_id or "").strip()
+    return latest_value or None
+
+
+def compute_twr_series(
+    snapshot_rows: list[dict],
+    net_external_flow_by_day: dict[date, float],
+) -> tuple[list[date], list[float | None], list[float]] | None:
+    if len(snapshot_rows) < 2:
+        return None
+
+    dates: list[date] = []
+    values: list[float | None] = []
+    for row in snapshot_rows:
+        dates.append(row["snapshot_date"])
+        total_value = row.get("total_value")
+        values.append(float(total_value) if total_value is not None else None)
+
+    cumulative_multiplier = 1.0
+    twr: list[float] = [0.0]
+    for idx in range(1, len(dates)):
+        previous_value = values[idx - 1]
+        current_value = values[idx]
+        net_external_flow = net_external_flow_by_day.get(dates[idx], 0.0)
+
+        if previous_value in (None, 0) or current_value is None:
+            twr.append(cumulative_multiplier - 1.0)
+            continue
+
+        period_return = (current_value - net_external_flow) / previous_value - 1.0
+        cumulative_multiplier *= 1.0 + period_return
+        twr.append(cumulative_multiplier - 1.0)
+
+    return dates, values, twr
+
+
+def compute_xnpv(rate: float, cashflows: list[tuple[datetime, float]]) -> float:
+    base_dt = cashflows[0][0]
+    total = 0.0
+    for dt, amount in cashflows:
+        years = (dt - base_dt).total_seconds() / (365.0 * 24 * 3600)
+        total += amount / ((1.0 + rate) ** years)
+    return total
+
+
+def compute_xirr(cashflows: list[tuple[datetime, float]]) -> float | None:
+    if not cashflows:
+        return None
+    if not any(amount < 0 for _, amount in cashflows):
+        return None
+    if not any(amount > 0 for _, amount in cashflows):
+        return None
+
+    low = -0.9999
+    high = 10.0
+    low_value = compute_xnpv(low, cashflows)
+    high_value = compute_xnpv(high, cashflows)
+
+    expansions = 0
+    while low_value * high_value > 0 and expansions < 20:
+        high *= 2
+        high_value = compute_xnpv(high, cashflows)
+        expansions += 1
+
+    if low_value * high_value > 0:
+        return None
+
+    for _ in range(200):
+        mid = (low + high) / 2.0
+        mid_value = compute_xnpv(mid, cashflows)
+        if abs(mid_value) < 1e-8:
+            return mid
+        if low_value * mid_value <= 0:
+            high = mid
+            high_value = mid_value
+        else:
+            low = mid
+            low_value = mid_value
+
+    return (low + high) / 2.0
+
+
+def project_run_rate_value(
+    current_value: float | None,
+    annual_rate: float | None,
+    from_date: date,
+    to_date: date,
+) -> float | None:
+    if current_value is None or annual_rate is None:
+        return None
+
+    day_count = (to_date - from_date).days
+    if day_count < 0:
+        return None
+    if day_count == 0:
+        return current_value
+
+    return current_value * ((1.0 + annual_rate) ** (day_count / 365.0))
+
+
+def render_twr_summary_text(
+    *,
+    last_date: date,
+    last_value: float | None,
+    last_twr_pct: float,
+    xirr_value: float | None,
+    projected_value: float | None,
+    projection_date: date | None,
+) -> str:
+    calc_date_text = last_date.strftime("%d.%m.%Y")
+    projection_date_text = projection_date.strftime("%d.%m.%Y") if projection_date is not None else "—"
+    xirr_text = fmt_pct(xirr_value * 100.0, precision=2) if xirr_value is not None else "—"
+    projection_text = fmt_rub(projected_value) if projected_value is not None else "—"
+
+    return (
+        "📈 *TWR и run-rate*\n"
+        f"Дата расчёта: {calc_date_text}\n\n"
+        f"*TWR периода*: {fmt_pct(last_twr_pct, precision=2)}\n"
+        f"*Текущая стоимость*: {fmt_rub(last_value)}\n\n"
+        f"*XIRR*: {xirr_text} годовых\n"
+        f"*Run-rate на {projection_date_text}*: {projection_text}\n"
+        "_Сценарий: без новых пополнений и выводов._"
+    )
 
 
 def format_month_short_label(d: date) -> str:
@@ -632,18 +780,39 @@ def get_year_period(year: int | None) -> tuple[datetime, datetime, str, bool]:
 # ============ DB QUERIES (CORE) ===========
 
 
-def get_latest_snapshots(session, limit: int = 2):
+def get_latest_snapshot_account_id(session) -> str | None:
+    return session.execute(
+        text(
+            """
+            SELECT account_id
+            FROM portfolio_snapshots
+            ORDER BY snapshot_date DESC, snapshot_at DESC, id DESC
+            LIMIT 1
+            """
+        )
+    ).scalar()
+
+
+def resolve_reporting_account_id(session) -> str | None:
+    return choose_reporting_account_id(
+        TINKOFF_ACCOUNT_ID,
+        get_latest_snapshot_account_id(session),
+    )
+
+
+def get_latest_snapshots(session, account_id: str, limit: int = 2):
     rows = (
         session.execute(
             text(
                 """
         SELECT snapshot_date, snapshot_at, total_value
         FROM portfolio_snapshots
+        WHERE account_id = :account_id
         ORDER BY snapshot_date DESC, snapshot_at DESC
         LIMIT :limit
         """
             ),
-            {"limit": limit},
+            {"account_id": account_id, "limit": limit},
         )
         .mappings()
         .all()
@@ -651,64 +820,88 @@ def get_latest_snapshots(session, limit: int = 2):
     return list(rows)
 
 
-def get_latest_snapshot_date(session):
+def get_latest_snapshot_date(session, account_id: str):
     return session.execute(
-        text("SELECT MAX(snapshot_date) FROM portfolio_snapshots")
+        text("SELECT MAX(snapshot_date) FROM portfolio_snapshots WHERE account_id = :account_id"),
+        {"account_id": account_id},
     ).scalar_one()
 
 
 def get_latest_deposit_date(
     session,
+    account_id: str,
     operation_types: tuple[str, ...] = DEPOSIT_OPERATION_TYPES,
 ):
     return session.execute(
         text(
-            """
+            f"""
+            {OPERATIONS_DEDUP_CTE}
             SELECT MAX(date::date)
-            FROM operations
-            WHERE operation_type IN :operation_types
+            FROM operations_dedup
+            WHERE account_id = :account_id
+              AND operation_type IN :operation_types
+              AND state = :executed_state
             """
         ).bindparams(bindparam("operation_types", expanding=True)),
-        {"operation_types": operation_types},
+        {
+            "account_id": account_id,
+            "operation_types": operation_types,
+            "executed_state": EXECUTED_OPERATION_STATE,
+        },
     ).scalar_one()
 
 
 def get_total_deposits(
     session,
+    account_id: str,
     operation_types: tuple[str, ...] = DEPOSIT_OPERATION_TYPES,
 ) -> float:
     row = session.execute(
         text(
-            """
+            f"""
+            {OPERATIONS_DEDUP_CTE}
             SELECT COALESCE(SUM(amount), 0) AS s
-            FROM operations
-            WHERE operation_type IN :operation_types
+            FROM operations_dedup
+            WHERE account_id = :account_id
+              AND operation_type IN :operation_types
+              AND state = :executed_state
             """
         ).bindparams(bindparam("operation_types", expanding=True)),
-        {"operation_types": operation_types},
+        {
+            "account_id": account_id,
+            "operation_types": operation_types,
+            "executed_state": EXECUTED_OPERATION_STATE,
+        },
     ).scalar_one()
     return float(row or 0)
 
 
 def get_deposits_for_period(
     session,
+    account_id: str,
     start_dt: datetime,
     end_dt: datetime,
     operation_types: tuple[str, ...] = DEPOSIT_OPERATION_TYPES,
 ) -> float:
     row = session.execute(
         text(
-            """
+            f"""
+        {OPERATIONS_DEDUP_CTE}
         SELECT COALESCE(SUM(amount), 0) AS s
-        FROM operations
-        WHERE date >= :start_dt AND date < :end_dt
+        FROM operations_dedup
+        WHERE account_id = :account_id
+          AND date >= :start_dt
+          AND date < :end_dt
           AND operation_type IN :operation_types
+          AND state = :executed_state
         """
         ).bindparams(bindparam("operation_types", expanding=True)),
         {
+            "account_id": account_id,
             "start_dt": start_dt,
             "end_dt": end_dt,
             "operation_types": operation_types,
+            "executed_state": EXECUTED_OPERATION_STATE,
         },
     ).scalar_one()
     return float(row or 0)
@@ -722,7 +915,7 @@ def _is_undefined_table_error(exc: Exception, table_name: str) -> bool:
     return f'relation "{table_name}" does not exist' in str(exc).lower()
 
 
-def get_income_for_period(db, start_date, end_date) -> tuple[Decimal, Decimal]:
+def get_income_for_period(db, account_id: str, start_date, end_date) -> tuple[Decimal, Decimal]:
     try:
         row = db.execute(
             text(
@@ -731,11 +924,12 @@ def get_income_for_period(db, start_date, end_date) -> tuple[Decimal, Decimal]:
                     COALESCE(SUM(CASE WHEN event_type = 'coupon' THEN net_amount ELSE 0 END), 0) AS coupons,
                     COALESCE(SUM(CASE WHEN event_type = 'dividend' THEN net_amount ELSE 0 END), 0) AS dividends
                 FROM income_events
-                WHERE event_date >= :start_date
+                WHERE account_id = :account_id
+                  AND event_date >= :start_date
                   AND event_date <= :end_date
                 """
             ),
-            {"start_date": start_date, "end_date": end_date},
+            {"account_id": account_id, "start_date": start_date, "end_date": end_date},
         ).mappings().one()
     except Exception as exc:
         if _is_undefined_table_error(exc, "income_events"):
@@ -745,27 +939,32 @@ def get_income_for_period(db, start_date, end_date) -> tuple[Decimal, Decimal]:
     return Decimal(row["coupons"] or 0), Decimal(row["dividends"] or 0)
 
 
-def get_commissions_for_period(db, start_date, end_date) -> Decimal:
+def get_commissions_for_period(db, account_id: str, start_date, end_date) -> Decimal:
     total = db.execute(
         text(
-            """
+            f"""
+            {OPERATIONS_DEDUP_CTE}
             SELECT COALESCE(SUM(amount), 0) AS total
-            FROM operations
-            WHERE date >= :start_date
+            FROM operations_dedup
+            WHERE account_id = :account_id
+              AND date >= :start_date
               AND date <= :end_date
               AND operation_type IN :operation_types
+              AND state = :executed_state
             """
         ).bindparams(bindparam("operation_types", expanding=True)),
         {
+            "account_id": account_id,
             "start_date": start_date,
             "end_date": end_date,
             "operation_types": COMMISSION_OPERATION_TYPES,
+            "executed_state": EXECUTED_OPERATION_STATE,
         },
     ).scalar_one()
     return abs(Decimal(total or 0))
 
 
-def get_taxes_for_period(db, start_date, end_date) -> Decimal:
+def get_taxes_for_period(db, account_id: str, start_date, end_date) -> Decimal:
     income_taxes = Decimal("0")
     try:
         income_taxes_row = db.execute(
@@ -773,11 +972,12 @@ def get_taxes_for_period(db, start_date, end_date) -> Decimal:
                 """
                 SELECT COALESCE(SUM(tax_amount), 0) AS total
                 FROM income_events
-                WHERE event_date >= :start_date
+                WHERE account_id = :account_id
+                  AND event_date >= :start_date
                   AND event_date <= :end_date
                 """
             ),
-            {"start_date": start_date, "end_date": end_date},
+            {"account_id": account_id, "start_date": start_date, "end_date": end_date},
         ).scalar_one()
         income_taxes = Decimal(income_taxes_row or 0)
     except Exception as exc:
@@ -786,24 +986,29 @@ def get_taxes_for_period(db, start_date, end_date) -> Decimal:
 
     operation_taxes = db.execute(
         text(
-            """
+            f"""
+            {OPERATIONS_DEDUP_CTE}
             SELECT COALESCE(SUM(ABS(amount)), 0) AS total
-            FROM operations
-            WHERE date >= :start_date
+            FROM operations_dedup
+            WHERE account_id = :account_id
+              AND date >= :start_date
               AND date <= :end_date
               AND operation_type IN :operation_types
+              AND state = :executed_state
             """
         ).bindparams(bindparam("operation_types", expanding=True)),
         {
+            "account_id": account_id,
             "start_date": start_date,
             "end_date": end_date,
             "operation_types": TAX_OPERATION_TYPES,
+            "executed_state": EXECUTED_OPERATION_STATE,
         },
     ).scalar_one()
     return income_taxes + Decimal(operation_taxes or 0)
 
 
-def get_month_snapshots(session, year: int, month: int):
+def get_month_snapshots(session, account_id: str, year: int, month: int):
     month_start = date(year, month, 1)
     if month == 12:
         next_month_start = date(year + 1, 1, 1)
@@ -817,12 +1022,13 @@ def get_month_snapshots(session, year: int, month: int):
                 """
         SELECT id, snapshot_date, snapshot_at, total_value
         FROM portfolio_snapshots
-        WHERE snapshot_date < :start
+        WHERE account_id = :account_id
+          AND snapshot_date < :start
         ORDER BY snapshot_date DESC, snapshot_at DESC
         LIMIT 1
         """
             ),
-            {"start": month_start, "end": next_month_start},
+            {"account_id": account_id, "start": month_start, "end": next_month_start},
         )
         .mappings()
         .first()
@@ -835,13 +1041,14 @@ def get_month_snapshots(session, year: int, month: int):
                 """
         SELECT id, snapshot_date, snapshot_at, total_value
         FROM portfolio_snapshots
-        WHERE snapshot_date >= :start
+        WHERE account_id = :account_id
+          AND snapshot_date >= :start
           AND snapshot_date < :end
         ORDER BY snapshot_date DESC, snapshot_at DESC
         LIMIT 1
         """
             ),
-            {"start": month_start, "end": next_month_start},
+            {"account_id": account_id, "start": month_start, "end": next_month_start},
         )
         .mappings()
         .first()
@@ -850,7 +1057,7 @@ def get_month_snapshots(session, year: int, month: int):
     return start_row, end_row
 
 
-def get_period_snapshots(session, start_date: date, end_date_exclusive: date):
+def get_period_snapshots(session, account_id: str, start_date: date, end_date_exclusive: date):
     """
     Возвращает пару снапшотов для периода:
     - start_row: последний снапшот строго до start_date
@@ -862,12 +1069,13 @@ def get_period_snapshots(session, start_date: date, end_date_exclusive: date):
                 """
         SELECT id, snapshot_date, snapshot_at, total_value
         FROM portfolio_snapshots
-        WHERE snapshot_date < :start
+        WHERE account_id = :account_id
+          AND snapshot_date < :start
         ORDER BY snapshot_date DESC, snapshot_at DESC
         LIMIT 1
         """
             ),
-            {"start": start_date},
+            {"account_id": account_id, "start": start_date},
         )
         .mappings()
         .first()
@@ -879,13 +1087,14 @@ def get_period_snapshots(session, start_date: date, end_date_exclusive: date):
                 """
         SELECT id, snapshot_date, snapshot_at, total_value
         FROM portfolio_snapshots
-        WHERE snapshot_date >= :start
+        WHERE account_id = :account_id
+          AND snapshot_date >= :start
           AND snapshot_date < :end
         ORDER BY snapshot_date DESC, snapshot_at DESC
         LIMIT 1
         """
             ),
-            {"start": start_date, "end": end_date_exclusive},
+            {"account_id": account_id, "start": start_date, "end": end_date_exclusive},
         )
         .mappings()
         .first()
@@ -894,13 +1103,14 @@ def get_period_snapshots(session, start_date: date, end_date_exclusive: date):
     return start_row, end_row
 
 
-def get_latest_snapshot_with_id(session):
+def get_latest_snapshot_with_id(session, account_id: str):
     row = (
         session.execute(
             text(
                 """
         SELECT
             id,
+            account_id,
             snapshot_date,
             snapshot_at,
             total_value,
@@ -911,10 +1121,12 @@ def get_latest_snapshot_with_id(session):
             total_currencies,
             total_futures
         FROM portfolio_snapshots
+        WHERE account_id = :account_id
         ORDER BY snapshot_date DESC, snapshot_at DESC
         LIMIT 1
         """
-            )
+            ),
+            {"account_id": account_id},
         )
         .mappings()
         .first()
@@ -922,7 +1134,7 @@ def get_latest_snapshot_with_id(session):
     return row
 
 
-def get_dataset_bounds(session):
+def get_dataset_bounds(session, account_id: str):
     row = (
         session.execute(
             text(
@@ -931,8 +1143,10 @@ def get_dataset_bounds(session):
                     MIN(snapshot_date) AS min_date,
                     MAX(snapshot_date) AS max_date
                 FROM portfolio_snapshots
+                WHERE account_id = :account_id
                 """
-            )
+            ),
+            {"account_id": account_id},
         )
         .mappings()
         .one()
@@ -940,7 +1154,7 @@ def get_dataset_bounds(session):
     return row
 
 
-def get_daily_snapshot_rows(session):
+def get_daily_snapshot_rows(session, account_id: str):
     rows = (
         session.execute(
             text(
@@ -967,11 +1181,13 @@ def get_daily_snapshot_rows(session):
                             ORDER BY snapshot_at DESC, id DESC
                         ) AS rn
                     FROM portfolio_snapshots
+                    WHERE account_id = :account_id
                 ) daily
                 WHERE rn = 1
                 ORDER BY snapshot_date ASC
                 """
-            )
+            ),
+            {"account_id": account_id},
         )
         .mappings()
         .all()
@@ -1040,13 +1256,14 @@ def get_positions_for_snapshot(session, snapshot_id: int):
     return rows
 
 
-def get_dataset_operations(session, start_dt: datetime, end_dt: datetime):
+def get_dataset_operations(session, account_id: str, start_dt: datetime, end_dt: datetime):
     rows = (
         session.execute(
             text(
                 """
                 WITH operations_dedup AS (
-                    SELECT DISTINCT ON (COALESCE(operation_id, id::text))
+                    SELECT DISTINCT ON (account_id, COALESCE(operation_id, id::text))
+                        account_id,
                         operation_id,
                         date,
                         amount,
@@ -1064,7 +1281,7 @@ def get_dataset_operations(session, start_dt: datetime, end_dt: datetime):
                         price,
                         quantity
                     FROM operations
-                    ORDER BY COALESCE(operation_id, id::text), id DESC
+                    ORDER BY account_id, COALESCE(operation_id, id::text), id DESC
                 )
                 SELECT
                     operation_id,
@@ -1084,13 +1301,15 @@ def get_dataset_operations(session, start_dt: datetime, end_dt: datetime):
                     price,
                     quantity
                 FROM operations_dedup
-                WHERE date >= :start_dt
+                WHERE account_id = :account_id
+                  AND date >= :start_dt
                   AND date < :end_dt
                   AND state = :executed_state
                 ORDER BY date ASC, operation_id ASC NULLS LAST
                 """
             ),
             {
+                "account_id": account_id,
                 "start_dt": start_dt,
                 "end_dt": end_dt,
                 "executed_state": EXECUTED_OPERATION_STATE,
@@ -1132,7 +1351,7 @@ def get_asset_alias_rows(session):
     return rows
 
 
-def get_income_events_for_period(session, start_date: date, end_date: date):
+def get_income_events_for_period(session, account_id: str, start_date: date, end_date: date):
     try:
         rows = (
             session.execute(
@@ -1151,12 +1370,13 @@ def get_income_events_for_period(session, start_date: date, end_date: date):
                         ie.notified
                     FROM income_events ie
                     LEFT JOIN instruments i ON i.figi = ie.figi
-                    WHERE ie.event_date >= :start_date
+                    WHERE ie.account_id = :account_id
+                      AND ie.event_date >= :start_date
                       AND ie.event_date <= :end_date
                     ORDER BY ie.event_date ASC, ie.figi ASC, ie.event_type ASC
                     """
                 ),
-                {"start_date": start_date, "end_date": end_date},
+                {"account_id": account_id, "start_date": start_date, "end_date": end_date},
             )
             .mappings()
             .all()
@@ -1283,7 +1503,12 @@ def compute_positions_diff_lines(start_positions, end_positions) -> list[str]:
     return new_lines + closed_lines + up_lines + down_lines
 
 
-def compute_positions_diff_grouped(session, from_dt: datetime, to_dt: datetime) -> tuple[list[str], str | None]:
+def compute_positions_diff_grouped(
+    session,
+    account_id: str,
+    from_dt: datetime,
+    to_dt: datetime,
+) -> tuple[list[str], str | None]:
     def _qty(value) -> float:
         if value is None:
             return 0.0
@@ -1321,12 +1546,13 @@ def compute_positions_diff_grouped(session, from_dt: datetime, to_dt: datetime) 
             """
             SELECT id, snapshot_date, snapshot_at
             FROM portfolio_snapshots
-            WHERE snapshot_at >= :from_dt
+            WHERE account_id = :account_id
+              AND snapshot_at >= :from_dt
               AND snapshot_at < :to_dt
             ORDER BY snapshot_date ASC, snapshot_at ASC
             """
         ),
-        {"from_dt": from_dt, "to_dt": to_dt},
+        {"account_id": account_id, "from_dt": from_dt, "to_dt": to_dt},
     ).mappings().all()
 
     if len(snapshot_bounds) < 2:
@@ -1417,16 +1643,18 @@ def compute_positions_diff_grouped(session, from_dt: datetime, to_dt: datetime) 
     return grouped_lines, None
 
 
-def get_portfolio_timeseries(session):
+def get_portfolio_timeseries(session, account_id: str):
     rows = (
         session.execute(
             text(
                 """
         SELECT snapshot_date, total_value
         FROM portfolio_snapshots
+        WHERE account_id = :account_id
         ORDER BY snapshot_date ASC
         """
-            )
+            ),
+            {"account_id": account_id},
         )
         .mappings()
         .all()
@@ -1436,20 +1664,28 @@ def get_portfolio_timeseries(session):
 
 def get_deposits_by_date(
     session,
+    account_id: str,
     operation_types: tuple[str, ...] = DEPOSIT_OPERATION_TYPES,
 ):
     rows = (
         session.execute(
             text(
-                """
+                f"""
+        {OPERATIONS_DEDUP_CTE}
         SELECT date::date AS d, SUM(amount) AS s
-        FROM operations
-        WHERE operation_type IN :operation_types
+        FROM operations_dedup
+        WHERE account_id = :account_id
+          AND operation_type IN :operation_types
+          AND state = :executed_state
         GROUP BY date::date
         ORDER BY d ASC
         """
             ).bindparams(bindparam("operation_types", expanding=True)),
-            {"operation_types": operation_types},
+            {
+                "account_id": account_id,
+                "operation_types": operation_types,
+                "executed_state": EXECUTED_OPERATION_STATE,
+            },
         )
         .mappings()
         .all()
@@ -1457,7 +1693,7 @@ def get_deposits_by_date(
     return rows
 
 
-def get_year_financials_from_operations(session, start_dt: datetime, end_dt: datetime) -> dict[str, Decimal]:
+def get_year_financials_from_operations(session, account_id: str, start_dt: datetime, end_dt: datetime) -> dict[str, Decimal]:
     row = session.execute(
         text(
             f"""
@@ -1473,7 +1709,8 @@ def get_year_financials_from_operations(session, start_dt: datetime, end_dt: dat
                     ELSE 0
                 END), 0) AS coupon_net
             FROM operations_dedup
-            WHERE date >= :start_dt
+            WHERE account_id = :account_id
+              AND date >= :start_dt
               AND date < :end_dt
               AND state = :executed_state
             """
@@ -1481,6 +1718,7 @@ def get_year_financials_from_operations(session, start_dt: datetime, end_dt: dat
             bindparam("deposit_types", expanding=True),
         ),
         {
+            "account_id": account_id,
             "start_dt": start_dt,
             "end_dt": end_dt,
             "deposit_types": DEPOSIT_OPERATION_TYPES,
@@ -1500,7 +1738,7 @@ def get_year_financials_from_operations(session, start_dt: datetime, end_dt: dat
     }
 
 
-def compute_realized_by_asset(session, start_dt: datetime, end_dt: datetime) -> tuple[list[dict], Decimal]:
+def compute_realized_by_asset(session, account_id: str, start_dt: datetime, end_dt: datetime) -> tuple[list[dict], Decimal]:
     rows = (
         session.execute(
             text(
@@ -1513,7 +1751,8 @@ def compute_realized_by_asset(session, start_dt: datetime, end_dt: datetime) -> 
                     COALESCE(SUM(COALESCE(od.yield, 0) + COALESCE(od.commission, 0)), 0) AS amount
                 FROM operations_dedup od
                 LEFT JOIN instruments i ON i.figi = od.figi
-                WHERE od.date >= :start_dt
+                WHERE od.account_id = :account_id
+                  AND od.date >= :start_dt
                   AND od.date < :end_dt
                   AND od.state = :executed_state
                   AND od.operation_type = 'OPERATION_TYPE_SELL'
@@ -1523,6 +1762,7 @@ def compute_realized_by_asset(session, start_dt: datetime, end_dt: datetime) -> 
                 """
             ),
             {
+                "account_id": account_id,
                 "start_dt": start_dt,
                 "end_dt": end_dt,
                 "executed_state": EXECUTED_OPERATION_STATE,
@@ -1548,7 +1788,7 @@ def compute_realized_by_asset(session, start_dt: datetime, end_dt: datetime) -> 
     return parsed, total
 
 
-def compute_income_by_asset_net(session, start_dt: datetime, end_dt: datetime) -> tuple[list[dict], Decimal]:
+def compute_income_by_asset_net(session, account_id: str, start_dt: datetime, end_dt: datetime) -> tuple[list[dict], Decimal]:
     rows = (
         session.execute(
             text(
@@ -1567,7 +1807,8 @@ def compute_income_by_asset_net(session, start_dt: datetime, end_dt: datetime) -
                     ), 0) AS net_amount
                 FROM operations_dedup od
                 LEFT JOIN instruments i ON i.figi = od.figi
-                WHERE od.date >= :start_dt
+                WHERE od.account_id = :account_id
+                  AND od.date >= :start_dt
                   AND od.date < :end_dt
                   AND od.state = :executed_state
                   AND od.operation_type IN (
@@ -1582,6 +1823,7 @@ def compute_income_by_asset_net(session, start_dt: datetime, end_dt: datetime) -
                 """
             ),
             {
+                'account_id': account_id,
                 'start_dt': start_dt,
                 'end_dt': end_dt,
                 'executed_state': EXECUTED_OPERATION_STATE,
@@ -1607,7 +1849,7 @@ def compute_income_by_asset_net(session, start_dt: datetime, end_dt: datetime) -
     return parsed, total
 
 
-def get_unrealized_at_period_end(session, to_dt: datetime) -> Decimal:
+def get_unrealized_at_period_end(session, account_id: str, to_dt: datetime) -> Decimal:
     to_date = to_dt.date() - timedelta(days=1)
     snap = (
         session.execute(
@@ -1615,12 +1857,13 @@ def get_unrealized_at_period_end(session, to_dt: datetime) -> Decimal:
                 """
                 SELECT id, expected_yield
                 FROM portfolio_snapshots
-                WHERE snapshot_date <= :to_date
+                WHERE account_id = :account_id
+                  AND snapshot_date <= :to_date
                 ORDER BY snapshot_date DESC, snapshot_at DESC
                 LIMIT 1
                 """
             ),
-            {'to_date': to_date},
+            {'account_id': account_id, 'to_date': to_date},
         )
         .mappings()
         .first()
@@ -1650,6 +1893,7 @@ def get_unrealized_at_period_end(session, to_dt: datetime) -> Decimal:
 
 def get_year_deposits_by_date(
     session,
+    account_id: str,
     start_dt: datetime,
     end_dt: datetime,
 ):
@@ -1660,7 +1904,8 @@ def get_year_deposits_by_date(
                 {OPERATIONS_DEDUP_CTE}
                 SELECT date::date AS d, SUM(amount) AS s
                 FROM operations_dedup
-                WHERE date >= :start_dt
+                WHERE account_id = :account_id
+                  AND date >= :start_dt
                   AND date < :end_dt
                   AND operation_type IN :operation_types
                   AND state = :executed_state
@@ -1669,6 +1914,7 @@ def get_year_deposits_by_date(
                 """
             ).bindparams(bindparam("operation_types", expanding=True)),
             {
+                "account_id": account_id,
                 "start_dt": start_dt,
                 "end_dt": end_dt,
                 "operation_types": DEPOSIT_OPERATION_TYPES,
@@ -1683,6 +1929,7 @@ def get_year_deposits_by_date(
 
 def get_monthly_portfolio_values(
     session,
+    account_id: str,
     from_dt: datetime,
     to_dt: datetime,
     is_ytd: bool,
@@ -1701,7 +1948,8 @@ def get_monthly_portfolio_values(
                             ORDER BY snapshot_date DESC, snapshot_at DESC
                         ) AS rn
                     FROM portfolio_snapshots
-                    WHERE snapshot_date >= :from_date
+                    WHERE account_id = :account_id
+                      AND snapshot_date >= :from_date
                       AND snapshot_date < :to_date
                 ) month_snaps
                 WHERE rn = 1
@@ -1709,6 +1957,7 @@ def get_monthly_portfolio_values(
                 """
             ),
             {
+                "account_id": account_id,
                 "from_date": from_dt.date(),
                 "to_date": to_dt.date(),
             },
@@ -1719,7 +1968,7 @@ def get_monthly_portfolio_values(
     return rows
 
 
-def get_monthly_deposits(session, from_dt: datetime, to_dt: datetime):
+def get_monthly_deposits(session, account_id: str, from_dt: datetime, to_dt: datetime):
     rows = (
         session.execute(
             text(
@@ -1729,7 +1978,8 @@ def get_monthly_deposits(session, from_dt: datetime, to_dt: datetime):
                     date_trunc('month', date)::date AS month_start,
                     SUM(amount) AS amount
                 FROM operations_dedup
-                WHERE date >= :from_dt
+                WHERE account_id = :account_id
+                  AND date >= :from_dt
                   AND date < :to_dt
                   AND state = :executed_state
                   AND operation_type = 'OPERATION_TYPE_INPUT'
@@ -1738,6 +1988,7 @@ def get_monthly_deposits(session, from_dt: datetime, to_dt: datetime):
                 """
             ),
             {
+                "account_id": account_id,
                 "from_dt": from_dt,
                 "to_dt": to_dt,
                 "executed_state": EXECUTED_OPERATION_STATE,
@@ -1749,59 +2000,63 @@ def get_monthly_deposits(session, from_dt: datetime, to_dt: datetime):
     return rows
 
 
-def get_last_snapshot_before_date(session, d: date):
+def get_last_snapshot_before_date(session, account_id: str, d: date):
     return (
         session.execute(
             text(
                 """
                 SELECT snapshot_date, total_value
                 FROM portfolio_snapshots
-                WHERE snapshot_date < :d
+                WHERE account_id = :account_id
+                  AND snapshot_date < :d
                 ORDER BY snapshot_date DESC, snapshot_at DESC
                 LIMIT 1
                 """
             ),
-            {"d": d},
+            {"account_id": account_id, "d": d},
         )
         .mappings()
         .first()
     )
 
 
-def get_first_snapshot_in_period(session, from_date: date, to_date: date):
+def get_first_snapshot_in_period(session, account_id: str, from_date: date, to_date: date):
     return (
         session.execute(
             text(
                 """
                 SELECT snapshot_date, total_value
                 FROM portfolio_snapshots
-                WHERE snapshot_date >= :from_date
+                WHERE account_id = :account_id
+                  AND snapshot_date >= :from_date
                   AND snapshot_date < :to_date
                 ORDER BY snapshot_date ASC, snapshot_at ASC
                 LIMIT 1
                 """
             ),
-            {"from_date": from_date, "to_date": to_date},
+            {"account_id": account_id, "from_date": from_date, "to_date": to_date},
         )
         .mappings()
         .first()
     )
 
 
-def get_deposits_sum_for_period(session, start_dt: datetime, end_dt: datetime) -> float:
+def get_deposits_sum_for_period(session, account_id: str, start_dt: datetime, end_dt: datetime) -> float:
     row = session.execute(
         text(
             f"""
             {OPERATIONS_DEDUP_CTE}
             SELECT COALESCE(SUM(amount), 0) AS s
             FROM operations_dedup
-            WHERE date >= :start_dt
+            WHERE account_id = :account_id
+              AND date >= :start_dt
               AND date < :end_dt
               AND state = :executed_state
               AND operation_type = 'OPERATION_TYPE_INPUT'
             """
         ),
         {
+            "account_id": account_id,
             "start_dt": start_dt,
             "end_dt": end_dt,
             "executed_state": EXECUTED_OPERATION_STATE,
@@ -1809,17 +2064,28 @@ def get_deposits_sum_for_period(session, start_dt: datetime, end_dt: datetime) -
     ).scalar_one()
     return float(row or 0)
 
-def get_portfolio_timeseries_agg_by_date(session):
+def get_portfolio_timeseries_agg_by_date(session, account_id: str):
     rows = (
         session.execute(
             text(
                 """
-        SELECT snapshot_date, SUM(total_value) AS total_value
-        FROM portfolio_snapshots
-        GROUP BY snapshot_date
+        SELECT snapshot_date, total_value
+        FROM (
+            SELECT
+                snapshot_date,
+                total_value,
+                ROW_NUMBER() OVER (
+                    PARTITION BY snapshot_date
+                    ORDER BY snapshot_at DESC, id DESC
+                ) AS rn
+            FROM portfolio_snapshots
+            WHERE account_id = :account_id
+        ) daily
+        WHERE rn = 1
         ORDER BY snapshot_date ASC
         """
-            )
+            ),
+            {"account_id": account_id},
         )
         .mappings()
         .all()
@@ -1827,21 +2093,25 @@ def get_portfolio_timeseries_agg_by_date(session):
     return rows
 
 
-def get_deposits_raw(
-    session,
-    operation_types: tuple[str, ...] = DEPOSIT_OPERATION_TYPES,
-):
+def get_external_cashflows_raw(session, account_id: str):
     rows = (
         session.execute(
             text(
-                """
-        SELECT date, amount
-        FROM operations
-        WHERE operation_type IN :operation_types
+                f"""
+        {OPERATIONS_DEDUP_CTE}
+        SELECT date, amount, operation_type
+        FROM operations_dedup
+        WHERE account_id = :account_id
+          AND operation_type IN :operation_types
+          AND state = :executed_state
         ORDER BY date ASC
         """
             ).bindparams(bindparam("operation_types", expanding=True)),
-            {"operation_types": operation_types},
+            {
+                "account_id": account_id,
+                "operation_types": DEPOSIT_OPERATION_TYPES + WITHDRAWAL_OPERATION_TYPES,
+                "executed_state": EXECUTED_OPERATION_STATE,
+            },
         )
         .mappings()
         .all()
@@ -1849,7 +2119,7 @@ def get_deposits_raw(
     return rows
 
 
-def get_max_value_before_date(session, d: date | None):
+def get_max_value_before_date(session, account_id: str, d: date | None):
     if d is None:
         return None
     row = session.execute(
@@ -1857,15 +2127,16 @@ def get_max_value_before_date(session, d: date | None):
             """
         SELECT MAX(total_value) AS m
         FROM portfolio_snapshots
-        WHERE snapshot_date < :d
+        WHERE account_id = :account_id
+          AND snapshot_date < :d
         """
         ),
-        {"d": d},
+        {"account_id": account_id, "d": d},
     ).scalar_one()
     return float(row) if row is not None else None
 
 
-def get_max_value_to_date(session, d: date | None):
+def get_max_value_to_date(session, account_id: str, d: date | None):
     if d is None:
         return None
     row = session.execute(
@@ -1873,10 +2144,11 @@ def get_max_value_to_date(session, d: date | None):
             """
         SELECT MAX(total_value) AS m
         FROM portfolio_snapshots
-        WHERE snapshot_date <= :d
+        WHERE account_id = :account_id
+          AND snapshot_date <= :d
         """
         ),
-        {"d": d},
+        {"account_id": account_id, "d": d},
     ).scalar_one()
     return float(row) if row is not None else None
 
@@ -1894,11 +2166,15 @@ def build_today_summary() -> str:
     day_end = day_end_exclusive - timedelta(microseconds=1)
 
     with db_session() as session:
-        snaps = get_latest_snapshots(session, limit=2)
-        total_deposits = get_total_deposits(session)
-        coupons, dividends = get_income_for_period(session, day_start, day_end)
-        commissions = get_commissions_for_period(session, day_start, day_end)
-        taxes = get_taxes_for_period(session, day_start, day_end)
+        account_id = resolve_reporting_account_id(session)
+        if account_id is None:
+            return REPORTING_ACCOUNT_UNAVAILABLE_TEXT
+
+        snaps = get_latest_snapshots(session, account_id, limit=2)
+        total_deposits = get_total_deposits(session, account_id)
+        coupons, dividends = get_income_for_period(session, account_id, day_start, day_end)
+        commissions = get_commissions_for_period(session, account_id, day_start, day_end)
+        taxes = get_taxes_for_period(session, account_id, day_start, day_end)
 
     if not snaps:
         return "Пока нет ни одного снапшота портфеля."
@@ -1963,8 +2239,12 @@ def build_week_summary() -> str:
     week_end = week_end_exclusive - timedelta(microseconds=1)
 
     with db_session() as session:
+        account_id = resolve_reporting_account_id(session)
+        if account_id is None:
+            return REPORTING_ACCOUNT_UNAVAILABLE_TEXT
+
         # 1. Определяем даты текущей рабочей недели (понедельник–пятница)
-        latest_snap = get_latest_snapshot_with_id(session)
+        latest_snap = get_latest_snapshot_with_id(session, account_id)
         if not latest_snap:
             return "Пока нет ни одного снапшота портфеля."
 
@@ -1987,18 +2267,8 @@ def build_week_summary() -> str:
         # Ищем снапшот до начала недели, чтобы посчитать дельту
         # Если снапшота ровно в start_date нет, берем ближайший предыдущий
         # Если портфель моложе недели, берем самый первый
-        start_val_row = session.execute(
-            text(
-                """
-            SELECT total_value
-            FROM portfolio_snapshots
-            WHERE snapshot_date < :d
-            ORDER BY snapshot_date DESC, snapshot_at DESC
-            LIMIT 1
-            """
-            ),
-            {"d": week_start_date},
-        ).scalar()
+        start_row = get_last_snapshot_before_date(session, account_id, week_start_date)
+        start_val_row = start_row["total_value"] if start_row is not None else None
 
         start_value = float(start_val_row) if start_val_row is not None else 0.0
 
@@ -2017,14 +2287,14 @@ def build_week_summary() -> str:
             week_delta_pct = 0.0 # Или None, как удобнее
 
         # 4. Пополнения/доходы/расходы за текущую рабочую неделю
-        dep_week = get_deposits_for_period(session, week_start, week_end_exclusive)
-        coupons, dividends = get_income_for_period(session, week_start, week_end)
-        commissions = get_commissions_for_period(session, week_start, week_end)
-        taxes = get_taxes_for_period(session, week_start, week_end)
+        dep_week = get_deposits_for_period(session, account_id, week_start, week_end_exclusive)
+        coupons, dividends = get_income_for_period(session, account_id, week_start, week_end)
+        commissions = get_commissions_for_period(session, account_id, week_start, week_end)
+        taxes = get_taxes_for_period(session, account_id, week_start, week_end)
 
         # 5. Прогресс по годовому плану
         year_start = datetime(week_end_date.year, 1, 1)
-        dep_year = get_deposits_for_period(session, year_start, week_end_exclusive)
+        dep_year = get_deposits_for_period(session, account_id, year_start, week_end_exclusive)
         
         plan = PLAN_ANNUAL_CONTRIB_RUB
         plan_pct = (dep_year / plan * 100.0) if plan > 0 else 0.0
@@ -2094,26 +2364,32 @@ def build_month_summary() -> str:
     next_year_start = date(year + 1, 1, 1)
 
     with db_session() as session:
+        account_id = resolve_reporting_account_id(session)
+        if account_id is None:
+            return REPORTING_ACCOUNT_UNAVAILABLE_TEXT
+
         # Пополнения за месяц
         dep_month = get_deposits_for_period(
             session,
+            account_id=account_id,
             start_dt=month_start_dt,
             end_dt=month_end_exclusive,
         )
 
-        coupons, dividends = get_income_for_period(session, month_start_dt, month_end_dt)
-        commissions = get_commissions_for_period(session, month_start_dt, month_end_dt)
-        taxes = get_taxes_for_period(session, month_start_dt, month_end_dt)
+        coupons, dividends = get_income_for_period(session, account_id, month_start_dt, month_end_dt)
+        commissions = get_commissions_for_period(session, account_id, month_start_dt, month_end_dt)
+        taxes = get_taxes_for_period(session, account_id, month_start_dt, month_end_dt)
 
         # Пополнения за год
         dep_year = get_deposits_for_period(
             session,
+            account_id=account_id,
             start_dt=datetime(year, 1, 1),
             end_dt=month_end_exclusive,
         )
 
         # Снапшоты для изменения стоимости за месяц
-        start_snap, end_snap = get_month_snapshots(session, year, month)
+        start_snap, end_snap = get_month_snapshots(session, account_id, year, month)
 
         start_positions = []
         end_positions = []
@@ -2214,7 +2490,11 @@ def build_structure_text() -> str:
     - внутри блока — бумаги по убыванию суммы
     """
     with db_session() as session:
-        snap = get_latest_snapshot_with_id(session)
+        account_id = resolve_reporting_account_id(session)
+        if account_id is None:
+            return REPORTING_ACCOUNT_UNAVAILABLE_TEXT
+
+        snap = get_latest_snapshot_with_id(session, account_id)
         if not snap:
             return "Нет ни одного снапшота портфеля."
 
@@ -2352,8 +2632,12 @@ def build_history_chart(path: str) -> str | None:
     Ось X — понедельная разметка.
     """
     with db_session() as session:
-        ts = get_portfolio_timeseries(session)
-        deps = get_deposits_by_date(session)
+        account_id = resolve_reporting_account_id(session)
+        if account_id is None:
+            raise ValueError(REPORTING_ACCOUNT_UNAVAILABLE_TEXT)
+
+        ts = get_portfolio_timeseries(session, account_id)
+        deps = get_deposits_by_date(session, account_id)
 
     if len(ts) < 2:
         return None
@@ -2490,8 +2774,12 @@ def build_year_chart(path: str, year: int, end_date_exclusive: date) -> str | No
     is_ytd = end_date_exclusive.year == year and end_date_exclusive <= (datetime.now(TZ).date() + timedelta(days=1))
 
     with db_session() as session:
-        portfolio_rows = get_monthly_portfolio_values(session, period_start_dt, period_end_dt_exclusive, is_ytd)
-        deposits_rows = get_monthly_deposits(session, period_start_dt, period_end_dt_exclusive)
+        account_id = resolve_reporting_account_id(session)
+        if account_id is None:
+            raise ValueError(REPORTING_ACCOUNT_UNAVAILABLE_TEXT)
+
+        portfolio_rows = get_monthly_portfolio_values(session, account_id, period_start_dt, period_end_dt_exclusive, is_ytd)
+        deposits_rows = get_monthly_deposits(session, account_id, period_start_dt, period_end_dt_exclusive)
 
     if not portfolio_rows:
         return None
@@ -2608,8 +2896,12 @@ def build_year_monthly_delta_chart(path: str, year: int, end_date_exclusive: dat
     is_ytd = end_date_exclusive.year == year and end_date_exclusive <= (datetime.now(TZ).date() + timedelta(days=1))
 
     with db_session() as session:
-        portfolio_rows = get_monthly_portfolio_values(session, period_start_dt, period_end_dt_exclusive, is_ytd)
-        deposits_rows = get_monthly_deposits(session, period_start_dt, period_end_dt_exclusive)
+        account_id = resolve_reporting_account_id(session)
+        if account_id is None:
+            raise ValueError(REPORTING_ACCOUNT_UNAVAILABLE_TEXT)
+
+        portfolio_rows = get_monthly_portfolio_values(session, account_id, period_start_dt, period_end_dt_exclusive, is_ytd)
+        deposits_rows = get_monthly_deposits(session, account_id, period_start_dt, period_end_dt_exclusive)
 
         if not portfolio_rows:
             return None
@@ -2630,12 +2922,12 @@ def build_year_monthly_delta_chart(path: str, year: int, end_date_exclusive: dat
             else date(first_month_start.year, first_month_start.month + 1, 1)
         )
 
-        first_snapshot = get_first_snapshot_in_period(session, first_month_start, first_month_end_exclusive)
+        first_snapshot = get_first_snapshot_in_period(session, account_id, first_month_start, first_month_end_exclusive)
         first_month_base = float(first_snapshot["total_value"] or 0) if first_snapshot is not None else values[0]
         first_period_start = first_snapshot["snapshot_date"] if first_snapshot is not None else first_month_start
 
         if first_month_start.month == 1:
-            prev_snapshot = get_last_snapshot_before_date(session, first_month_start)
+            prev_snapshot = get_last_snapshot_before_date(session, account_id, first_month_start)
             if prev_snapshot is not None:
                 first_month_base = float(prev_snapshot["total_value"] or 0)
                 first_period_start = first_month_start
@@ -2645,6 +2937,7 @@ def build_year_monthly_delta_chart(path: str, year: int, end_date_exclusive: dat
         else:
             first_month_deposits = get_deposits_sum_for_period(
                 session,
+                account_id,
                 datetime.combine(first_period_start, time.min),
                 datetime.combine(first_month_end_exclusive, time.min),
             )
@@ -2725,25 +3018,32 @@ def build_year_summary(year: int | None) -> tuple[str, str, str | None]:
     period_end_inclusive = period_end_dt_exclusive.date() - timedelta(days=1)
 
     with db_session() as session:
+        account_id = resolve_reporting_account_id(session)
+        if account_id is None:
+            raise ValueError(REPORTING_ACCOUNT_UNAVAILABLE_TEXT)
+
         year_financials = get_year_financials_from_operations(
             session,
+            account_id,
             period_start_dt,
             period_end_dt_exclusive,
         )
 
-        start_snap, end_snap = get_period_snapshots(session, period_start, period_end_dt_exclusive.date())
-        diff_lines, diff_error = compute_positions_diff_grouped(session, period_start_dt, period_end_dt_exclusive)
+        start_snap, end_snap = get_period_snapshots(session, account_id, period_start, period_end_dt_exclusive.date())
+        diff_lines, diff_error = compute_positions_diff_grouped(session, account_id, period_start_dt, period_end_dt_exclusive)
         realized_by_asset, realized_total = compute_realized_by_asset(
             session,
+            account_id,
             period_start_dt,
             period_end_dt_exclusive,
         )
         income_by_asset_net, income_total_net = compute_income_by_asset_net(
             session,
+            account_id,
             period_start_dt,
             period_end_dt_exclusive,
         )
-        unrealized = get_unrealized_at_period_end(session, period_end_dt_exclusive)
+        unrealized = get_unrealized_at_period_end(session, account_id, period_end_dt_exclusive)
 
     dep_year = float(year_financials["deposits"])
     income_total_net = year_financials["income_net"]
@@ -2800,47 +3100,80 @@ def build_year_summary(year: int | None) -> tuple[str, str, str | None]:
     return summary_text, diff_text, label
 
 
-def compute_twr_timeseries(session):
-    ts = get_portfolio_timeseries_agg_by_date(session)
-    if len(ts) < 2:
-        return None
+def build_net_external_flow_by_day(external_cashflows: list[dict]) -> dict[date, float]:
+    net_external_flow_by_day: dict[date, float] = {}
+    for row in external_cashflows:
+        dt = row.get("date")
+        local_date = to_local_market_date(dt)
+        if local_date is None:
+            continue
 
-    deps = get_deposits_raw(session)
-    dep_by_day: dict[date, float] = {}
-    for row in deps:
+        amount = abs(float(row.get("amount") or 0.0))
+        operation_type = (row.get("operation_type") or "").strip()
+        if operation_type in DEPOSIT_OPERATION_TYPES:
+            signed_amount = amount
+        elif operation_type in WITHDRAWAL_OPERATION_TYPES:
+            signed_amount = -amount
+        else:
+            continue
+
+        net_external_flow_by_day[local_date] = net_external_flow_by_day.get(local_date, 0.0) + signed_amount
+
+    return net_external_flow_by_day
+
+
+def compute_twr_timeseries(session, account_id: str):
+    snapshot_rows = get_portfolio_timeseries_agg_by_date(session, account_id)
+    external_cashflows = get_external_cashflows_raw(session, account_id)
+    net_external_flow_by_day = build_net_external_flow_by_day(external_cashflows)
+    return compute_twr_series(snapshot_rows, net_external_flow_by_day)
+
+
+def compute_portfolio_xirr_and_run_rate(
+    session,
+    account_id: str,
+) -> tuple[float | None, float | None, date | None]:
+    latest_snapshot = get_latest_snapshot_with_id(session, account_id)
+    if latest_snapshot is None or latest_snapshot.get("total_value") is None:
+        return None, None, None
+
+    cashflows: list[tuple[datetime, float]] = []
+    for row in get_external_cashflows_raw(session, account_id):
         dt = row.get("date")
         if dt is None:
             continue
-        # В БД date хранится как naive UTC
-        dt_utc = dt.replace(tzinfo=timezone.utc)
-        d_local = dt_utc.astimezone(TZ).date()
-        amt = float(row.get("amount") or 0)
-        dep_by_day[d_local] = dep_by_day.get(d_local, 0.0) + amt
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
 
-    dates: list[date] = []
-    values: list[float | None] = []
-    for row in ts:
-        dates.append(row["snapshot_date"])
-        v = row["total_value"]
-        values.append(float(v) if v is not None else None)
+        amount = abs(float(row.get("amount") or 0.0))
+        operation_type = (row.get("operation_type") or "").strip()
+        if operation_type in DEPOSIT_OPERATION_TYPES:
+            cashflows.append((dt, -amount))
+        elif operation_type in WITHDRAWAL_OPERATION_TYPES:
+            cashflows.append((dt, amount))
 
-    M = 1.0
-    twr: list[float] = [0.0]  # на первой точке TWR = 0
-    for i in range(1, len(dates)):
-        V_prev = values[i - 1]
-        V = values[i]
-        CF = dep_by_day.get(dates[i], 0.0)
+    if latest_snapshot["snapshot_at"] is not None:
+        terminal_dt = latest_snapshot["snapshot_at"]
+        if terminal_dt.tzinfo is None:
+            terminal_dt = terminal_dt.replace(tzinfo=timezone.utc)
+    else:
+        terminal_dt = datetime.combine(
+            latest_snapshot["snapshot_date"],
+            time.max,
+        ).replace(tzinfo=timezone.utc)
 
-        if V_prev in (None, 0) or V is None:
-            # Не пересчитываем, но точку рисуем (последнее известное значение)
-            twr.append(M - 1.0)
-            continue
+    current_value = float(latest_snapshot["total_value"])
+    cashflows.append((terminal_dt, current_value))
 
-        r = (V - CF) / V_prev - 1.0
-        M *= (1.0 + r)
-        twr.append(M - 1.0)
-
-    return dates, values, twr
+    xirr_value = compute_xirr(cashflows)
+    projection_date = date(latest_snapshot["snapshot_date"].year, 12, 31)
+    projected_value = project_run_rate_value(
+        current_value,
+        xirr_value,
+        latest_snapshot["snapshot_date"],
+        projection_date,
+    )
+    return xirr_value, projected_value, projection_date
 
 
 def render_twr_chart(path: str, dates: list[date], values: list[float | None], twr: list[float]) -> str:
@@ -2939,29 +3272,34 @@ def render_twr_chart(path: str, dates: list[date], values: list[float | None], t
 
 
 def build_dataset_export(session) -> tuple[dict, list[dict], list[dict], list[dict], list[dict]]:
-    bounds = get_dataset_bounds(session)
+    account_id = resolve_reporting_account_id(session)
+    if account_id is None:
+        raise ValueError(REPORTING_ACCOUNT_UNAVAILABLE_TEXT)
+
+    bounds = get_dataset_bounds(session, account_id)
     min_date = bounds["min_date"]
     max_date = bounds["max_date"]
     if min_date is None or max_date is None:
         raise ValueError("Пока нет данных для экспорта датасета.")
 
-    latest_snapshot = get_latest_snapshot_with_id(session)
+    latest_snapshot = get_latest_snapshot_with_id(session, account_id)
     if latest_snapshot is None:
         raise ValueError("Пока нет данных для экспорта датасета.")
 
-    daily_rows = get_daily_snapshot_rows(session)
+    daily_rows = get_daily_snapshot_rows(session, account_id)
     positions_rows = list(get_positions_for_snapshot(session, latest_snapshot["id"]))
     asset_alias_rows = list(get_asset_alias_rows(session))
     asset_alias_by_instrument_uid, asset_alias_by_figi = build_asset_alias_lookup(asset_alias_rows)
     operations_rows = list(
         get_dataset_operations(
             session,
+            account_id=account_id,
             start_dt=datetime.combine(min_date, time.min),
             end_dt=datetime.combine(max_date + timedelta(days=1), time.min),
         )
     )
-    income_rows = list(get_income_events_for_period(session, min_date, max_date))
-    twr_data = compute_twr_timeseries(session)
+    income_rows = list(get_income_events_for_period(session, account_id, min_date, max_date))
+    twr_data = compute_twr_timeseries(session, account_id)
 
     twr_by_date: dict[date, float] = {}
     if twr_data is not None:
@@ -3406,7 +3744,11 @@ def build_triggers_messages() -> list[str]:
     messages: list[str] = []
 
     with db_session() as session:
-        snaps = get_latest_snapshots(session, limit=2)
+        account_id = resolve_reporting_account_id(session)
+        if account_id is None:
+            return messages
+
+        snaps = get_latest_snapshots(session, account_id, limit=2)
         if not snaps:
             return messages
 
@@ -3423,15 +3765,15 @@ def build_triggers_messages() -> list[str]:
 
         # Исторический максимум на все даты строго ДО текущей даты last_date.
         # Если его нет, значит это самый первый день — "новый максимум" не шлём, чтобы не спамить.
-        max_before_last = get_max_value_before_date(session, last_date)
+        max_before_last = get_max_value_before_date(session, account_id, last_date)
 
         # Для годового плана — сравниваем сумму пополнений до вчера и до сегодня
         year_start = datetime(year, 1, 1)
         today_start = datetime(year, today.month, today.day)
         tomorrow_start = today_start + timedelta(days=1)
 
-        dep_prev = get_deposits_for_period(session, year_start, today_start)
-        dep_now = get_deposits_for_period(session, year_start, tomorrow_start)
+        dep_prev = get_deposits_for_period(session, account_id, year_start, today_start)
+        dep_now = get_deposits_for_period(session, account_id, year_start, tomorrow_start)
 
     # Новый максимум: текущая стоимость должна быть строго больше
     # исторического максимума до сегодняшнего дня.
@@ -3513,7 +3855,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/dataset — архив json+csv+md для AI-анализа\n"
         "/structure — текущая структура портфеля по позициям\n"
         "/history — график стоимости портфеля и суммы пополнений\n"
-        "/twr — TWR (time-weighted return) и график по дням\n"
+        "/twr — TWR, XIRR и run-rate на конец года + график по дням\n"
         "/help — эта подсказка\n\n"
         "Автоматически:\n"
         "• каждый день в 18:00 (по времени хоста) — проверка триггеров (максимум, годовой план)\n"
@@ -3564,7 +3906,11 @@ async def cmd_year(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("Формат: /year или /year YYYY")
             return
 
-    summary_text, diff_text, label = build_year_summary(year)
+    try:
+        summary_text, diff_text, label = build_year_summary(year)
+    except ValueError as exc:
+        await update.message.reply_text(str(exc))
+        return
     await safe_send_message(context.bot, update.effective_chat.id, summary_text, parse_mode="Markdown")
 
     _, period_end_dt_exclusive, _, _ = get_year_period(year)
@@ -3572,11 +3918,17 @@ async def cmd_year(update: Update, context: ContextTypes.DEFAULT_TYPE):
     temp_chart = tempfile.NamedTemporaryFile(prefix=f"year_{chart_year}_", suffix=".png", delete=False)
     chart_path = temp_chart.name
     temp_chart.close()
-    chart = build_year_chart(
-        chart_path,
-        year=chart_year,
-        end_date_exclusive=period_end_dt_exclusive.date(),
-    )
+    try:
+        chart = build_year_chart(
+            chart_path,
+            year=chart_year,
+            end_date_exclusive=period_end_dt_exclusive.date(),
+        )
+    except ValueError as exc:
+        if os.path.exists(chart_path):
+            os.remove(chart_path)
+        await update.message.reply_text(str(exc))
+        return
     if chart:
         try:
             with open(chart, "rb") as f:
@@ -3590,11 +3942,17 @@ async def cmd_year(update: Update, context: ContextTypes.DEFAULT_TYPE):
     temp_delta_chart = tempfile.NamedTemporaryFile(prefix=f"year_delta_{chart_year}_", suffix=".png", delete=False)
     delta_chart_path = temp_delta_chart.name
     temp_delta_chart.close()
-    delta_chart = build_year_monthly_delta_chart(
-        delta_chart_path,
-        year=chart_year,
-        end_date_exclusive=period_end_dt_exclusive.date(),
-    )
+    try:
+        delta_chart = build_year_monthly_delta_chart(
+            delta_chart_path,
+            year=chart_year,
+            end_date_exclusive=period_end_dt_exclusive.date(),
+        )
+    except ValueError as exc:
+        if os.path.exists(delta_chart_path):
+            os.remove(delta_chart_path)
+        await update.message.reply_text(str(exc))
+        return
     if delta_chart:
         try:
             with open(delta_chart, "rb") as f:
@@ -3643,7 +4001,11 @@ async def cmd_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     path = "/tmp/history.png"
-    p = build_history_chart(path)
+    try:
+        p = build_history_chart(path)
+    except ValueError as exc:
+        await update.message.reply_text(str(exc))
+        return
     if not p:
         await update.message.reply_text(
             "Недостаточно данных для построения графика."
@@ -3662,7 +4024,16 @@ async def cmd_twr(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     with db_session() as session:
-        data = compute_twr_timeseries(session)
+        account_id = resolve_reporting_account_id(session)
+        if account_id is None:
+            await update.message.reply_text(REPORTING_ACCOUNT_UNAVAILABLE_TEXT)
+            return
+
+        data = compute_twr_timeseries(session, account_id)
+        xirr_value, projected_value, projection_date = compute_portfolio_xirr_and_run_rate(
+            session,
+            account_id,
+        )
 
     if not data:
         await update.message.reply_text("Недостаточно данных")
@@ -3672,11 +4043,15 @@ async def cmd_twr(update: Update, context: ContextTypes.DEFAULT_TYPE):
     last_date = dates[-1]
     last_value = values[-1]
     last_twr_pct = twr[-1] * 100.0
-
-    await update.message.reply_text(
-        f"TWR на {last_date.isoformat()}: {fmt_pct(last_twr_pct, precision=2)}\n"
-        f"Стоимость портфеля: {fmt_rub(last_value)}"
+    summary_text = render_twr_summary_text(
+        last_date=last_date,
+        last_value=last_value,
+        last_twr_pct=last_twr_pct,
+        xirr_value=xirr_value,
+        projected_value=projected_value,
+        projection_date=projection_date,
     )
+    await safe_send_message(context.bot, update.effective_chat.id, summary_text, parse_mode="Markdown")
 
     path = "/tmp/twr.png"
     render_twr_chart(path, dates, values, twr)
@@ -3809,6 +4184,10 @@ async def daily_job(context: ContextTypes.DEFAULT_TYPE):
 async def check_income_events(context: ContextTypes.DEFAULT_TYPE):
     rows: list[dict] = []
     with db_session() as session:
+        account_id = resolve_reporting_account_id(session)
+        if account_id is None:
+            return
+
         rows = (
             session.execute(
                 text(
@@ -3822,10 +4201,12 @@ async def check_income_events(context: ContextTypes.DEFAULT_TYPE):
                         COALESCE(i.name, i.ticker, ie.figi) AS instrument_name
                     FROM income_events ie
                     LEFT JOIN instruments i ON i.figi = ie.figi
-                    WHERE ie.notified = false
+                    WHERE ie.account_id = :account_id
+                      AND ie.notified = false
                     ORDER BY ie.created_at ASC
                     """
-                )
+                ),
+                {"account_id": account_id},
             )
             .mappings()
             .all()
