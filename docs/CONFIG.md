@@ -37,6 +37,29 @@
 ## Сеть
 
 - `VERIFY_SSL` — проверка SSL сертификата при запросах к API (`true/false`).
+- `BOT_PROXY_ENABLED` — включает outbound proxy только для контейнера `bot` (`true/false`).
+- `BOT_VLESS_URL` — VLESS+Reality share link для `xray-client`. Рекомендуется хранить значение в кавычках, чтобы `#label` в конце ссылки не отрезался парсером `.env`.
+
+### Proxy только для `bot`
+
+- При `BOT_PROXY_ENABLED=false` контейнер `bot` запускается без `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY` и работает по старой схеме.
+- При `BOT_PROXY_ENABLED=true` рядом поднимается сервис `xray-client`, а `bot` направляет только внешний HTTP(S)-трафик через `http://xray-client:3128`.
+- Внутренние адреса (`localhost`, `127.0.0.1`, `db`, `tracker`, `xray-client`) добавляются в `NO_PROXY`, поэтому внутренние обращения не уходят в proxy.
+- `tracker` и `db` не получают proxy env и продолжают работать напрямую.
+
+Быстрая проверка:
+
+```bash
+docker compose ps
+docker compose logs --tail=100 xray-client
+docker compose exec bot python proxy_smoke.py
+```
+
+Ожидаемо:
+- при `BOT_PROXY_ENABLED=true` `xray-client` в `healthy`;
+- при `BOT_PROXY_ENABLED=false` `xray-client` не виден в обычном `docker compose ps`, а `docker compose ps -a xray-client` показывает `Exited (0)`;
+- в логах `xray-client` есть старт proxy endpoint и результат smoke до `https://api.telegram.org`;
+- `proxy_smoke.py` подтверждает доступность Telegram API и прямой TCP-доступ к `db`.
 
 ## Снапшоты
 
