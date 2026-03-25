@@ -129,6 +129,17 @@ docker compose exec bot python proxy_smoke.py
 - `proxy_smoke.py` внутри `bot` пишет одно структурированное событие `bot_startup_smoke_completed` или `bot_startup_smoke_failed` и подтверждает доступность Telegram API и прямой TCP-доступ к `db`;
 - при `BOT_PROXY_ENABLED=false` `xray-client` пишет событие `xray_proxy_disabled`, а `tracker` продолжает работать как раньше.
 
+### Правила structured logging
+
+- Все first-party runtime-процессы проекта пишут по одной JSON-записи на строку в `stdout`.
+- Базовая схема записи: `ts`, `level`, `service`, `env`, `logger`, `event`, `msg`; дополнительный контекст передаётся в `ctx`.
+- Для project-owned кода `event` должен быть явным, стабильным и в `snake_case`.
+- Если запись пришла без явного `event`, formatter назначает `event="auto_log"` и добавляет `ctx.event_source`.
+- `ctx.event_source="library"` означает, что запись пришла от сторонней библиотеки через стандартный `logging`.
+- `ctx.event_source="auto"` означает auto-tagging для first-party логгера и считается fallback-путём, а не целевым контрактом.
+- Для дочерних процессов используется bridge в общий logger: строки из stdout/stderr переизлучаются как отдельные JSON-события с `ctx.stream`.
+- Исключение только одно: [src/xray_client/render_config.py](/Users/andrew/Dev/FinanceTracker/src/xray_client/render_config.py) печатает конфиг в stdout как data output и не считается логированием.
+
 ## Обновление (пересборка без потери данных)
 
 ```powershell

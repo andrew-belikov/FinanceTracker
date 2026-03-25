@@ -62,6 +62,16 @@ docker compose exec bot python proxy_smoke.py
 - в логах `xray-client` есть события `xray_proxy_ready`, `xray_telegram_smoke_completed` и `xray_process_output`;
 - `proxy_smoke.py` подтверждает доступность Telegram API и прямой TCP-доступ к `db` через событие `bot_startup_smoke_completed` или `bot_startup_smoke_failed`.
 
+## Structured logging
+
+- `APP_SERVICE` определяет поле `service` в JSON-логах; для `xray-client` оно фиксируется как `xray_client` в compose-конфиге.
+- `APP_ENV` определяет поле `env`; по умолчанию используется `dev`, если переменная не задана.
+- First-party код должен писать явные события в формате `snake_case` через общий logger из `src/common/logging_setup.py`.
+- Fallback `event="auto_log"` допустим только для записей без явного события, обычно от сторонних библиотек.
+- В таких fallback-записях formatter добавляет `ctx.event_source`: `library` для сторонних библиотек и `auto` для auto-tagging first-party записи, если код не задал `event` явно.
+- Для дочерних процессов строки stdout/stderr оборачиваются в JSON и получают `ctx.stream`.
+- `src/xray_client/render_config.py` остаётся исключением: он печатает конфиг в stdout как полезный data output, а не как лог.
+
 ## Снапшоты
 
 - `SNAPSHOT_INTERVAL_MINUTES` — интервал сохранения снапшотов (в минутах).
