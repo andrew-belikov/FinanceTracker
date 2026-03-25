@@ -176,6 +176,23 @@ docker compose logs --tail=200 bot
 - команда `docker compose down` сама по себе данные не удаляет;
 - **не запускать** `docker compose down -v`, если нужна сохранность БД.
 
+### GitHub Actions deploy
+
+- На GitHub настроен workflow `Deploy FinanceTracker`, который автоматически запускается при `push` в `main`.
+- Workflow выполняется на self-hosted runner на сервере и работает только с каноническим каталогом `/home/andrey/projects/FinanceTracker`.
+- Порядок workflow:
+  - `git fetch origin`
+  - `git checkout main`
+  - `git pull --ff-only origin main`
+  - `python3 -m compileall src`
+  - `docker compose config > /dev/null`
+  - `docker compose up -d --build --force-recreate --remove-orphans`
+  - `docker compose ps`
+  - `docker compose logs --tail=200 bot tracker`
+- Ручной запуск через `workflow_dispatch` оставлен как fallback:
+  - `mode=smoke` — безопасная проверка runner, git checkout и `docker compose ps` без перезапуска контейнеров;
+  - `mode=deploy` — ручной повтор обычного deploy-сценария.
+
 
 ## Данные и бэкап
 

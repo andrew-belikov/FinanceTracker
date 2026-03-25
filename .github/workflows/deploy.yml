@@ -1,6 +1,9 @@
 name: Deploy FinanceTracker
 
 on:
+  push:
+    branches:
+      - main
   workflow_dispatch:
     inputs:
       mode:
@@ -19,6 +22,10 @@ on:
 
 jobs:
   deploy:
+    concurrency:
+      group: financetracker-deploy
+      cancel-in-progress: false
+
     runs-on:
       - self-hosted
       - linux
@@ -28,6 +35,8 @@ jobs:
 
     env:
       PROJECT_DIR: /home/andrey/projects/FinanceTracker
+      DEPLOY_MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.mode || 'deploy' }}
+      DEPLOY_REF: ${{ github.event_name == 'workflow_dispatch' && inputs.ref || github.ref_name }}
 
     steps:
       - name: Show runner context
@@ -52,8 +61,8 @@ jobs:
         run: |
           cd "$PROJECT_DIR"
           git fetch origin
-          git checkout "${{ inputs.ref }}"
-          git pull --ff-only origin "${{ inputs.ref }}"
+          git checkout "$DEPLOY_REF"
+          git pull --ff-only origin "$DEPLOY_REF"
 
       - name: Run pre-deploy checks
         run: |
@@ -63,13 +72,13 @@ jobs:
           docker compose ps
 
       - name: Apply deploy
-        if: ${{ inputs.mode == 'deploy' }}
+        if: ${{ env.DEPLOY_MODE == 'deploy' }}
         run: |
           cd "$PROJECT_DIR"
           docker compose up -d --build --force-recreate --remove-orphans
 
       - name: Show post-deploy status
-        if: ${{ inputs.mode == 'deploy' }}
+        if: ${{ env.DEPLOY_MODE == 'deploy' }}
         run: |
           cd "$PROJECT_DIR"
           docker compose ps

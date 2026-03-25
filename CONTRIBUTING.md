@@ -21,7 +21,8 @@ GitHub Actions workflow `CI` дублирует базовую проверку 
 - запускает `unittest`;
 - проверяет `docker compose config` без публикации развёрнутого вывода с секретами.
 
-Ручной workflow `Deploy FinanceTracker` запускается только через `workflow_dispatch` на self-hosted runner и работает с каноническим каталогом сервера `/home/andrey/projects/FinanceTracker`, а не с runner workspace.
+Workflow `Deploy FinanceTracker` автоматически запускается на `push` в `main` на self-hosted runner и работает с каноническим каталогом сервера `/home/andrey/projects/FinanceTracker`, а не с runner workspace.
+Ручной `workflow_dispatch` оставлен как fallback: в режиме `smoke` можно проверить runner и серверный checkout без перезапуска контейнеров, в режиме `deploy` — повторить обычный deploy вручную.
 
 ## Что обязательно в PR-описании
 Используйте структуру:
