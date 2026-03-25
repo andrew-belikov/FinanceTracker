@@ -29,6 +29,7 @@ RUN set -eux; \
 
 WORKDIR /opt/finance
 
+COPY src/common/ /opt/finance/common/
 COPY src/xray_client/ /opt/finance/xray_client/
 
-CMD ["python", "-u", "/opt/finance/xray_client/entrypoint.py"]
+CMD ["python", "-u", "-m", "xray_client.entrypoint"]

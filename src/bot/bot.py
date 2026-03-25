@@ -27,7 +27,6 @@ Telegram-бот для проекта iis_tracker.
 """
 
 import os
-import logging
 import random
 import tempfile
 import csv
@@ -52,6 +51,8 @@ from telegram.ext import (
     Application,
     CommandHandler,
     ContextTypes,
+    MessageHandler,
+    filters,
 )
 
 # Импорт шаблонов
@@ -286,10 +287,30 @@ def db_session():
 async def safe_send_message(bot, chat_id: int, text: str, parse_mode: str = "Markdown"):
     """Send message; if Markdown parsing fails, fallback to plain text."""
     try:
+        logger.info(
+            "bot_send_message_started",
+            "Sending Telegram message.",
+            {"chat_id": chat_id, "parse_mode": parse_mode, "text_preview": text[:120]},
+        )
         await bot.send_message(chat_id=chat_id, text=text, parse_mode=parse_mode)
+        logger.info(
+            "bot_send_message_succeeded",
+            "Telegram message sent.",
+            {"chat_id": chat_id, "parse_mode": parse_mode},
+        )
     except Exception:
         # Иногда ломается Markdown из-за динамических значений (тикеры с _ и т.п.)
+        logger.exception(
+            "bot_send_message_markdown_failed",
+            "Telegram message send with parse_mode failed; retrying without parse mode.",
+            {"chat_id": chat_id, "parse_mode": parse_mode},
+        )
         await bot.send_message(chat_id=chat_id, text=text)
+        logger.info(
+            "bot_send_message_plain_succeeded",
+            "Telegram message sent without parse mode fallback.",
+            {"chat_id": chat_id},
+        )
 
 
 # =============== HELPERS ==================
@@ -390,8 +411,49 @@ def build_logical_asset_id(
 def is_authorized(update: Update) -> bool:
     user = update.effective_user
     if not user:
+        logger.warning(
+            "bot_update_missing_user",
+            "Received update without effective_user.",
+            {"update_id": getattr(update, "update_id", None)},
+        )
         return False
-    return user.id in ALLOWED_USER_IDS
+    if user.id not in ALLOWED_USER_IDS:
+        logger.warning(
+            "bot_update_unauthorized",
+            "Ignored update from unauthorized user.",
+            {
+                "update_id": getattr(update, "update_id", None),
+                "user_id": user.id,
+                "username": user.username,
+                "chat_id": getattr(update.effective_chat, "id", None),
+                "message_text": getattr(update.effective_message, "text", None),
+            },
+        )
+        return False
+    return True
+
+
+def log_update_received(update: Update, command_name: str | None = None) -> None:
+    logger.info(
+        "bot_update_received",
+        "Received Telegram update.",
+        {
+            "update_id": getattr(update, "update_id", None),
+            "user_id": getattr(update.effective_user, "id", None),
+            "username": getattr(update.effective_user, "username", None),
+            "chat_id": getattr(update.effective_chat, "id", None),
+            "command": command_name,
+            "message_text": getattr(update.effective_message, "text", None),
+        },
+    )
+
+
+async def debug_command_probe(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    command_name = None
+    text = getattr(update.effective_message, "text", None) or ""
+    if text.startswith("/"):
+        command_name = text.split()[0]
+    log_update_received(update, command_name=command_name)
 
 
 def fmt_rub(x: float | None, precision: int = 0) -> str:
@@ -4522,18 +4584,18 @@ async def jobqueue_smoke_test_job(context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             failed += 1
             logger.exception(
-                "JobQueue smoke-test failed",
-                extra={"ctx": {"chat_id": chat_id}},
+                "jobqueue_smoke_test_failed",
+                "JobQueue smoke-test failed.",
+                {"chat_id": chat_id},
             )
 
     logger.info(
-        "JobQueue smoke-test completed",
-        extra={
-            "ctx": {
-                "sent": sent,
-                "failed": failed,
-                "target_chat_ids": sorted(TARGET_CHAT_IDS),
-            }
+        "jobqueue_smoke_test_completed",
+        "JobQueue smoke-test completed.",
+        {
+            "sent": sent,
+            "failed": failed,
+            "target_chat_ids": sorted(TARGET_CHAT_IDS),
         },
     )
 
@@ -4542,16 +4604,28 @@ async def jobqueue_smoke_test_job(context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    log_update_received(update, command_name="/start")
     if not is_authorized(update):
         return
     text = (
         "Привет! Я слежу за вашим портфелем «Семейный капитал».\n\n"
         "Доступные команды можно посмотреть в /help."
     )
+    logger.info(
+        "bot_reply_text_started",
+        "Sending reply_text response.",
+        {"chat_id": getattr(update.effective_chat, "id", None), "command": "/start"},
+    )
     await update.message.reply_text(text)
+    logger.info(
+        "bot_reply_text_succeeded",
+        "reply_text response sent.",
+        {"chat_id": getattr(update.effective_chat, "id", None), "command": "/start"},
+    )
 
 
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    log_update_received(update, command_name="/help")
     if not is_authorized(update):
         return
 
@@ -4560,6 +4634,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_today(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    log_update_received(update, command_name="/today")
     if not is_authorized(update):
         return
     text = build_today_summary()
@@ -4567,6 +4642,7 @@ async def cmd_today(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_week(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    log_update_received(update, command_name="/week")
     if not is_authorized(update):
         return
     text = build_week_summary()
@@ -4574,6 +4650,7 @@ async def cmd_week(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_month(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    log_update_received(update, command_name="/month")
     if not is_authorized(update):
         return
     text = build_month_summary()
@@ -4581,6 +4658,7 @@ async def cmd_month(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_year(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    log_update_received(update, command_name="/year")
     if not is_authorized(update):
         return
 
@@ -4659,6 +4737,7 @@ async def cmd_year(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_dataset(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    log_update_received(update, command_name="/dataset")
     if not is_authorized(update):
         return
 
@@ -4684,6 +4763,7 @@ async def cmd_dataset(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_structure(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    log_update_received(update, command_name="/structure")
     if not is_authorized(update):
         return
     text = build_structure_text()
@@ -4691,6 +4771,7 @@ async def cmd_structure(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    log_update_received(update, command_name="/history")
     if not is_authorized(update):
         return
 
@@ -4714,6 +4795,7 @@ async def cmd_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_twr(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    log_update_received(update, command_name="/twr")
     if not is_authorized(update):
         return
 
@@ -4757,6 +4839,7 @@ async def cmd_twr(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_targets(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    log_update_received(update, command_name="/targets")
     if not is_authorized(update):
         return
 
@@ -4797,6 +4880,7 @@ async def cmd_targets(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_rebalance(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    log_update_received(update, command_name="/rebalance")
     if not is_authorized(update):
         return
     if context.args:
@@ -4813,6 +4897,7 @@ async def cmd_rebalance(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_invest(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    log_update_received(update, command_name="/invest")
     if not is_authorized(update):
         return
 
@@ -4865,15 +4950,14 @@ async def daily_job(context: ContextTypes.DEFAULT_TYPE):
     scheduled_for = f"18:00 {HOST_TZ}"
 
     logger.info(
-        "Daily job started",
-        extra={
-            "ctx": {
-                "today": today.isoformat(),
-                "scheduled_for": scheduled_for,
-                "started_at": started_at.isoformat(),
-                "is_month_end": is_month_end,
-                "is_friday": is_friday,
-            }
+        "daily_job_started",
+        "Daily job started.",
+        {
+            "today": today.isoformat(),
+            "scheduled_for": scheduled_for,
+            "started_at": started_at.isoformat(),
+            "is_month_end": is_month_end,
+            "is_friday": is_friday,
         },
     )
 
@@ -4884,34 +4968,37 @@ async def daily_job(context: ContextTypes.DEFAULT_TYPE):
     try:
         if is_month_end:
             month_text = build_month_summary()
-    except Exception as e:
-        logger.exception("Failed to build month summary: %s", e)
+    except Exception:
+        logger.exception("daily_job_month_summary_failed", "Failed to build month summary.")
 
     try:
         if is_friday:
             week_text = build_week_summary()
-    except Exception as e:
-        logger.exception("Failed to build week summary: %s", e)
+    except Exception:
+        logger.exception("daily_job_week_summary_failed", "Failed to build week summary.")
 
     try:
         triggers = build_triggers_messages()
-    except Exception as e:
-        logger.exception("Failed to build triggers: %s", e)
+    except Exception:
+        logger.exception("daily_job_triggers_failed", "Failed to build trigger messages.")
 
     logger.info(
-        "Daily job prepared messages",
-        extra={
-            "ctx": {
-                "month_report_ready": bool(month_text),
-                "week_report_ready": bool(week_text),
-                "triggers_count": len(triggers),
-            }
+        "daily_job_messages_prepared",
+        "Daily job prepared messages.",
+        {
+            "month_report_ready": bool(month_text),
+            "week_report_ready": bool(week_text),
+            "triggers_count": len(triggers),
         },
     )
 
     # Нечего отправлять — выходим тихо.
     if not month_text and not week_text and not triggers:
-        logger.info("No messages to send for %s", today.isoformat())
+        logger.info(
+            "daily_job_no_messages",
+            "Daily job had no messages to send.",
+            {"today": today.isoformat()},
+        )
         return
 
     sent_total = 0
@@ -4923,42 +5010,62 @@ async def daily_job(context: ContextTypes.DEFAULT_TYPE):
             try:
                 await safe_send_message(context.bot, chat_id, month_text, parse_mode="Markdown")
                 sent_total += 1
-                logger.info("Message sent", extra={"ctx": {"chat_id": chat_id, "message_type": "month_report", "status": "sent"}})
-            except Exception as e:
+                logger.info(
+                    "daily_job_message_sent",
+                    "Daily job message sent.",
+                    {"chat_id": chat_id, "message_type": "month_report"},
+                )
+            except Exception:
                 failed_total += 1
-                logger.error("Error sending month report to chat %s: %s", chat_id, e)
-                logger.exception("Message failed", extra={"ctx": {"chat_id": chat_id, "message_type": "month_report", "status": "failed"}})
+                logger.exception(
+                    "daily_job_message_send_failed",
+                    "Failed to send daily job month report.",
+                    {"chat_id": chat_id, "message_type": "month_report"},
+                )
 
         if is_friday and week_text:
             try:
                 await safe_send_message(context.bot, chat_id, week_text, parse_mode="Markdown")
                 sent_total += 1
-                logger.info("Message sent", extra={"ctx": {"chat_id": chat_id, "message_type": "week_report", "status": "sent"}})
-            except Exception as e:
+                logger.info(
+                    "daily_job_message_sent",
+                    "Daily job message sent.",
+                    {"chat_id": chat_id, "message_type": "week_report"},
+                )
+            except Exception:
                 failed_total += 1
-                logger.error("Error sending week report to chat %s: %s", chat_id, e)
-                logger.exception("Message failed", extra={"ctx": {"chat_id": chat_id, "message_type": "week_report", "status": "failed"}})
+                logger.exception(
+                    "daily_job_message_send_failed",
+                    "Failed to send daily job week report.",
+                    {"chat_id": chat_id, "message_type": "week_report"},
+                )
 
         for msg in triggers:
             try:
                 await safe_send_message(context.bot, chat_id, msg, parse_mode="Markdown")
                 sent_total += 1
-                logger.info("Message sent", extra={"ctx": {"chat_id": chat_id, "message_type": "trigger", "status": "sent"}})
-            except Exception as e:
+                logger.info(
+                    "daily_job_message_sent",
+                    "Daily job message sent.",
+                    {"chat_id": chat_id, "message_type": "trigger"},
+                )
+            except Exception:
                 failed_total += 1
-                logger.error("Error sending trigger to chat %s: %s", chat_id, e)
-                logger.exception("Message failed", extra={"ctx": {"chat_id": chat_id, "message_type": "trigger", "status": "failed"}})
+                logger.exception(
+                    "daily_job_message_send_failed",
+                    "Failed to send daily job trigger message.",
+                    {"chat_id": chat_id, "message_type": "trigger"},
+                )
 
     duration_ms = int((datetime.now(timezone.utc) - started_monotonic).total_seconds() * 1000)
     logger.info(
-        "Daily job completed",
-        extra={
-            "ctx": {
-                "today": today.isoformat(),
-                "duration_ms": duration_ms,
-                "sent_total": sent_total,
-                "failed_total": failed_total,
-            }
+        "daily_job_completed",
+        "Daily job completed.",
+        {
+            "today": today.isoformat(),
+            "duration_ms": duration_ms,
+            "sent_total": sent_total,
+            "failed_total": failed_total,
         },
     )
 
@@ -5014,26 +5121,24 @@ async def check_income_events(context: ContextTypes.DEFAULT_TYPE):
                 await safe_send_message(context.bot, chat_id, text_msg, parse_mode="Markdown")
                 logger.info(
                     "income_event_notification_sent",
-                    extra={
-                        "ctx": {
-                            "income_event_id": row["id"],
-                            "chat_id": chat_id,
-                            "event_type": event_type,
-                            "figi": row["figi"],
-                        }
+                    "Income event notification sent.",
+                    {
+                        "income_event_id": row["id"],
+                        "chat_id": chat_id,
+                        "event_type": event_type,
+                        "figi": row["figi"],
                     },
                 )
             except Exception:
                 sent_ok = False
                 logger.exception(
                     "income_event_notification_failed",
-                    extra={
-                        "ctx": {
-                            "income_event_id": row["id"],
-                            "chat_id": chat_id,
-                            "event_type": event_type,
-                            "figi": row["figi"],
-                        }
+                    "Failed to send income event notification.",
+                    {
+                        "income_event_id": row["id"],
+                        "chat_id": chat_id,
+                        "event_type": event_type,
+                        "figi": row["figi"],
                     },
                 )
 
@@ -5074,24 +5179,22 @@ async def check_invest_notifications(context: ContextTypes.DEFAULT_TYPE):
                 await safe_send_message(context.bot, chat_id, text_msg, parse_mode="Markdown")
                 logger.info(
                     "invest_notification_sent",
-                    extra={
-                        "ctx": {
-                            "operation_id": row["operation_id"],
-                            "chat_id": chat_id,
-                            "amount": decimal_to_str(amount),
-                        }
+                    "Invest notification sent.",
+                    {
+                        "operation_id": row["operation_id"],
+                        "chat_id": chat_id,
+                        "amount": decimal_to_str(amount),
                     },
                 )
             except Exception:
                 sent_ok = False
                 logger.exception(
                     "invest_notification_failed",
-                    extra={
-                        "ctx": {
-                            "operation_id": row["operation_id"],
-                            "chat_id": chat_id,
-                            "amount": decimal_to_str(amount),
-                        }
+                    "Failed to send invest notification.",
+                    {
+                        "operation_id": row["operation_id"],
+                        "chat_id": chat_id,
+                        "amount": decimal_to_str(amount),
                     },
                 )
 
@@ -5110,14 +5213,17 @@ async def check_invest_notifications(context: ContextTypes.DEFAULT_TYPE):
             return
 
 
-def main():
+def main() -> int:
     if not TELEGRAM_BOT_TOKEN:
-        raise RuntimeError(
-            "TELEGRAM_BOT_TOKEN не задан. Передай его через env-переменную."
+        logger.error(
+            "missing_telegram_bot_token",
+            "TELEGRAM_BOT_TOKEN не задан. Передай его через env-переменную.",
         )
+        return 1
 
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
+    app.add_handler(MessageHandler(filters.COMMAND, debug_command_probe), group=-1)
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("today", cmd_today))
@@ -5155,21 +5261,34 @@ def main():
             name="jobqueue_smoke_test",
         )
         logger.info(
-            "Scheduled JobQueue smoke-test",
-            extra={
-                "ctx": {
-                    "delay_seconds": JOBQUEUE_SMOKE_TEST_DELAY_SECONDS,
-                    "target_chat_ids": sorted(TARGET_CHAT_IDS),
-                }
+            "bot_jobqueue_smoke_scheduled",
+            "Scheduled one-time JobQueue smoke-test.",
+            {
+                "delay_seconds": JOBQUEUE_SMOKE_TEST_DELAY_SECONDS,
+                "target_chat_ids": sorted(TARGET_CHAT_IDS),
             },
         )
 
     logger.info(
-        "Bot started. Daily job at 18:00 %s",
-        HOST_TZ,
+        "bot_started",
+        "Bot started.",
+        {
+            "daily_job_time_local": "18:00",
+            "host_timezone": str(HOST_TZ),
+        },
     )
     app.run_polling()
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        raise SystemExit(main())
+    except SystemExit:
+        raise
+    except Exception:
+        logger.exception(
+            "bot_process_failed",
+            "Bot process terminated with an unhandled exception.",
+        )
+        raise SystemExit(1)

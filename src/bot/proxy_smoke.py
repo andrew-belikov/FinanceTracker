@@ -1,12 +1,17 @@
 from __future__ import annotations
 
-import json
 import os
 import socket
 import sys
 import urllib.error
 import urllib.request
 from urllib.parse import urlparse
+
+from common.logging_setup import configure_logging, get_logger
+
+
+configure_logging()
+logger = get_logger(__name__)
 
 
 def is_enabled(value: str | None) -> bool:
@@ -118,7 +123,19 @@ def collect_results() -> tuple[int, list[dict[str, str]]]:
 
 def run_startup_smoke() -> int:
     exit_code, results = collect_results()
-    print("bot_startup_smoke %s" % json.dumps(results, ensure_ascii=True, sort_keys=True), flush=True)
+    ctx = {"exit_code": exit_code, "results": results}
+    if exit_code == 0:
+        logger.info(
+            "bot_startup_smoke_completed",
+            "Bot startup smoke completed successfully.",
+            ctx,
+        )
+    else:
+        logger.error(
+            "bot_startup_smoke_failed",
+            "Bot startup smoke detected failures.",
+            ctx,
+        )
     return exit_code
 
 
@@ -127,4 +144,13 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        raise SystemExit(main())
+    except SystemExit:
+        raise
+    except Exception:
+        logger.exception(
+            "bot_startup_smoke_unhandled_failure",
+            "Bot startup smoke terminated with an unhandled exception.",
+        )
+        raise SystemExit(1)
