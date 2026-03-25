@@ -30,13 +30,15 @@ services:
     image: financetracker-xray-client
     container_name: financetracker-xray-client-1
     environment:
+      APP_ENV: ${APP_ENV:-dev}
+      APP_SERVICE: xray_client
       BOT_PROXY_ENABLED: ${BOT_PROXY_ENABLED:-false}
       BOT_VLESS_URL: ${BOT_VLESS_URL:-}
       XRAY_LOCAL_PROXY_PORT: "3128"
     expose:
       - "3128"
     healthcheck:
-      test: ["CMD", "python", "-u", "/opt/finance/xray_client/healthcheck.py"]
+      test: ["CMD", "python", "-u", "-m", "xray_client.healthcheck"]
       interval: 10s
       timeout: 5s
       retries: 6

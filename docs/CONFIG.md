@@ -58,8 +58,19 @@ docker compose exec bot python proxy_smoke.py
 Ожидаемо:
 - при `BOT_PROXY_ENABLED=true` `xray-client` в `healthy`;
 - при `BOT_PROXY_ENABLED=false` `xray-client` не виден в обычном `docker compose ps`, а `docker compose ps -a xray-client` показывает `Exited (0)`;
-- в логах `xray-client` есть старт proxy endpoint и результат smoke до `https://api.telegram.org`;
-- `proxy_smoke.py` подтверждает доступность Telegram API и прямой TCP-доступ к `db`.
+- все runtime-процессы проекта пишут JSON Lines в `stdout`, включая `xray-client`, startup smoke, healthcheck и maintenance scripts;
+- в логах `xray-client` есть события `xray_proxy_ready`, `xray_telegram_smoke_completed` и `xray_process_output`;
+- `proxy_smoke.py` подтверждает доступность Telegram API и прямой TCP-доступ к `db` через событие `bot_startup_smoke_completed` или `bot_startup_smoke_failed`.
+
+## Structured logging
+
+- `APP_SERVICE` определяет поле `service` в JSON-логах; для `xray-client` оно фиксируется как `xray_client` в compose-конфиге.
+- `APP_ENV` определяет поле `env`; по умолчанию используется `dev`, если переменная не задана.
+- First-party код должен писать явные события в формате `snake_case` через общий logger из `src/common/logging_setup.py`.
+- Fallback `event="auto_log"` допустим только для записей без явного события, обычно от сторонних библиотек.
+- В таких fallback-записях formatter добавляет `ctx.event_source`: `library` для сторонних библиотек и `auto` для auto-tagging first-party записи, если код не задал `event` явно.
+- Для дочерних процессов строки stdout/stderr оборачиваются в JSON и получают `ctx.stream`.
+- `src/xray_client/render_config.py` остаётся исключением: он печатает конфиг в stdout как полезный data output, а не как лог.
 
 ## Снапшоты
 
