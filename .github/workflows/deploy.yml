@@ -1,0 +1,76 @@
+name: Deploy FinanceTracker
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Deployment mode
+        required: true
+        default: smoke
+        type: choice
+        options:
+          - smoke
+          - deploy
+      ref:
+        description: Git ref to deploy from canonical server checkout
+        required: true
+        default: main
+        type: string
+
+jobs:
+  deploy:
+    runs-on:
+      - self-hosted
+      - linux
+      - x64
+      - homeserver
+      - financetracker
+
+    env:
+      PROJECT_DIR: /home/andrey/projects/FinanceTracker
+
+    steps:
+      - name: Show runner context
+        run: |
+          whoami
+          hostname
+          pwd
+
+      - name: Verify canonical project directory
+        run: |
+          test -d "$PROJECT_DIR"
+          ls -la "$PROJECT_DIR"
+
+      - name: Show repository context
+        run: |
+          cd "$PROJECT_DIR"
+          git remote -v
+          git branch --show-current
+          git status --short
+
+      - name: Update canonical checkout
+        run: |
+          cd "$PROJECT_DIR"
+          git fetch origin
+          git checkout "${{ inputs.ref }}"
+          git pull --ff-only origin "${{ inputs.ref }}"
+
+      - name: Run pre-deploy checks
+        run: |
+          cd "$PROJECT_DIR"
+          python3 -m compileall src
+          docker compose config > /dev/null
+          docker compose ps
+
+      - name: Apply deploy
+        if: ${{ inputs.mode == 'deploy' }}
+        run: |
+          cd "$PROJECT_DIR"
+          docker compose up -d --build --force-recreate --remove-orphans
+
+      - name: Show post-deploy status
+        if: ${{ inputs.mode == 'deploy' }}
+        run: |
+          cd "$PROJECT_DIR"
+          docker compose ps
+          docker compose logs --tail=200 bot tracker
