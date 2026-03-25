@@ -12,7 +12,6 @@ iis_tracker: ежедневные снапшоты портфеля + табли
 """
 
 import os
-import sys
 import json
 import textwrap
 import traceback
@@ -52,17 +51,12 @@ configure_logging()
 
 logger = get_logger(__name__)
 
+MAX_LOG_RESPONSE_BODY_CHARS = 4000
+
 # ============ CONFIG из окружения ============
 
 # Токен T-Invest. Лучше передавать через ENV, но можно и захардкодить здесь.
 API_TOKEN = os.getenv("TINVEST_API_TOKEN", "").strip()
-if not API_TOKEN:
-    # Логируем ошибку и падаем, как и раньше.
-    logger.error(
-        "missing_api_token",
-        "TINVEST_API_TOKEN не задан. Передай его через переменную окружения.",
-    )
-    raise RuntimeError("TINVEST_API_TOKEN не задан. Передай его через переменную окружения.")
 
 BASE_URL = os.getenv(
     "TINVEST_BASE_URL",
@@ -414,7 +408,7 @@ def upsert_asset_alias(
     if not asset_uid:
         return
 
-    seen_at = seen_at or datetime.utcnow()
+    seen_at = seen_at or datetime.now(timezone.utc).replace(tzinfo=None)
     instrument = None
     if figi:
         instrument = db.query(Instrument).filter(Instrument.figi == figi).one_or_none()
@@ -450,7 +444,7 @@ def upsert_asset_alias(
         alias.first_seen_at = seen_at
     if seen_at > alias.last_seen_at:
         alias.last_seen_at = seen_at
-    alias.updated_at = datetime.utcnow()
+    alias.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
 
 
 def resolve_asset_uid_for_position(
@@ -481,6 +475,38 @@ def resolve_asset_uid_for_position(
     return alias.asset_uid if alias is not None else None
 
 
+def _url_host(url: str) -> str:
+    return url.split("//", 1)[1].split("/", 1)[0]
+
+
+def _url_path(url: str) -> str:
+    parts = url.split("/", 3)
+    return "/" + parts[3] if len(parts) > 3 else "/"
+
+
+def _truncate_log_text(value: str, limit: int = MAX_LOG_RESPONSE_BODY_CHARS) -> tuple[str, bool]:
+    if len(value) <= limit:
+        return value, False
+    return value[:limit] + "...<truncated>", True
+
+
+def _build_response_body_ctx(resp, base_ctx: Optional[dict] = None) -> dict:
+    ctx = dict(base_ctx or {})
+    content_type = resp.headers.get("Content-Type")
+    if content_type:
+        ctx["content_type"] = content_type
+
+    try:
+        ctx["response_body"] = resp.json()
+        ctx["response_body_truncated"] = False
+        return ctx
+    except Exception:
+        truncated_body, truncated = _truncate_log_text(resp.text)
+        ctx["response_body"] = truncated_body
+        ctx["response_body_truncated"] = truncated
+        return ctx
+
+
 def post_api(method_path: str, payload: dict) -> dict:
     url = f"{BASE_URL}/{method_path}"
 
@@ -498,32 +524,58 @@ def post_api(method_path: str, payload: dict) -> dict:
             verify=VERIFY_SSL,
         )
     except requests.exceptions.SSLError as e:
-        # Логируем, но не логируем тело/заголовки
-        logger.error("ssl_error", f"SSL error: {e}", exc_info=True)
+        logger.exception(
+            "api_request_ssl_error",
+            "SSL error while calling T-Invest API.",
+            {"method_path": method_path, "url_host": _url_host(url)},
+        )
         raise
     except requests.exceptions.RequestException as e:
-        logger.error("http_error", f"HTTP error: {e}", exc_info=True)
+        logger.exception(
+            "api_request_failed",
+            "HTTP request to T-Invest API failed.",
+            {"method_path": method_path, "url_host": _url_host(url)},
+        )
         raise
 
     if resp.status_code != 200:
+        error_ctx = {
+            "method_path": method_path,
+            "url_host": _url_host(url),
+            "path": _url_path(url),
+            "status_code": resp.status_code,
+        }
         logger.error(
             "api_http_error",
-            f"API HTTP error: {resp.status_code}",
-            extra={"ctx": {"url_host": url.split('//')[1].split('/')[0], "path": '/' + '/'.join(url.split('/')[3:]), "status_code": resp.status_code}},
+            "T-Invest API returned a non-200 response.",
+            error_ctx,
         )
-        # Пытаемся вывести тело для отладки, но через stderr — оставляем прежнее поведение
-        try:
-            sys.stderr.write(json.dumps(resp.json(), ensure_ascii=False) + "\n")
-        except Exception:
-            sys.stderr.write(resp.text + "\n")
+        logger.error(
+            "api_http_error_body",
+            "Logged T-Invest API error response body.",
+            _build_response_body_ctx(resp, error_ctx),
+        )
         raise RuntimeError(f"API HTTP {resp.status_code}")
 
     try:
         return resp.json()
     except json.JSONDecodeError:
-        logger.error("json_decode_error", "JSON decode error")
-        # выводим текст в stderr для диагностики
-        sys.stderr.write(resp.text + "\n")
+        error_ctx = {
+            "method_path": method_path,
+            "url_host": _url_host(url),
+            "path": _url_path(url),
+            "status_code": resp.status_code,
+        }
+        logger.error(
+            "api_json_decode_error",
+            "Failed to decode JSON from T-Invest API response.",
+            error_ctx,
+        )
+        logger.error(
+            "api_json_decode_error_body",
+            "Logged non-JSON T-Invest API response body.",
+            _build_response_body_ctx(resp, error_ctx),
+        )
         raise
 
 
@@ -600,8 +652,16 @@ def api_get_operations_by_cursor(account_id: str, opened_iso: Optional[str]):
 
         has_next = data.get("hasNext", False)
         next_cursor = data.get("nextCursor") or ""
-        logger.info("operations_page_loaded", f"loaded operations: {len(operations)}")
-        logger.info("operations_next_cursor", f"next_cursor: {next_cursor}")
+        logger.info(
+            "operations_page_loaded",
+            "Loaded operations page from T-Invest API.",
+            {
+                "account_id": account_id,
+                "page_items_count": len(operations),
+                "next_cursor": next_cursor or None,
+                "has_next": bool(has_next),
+            },
+        )
 
         # Следующая страница
         if not has_next or not next_cursor:
@@ -857,8 +917,12 @@ def take_snapshot_for_account(db, acc_data: dict):
     # Структурированное сообщение о сохранении снапшота
     logger.info(
         "snapshot_saved",
-        f"Snapshot saved for account {acc_name} ({acc_id}), positions: {len(positions)}",
-        extra={"ctx": {"account_id": acc_id, "positions": len(positions)}},
+        "Portfolio snapshot saved.",
+        {
+            "account_id": acc_id,
+            "account_name": acc_name,
+            "positions": len(positions),
+        },
     )
 
 
@@ -986,8 +1050,17 @@ def _sync_operations(db, account_id: str, from_date: Optional[str]) -> dict:
                 count_updated += 1
 
         next_cursor = data.get("nextCursor") or ""
-        logger.info("operations_page_loaded", f"loaded operations: {loaded_total}")
-        logger.info("operations_next_cursor", f"next_cursor: {next_cursor}")
+        logger.info(
+            "operations_page_loaded",
+            "Loaded operations page for sync.",
+            {
+                "account_id": account_id,
+                "page_items_count": len(operations),
+                "loaded_total": loaded_total,
+                "next_cursor": next_cursor or None,
+                "has_next": bool(data.get("hasNext")),
+            },
+        )
 
         has_next = bool(data.get("hasNext"))
         if not has_next or not next_cursor:
@@ -1036,8 +1109,8 @@ def sync_operations_for_account(db, acc_data: dict):
         from_iso = opened_iso
         logger.info(
             "operations_backfill_started",
-            f"Detected incomplete OperationItem fields for account {acc_id}; backfill from account open date.",
-            extra={"ctx": {"account_id": acc_id, "from": from_iso}},
+            "Detected incomplete OperationItem fields; starting backfill from account open date.",
+            {"account_id": acc_id, "from": from_iso},
         )
 
     stats = _sync_operations(db, acc_id, from_iso)
@@ -1102,9 +1175,9 @@ def sync_operations_for_account(db, acc_data: dict):
         )
 
     logger.info(
-        "operations_sync",
-        f"Operations sync for account {acc_id}: new records={stats['new']}, updated records={stats['updated']}, loaded={stats['loaded']}",
-        extra={"ctx": {"account_id": acc_id, **stats}},
+        "operations_sync_completed",
+        "Operations sync completed.",
+        {"account_id": acc_id, **stats},
     )
 
 def sync_deposits_for_account(db, acc_data: dict):
@@ -1127,7 +1200,10 @@ def run_snapshot_and_operations_once():
             db.commit()
         except Exception:
             db.rollback()
-            logger.exception("operations_sync_failed", "Operations sync failed (snapshot сохранён).")
+            logger.exception(
+                "operations_sync_failed",
+                "Operations sync failed; snapshot remains saved.",
+            )
 
 
 def job_with_retry():
@@ -1138,14 +1214,21 @@ def job_with_retry():
     - при ошибке всё сделает следующий запуск по расписанию.
     """
     try:
-        logger.info("snapshot_job_start", "Snapshot job started.")
+        logger.info("snapshot_job_started", "Snapshot job started.")
         run_snapshot_and_operations_once()
         logger.info("snapshot_job_completed", "Snapshot job completed successfully.")
-    except Exception as e:
-        logger.exception("snapshot_job_failed", f"Snapshot job failed: {e}")
+    except Exception:
+        logger.exception("snapshot_job_failed", "Snapshot job failed.")
 
 
-def main():
+def main() -> int:
+    if not API_TOKEN:
+        logger.error(
+            "missing_api_token",
+            "TINVEST_API_TOKEN не задан. Передай его через переменную окружения.",
+        )
+        return 1
+
     init_db()
 
     # Разовый запуск при старте — перезаписываем текущий день
@@ -1165,7 +1248,13 @@ def main():
         )
         logger.info(
             "scheduler_started",
-            f"Scheduler started. Daily snapshot at {SNAPSHOT_HOUR:02d}:{SNAPSHOT_MINUTE:02d} ({SCHED_TZ}).",
+            "Scheduler started in cron mode.",
+            {
+                "mode": "cron",
+                "snapshot_hour": SNAPSHOT_HOUR,
+                "snapshot_minute": SNAPSHOT_MINUTE,
+                "timezone": SCHED_TZ,
+            },
         )
     else:
         trigger = IntervalTrigger(minutes=SNAPSHOT_INTERVAL_MINUTES)
@@ -1178,14 +1267,29 @@ def main():
         )
         logger.info(
             "scheduler_started",
-            f"Scheduler started. Snapshot every {SNAPSHOT_INTERVAL_MINUTES} minutes ({SCHED_TZ}).",
+            "Scheduler started in interval mode.",
+            {
+                "mode": "interval",
+                "snapshot_interval_minutes": SNAPSHOT_INTERVAL_MINUTES,
+                "timezone": SCHED_TZ,
+            },
         )
 
     try:
         scheduler.start()
     except (KeyboardInterrupt, SystemExit):
         logger.info("service_stopped", "Service stopped.")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        raise SystemExit(main())
+    except SystemExit:
+        raise
+    except Exception:
+        logger.exception(
+            "tracker_process_failed",
+            "Tracker process terminated with an unhandled exception.",
+        )
+        raise SystemExit(1)

@@ -58,8 +58,9 @@ docker compose exec bot python proxy_smoke.py
 Ожидаемо:
 - при `BOT_PROXY_ENABLED=true` `xray-client` в `healthy`;
 - при `BOT_PROXY_ENABLED=false` `xray-client` не виден в обычном `docker compose ps`, а `docker compose ps -a xray-client` показывает `Exited (0)`;
-- в логах `xray-client` есть старт proxy endpoint и результат smoke до `https://api.telegram.org`;
-- `proxy_smoke.py` подтверждает доступность Telegram API и прямой TCP-доступ к `db`.
+- все runtime-процессы проекта пишут JSON Lines в `stdout`, включая `xray-client`, startup smoke, healthcheck и maintenance scripts;
+- в логах `xray-client` есть события `xray_proxy_ready`, `xray_telegram_smoke_completed` и `xray_process_output`;
+- `proxy_smoke.py` подтверждает доступность Telegram API и прямой TCP-доступ к `db` через событие `bot_startup_smoke_completed` или `bot_startup_smoke_failed`.
 
 ## Снапшоты
 
