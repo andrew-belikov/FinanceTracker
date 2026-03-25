@@ -7,11 +7,16 @@ import time
 from typing import Iterable
 from urllib.parse import urlparse
 
+from common.logging_setup import configure_logging, get_logger
 from proxy_smoke import run_startup_smoke
 
 
 PROXY_ENV_KEYS = ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY")
 REQUIRED_NO_PROXY = ("localhost", "127.0.0.1", "db", "tracker", "xray-client")
+
+
+configure_logging()
+logger = get_logger(__name__)
 
 
 def is_enabled(value: str | None) -> bool:
@@ -77,22 +82,44 @@ def wait_for_proxy_endpoint(proxy_endpoint: str, timeout_seconds: float = 30.0) 
 
 def main() -> int:
     proxy_enabled, proxy_endpoint, no_proxy = configure_proxy_env()
-    print(
-        "bot_entrypoint proxy_enabled=%s proxy_endpoint=%s no_proxy=%s"
-        % (str(proxy_enabled).lower(), proxy_endpoint if proxy_enabled else "<disabled>", no_proxy),
-        flush=True,
+    logger.info(
+        "bot_proxy_environment_configured",
+        "Bot proxy environment configured.",
+        {
+            "proxy_enabled": proxy_enabled,
+            "proxy_endpoint": proxy_endpoint if proxy_enabled else None,
+            "no_proxy": no_proxy,
+        },
     )
 
     if proxy_enabled:
-        print(f"bot_entrypoint waiting_for_proxy endpoint={proxy_endpoint}", flush=True)
+        logger.info(
+            "bot_proxy_wait_started",
+            "Waiting for bot proxy endpoint.",
+            {"proxy_endpoint": proxy_endpoint},
+        )
         if not wait_for_proxy_endpoint(proxy_endpoint):
-            print(f"bot_entrypoint proxy_unavailable endpoint={proxy_endpoint}", file=sys.stderr, flush=True)
+            logger.error(
+                "bot_proxy_unavailable",
+                "Bot proxy endpoint is unavailable.",
+                {"proxy_endpoint": proxy_endpoint},
+            )
             return 1
 
     run_startup_smoke()
+    logger.info("bot_process_exec_started", "Starting bot process.")
     os.execvp("python", ["python", "-u", "bot.py"])
     return 0
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        raise SystemExit(main())
+    except SystemExit:
+        raise
+    except Exception:
+        logger.exception(
+            "bot_entrypoint_failed",
+            "Bot entrypoint terminated with an unhandled exception.",
+        )
+        raise SystemExit(1)

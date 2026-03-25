@@ -15,6 +15,12 @@ python -m compileall src
 docker compose config
 ```
 
+GitHub Actions workflow `CI` дублирует базовую проверку на `push` и `pull_request`:
+- создаёт временный `.env` из `.env.example`;
+- выполняет `compileall`;
+- запускает `unittest`;
+- проверяет `docker compose config` без публикации развёрнутого вывода с секретами.
+
 ## Что обязательно в PR-описании
 Используйте структуру:
 
