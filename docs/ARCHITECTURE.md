@@ -17,6 +17,7 @@
 - `tracker`, `bot` и `xray-client` используют единый JSON logger из `src/common/logging_setup.py`.
 - Startup helpers (`bot/entrypoint.py`, `bot/proxy_smoke.py`), healthcheck `xray-client` и maintenance scripts тоже пишут structured JSON logs.
 - Каждая first-party runtime-запись содержит как минимум `ts`, `level`, `service`, `env`, `logger`, `event`, `msg`; дополнительный контекст идёт в `ctx`.
+- Подробная спецификация и ТЗ для тиражирования стандарта находятся в [LOGGING_STANDARD.md](/Users/andrew/Dev/FinanceTracker/docs/LOGGING_STANDARD.md), а машиночитаемая схема — в [logging.schema.json](/Users/andrew/Dev/FinanceTracker/docs/logging.schema.json).
 - Для first-party кода целевой контракт такой: `event` задаётся явно, остаётся стабильным и использует `snake_case`.
 - Записи без явного `event` получают `event="auto_log"` и `ctx.event_source`; это fallback для stdlib/library logging, а не основной путь для project-owned кода.
 - Значение `ctx.event_source="library"` используется для сторонних библиотек, `ctx.event_source="auto"` — для auto-tagging first-party записи.
