@@ -139,6 +139,7 @@ docker compose exec bot python proxy_smoke.py
 - `ctx.event_source="auto"` означает auto-tagging для first-party логгера и считается fallback-путём, а не целевым контрактом.
 - Для дочерних процессов используется bridge в общий logger: строки из stdout/stderr переизлучаются как отдельные JSON-события с `ctx.stream`.
 - Исключение только одно: [src/xray_client/render_config.py](/Users/andrew/Dev/FinanceTracker/src/xray_client/render_config.py) печатает конфиг в stdout как data output и не считается логированием.
+- Подробная спека уровня ТЗ находится в [docs/LOGGING_STANDARD.md](/Users/andrew/Dev/FinanceTracker/docs/LOGGING_STANDARD.md), JSON Schema — в [docs/logging.schema.json](/Users/andrew/Dev/FinanceTracker/docs/logging.schema.json).
 
 ## Обновление (пересборка без потери данных)
 
