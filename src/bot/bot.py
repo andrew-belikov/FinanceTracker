@@ -13,7 +13,7 @@ Telegram-бот для проекта iis_tracker.
     /twr        — TWR, XIRR и run-rate на конец года + график по дням
     /help       — список команд
 
-- Ежедневная задача (18:00 по времени хоста, через JobQueue):
+- Ежедневная задача (в заданное время JobQueue по TIMEZONE, через JobQueue):
     * по пятницам — недельный отчёт (/week)
     * в последний день месяца — отчёт за месяц (/month)
     * триггеры:
@@ -47,6 +47,7 @@ import matplotlib.pyplot as plt
 from matplotlib.ticker import FuncFormatter, MaxNLocator
 
 from telegram import Update, InputFile
+from telegram.request import HTTPXRequest
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -77,18 +78,134 @@ TARGET_CHAT_IDS = ALLOWED_USER_IDS
 # Название счёта в текстах
 ACCOUNT_FRIENDLY_NAME = os.getenv("ACCOUNT_FRIENDLY_NAME", "Семейный капитал")
 
-# Таймзона для отображения дат в тексте
-TZ_NAME = os.getenv("TIMEZONE", "Europe/Moscow")
+# Таймзона для отображения дат в тексте и расписания JobQueue
+TZ_NAME = os.getenv("TIMEZONE", "Europe/Moscow").strip() or "Europe/Moscow"
 TZ = ZoneInfo(TZ_NAME)
 
-# Таймзона хоста для расписания JobQueue
-HOST_TZ = datetime.now().astimezone().tzinfo
+DAILY_JOB_HOUR = int(os.getenv("DAILY_SUMMARY_HOUR", "18"))
+DAILY_JOB_MINUTE = int(os.getenv("DAILY_SUMMARY_MINUTE", "0"))
+
+
+def build_daily_job_time() -> time:
+    return time(
+        hour=DAILY_JOB_HOUR,
+        minute=DAILY_JOB_MINUTE,
+        tzinfo=TZ,
+    )
+
+
+def format_daily_job_schedule() -> str:
+    return f"{DAILY_JOB_HOUR:02d}:{DAILY_JOB_MINUTE:02d} ({TZ_NAME})"
+
+
+DAILY_JOB_SCHEDULE_LABEL = format_daily_job_schedule()
 
 # Одноразовый тест JobQueue при старте (для валидации отправки).
 JOBQUEUE_SMOKE_TEST_ON_START = (
     os.getenv("JOBQUEUE_SMOKE_TEST_ON_START", "false").strip().lower() in {"1", "true", "yes", "on"}
 )
 JOBQUEUE_SMOKE_TEST_DELAY_SECONDS = int(os.getenv("JOBQUEUE_SMOKE_TEST_DELAY_SECONDS", "20"))
+
+BOT_PROXY_ENABLED = (
+    os.getenv("BOT_PROXY_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
+)
+BOT_PROXY_ENDPOINT = os.getenv("BOT_PROXY_ENDPOINT", "http://xray-client:3128").strip()
+
+TELEGRAM_REQUEST_CONNECT_TIMEOUT_SECONDS = 20.0
+TELEGRAM_REQUEST_READ_TIMEOUT_SECONDS = 20.0
+TELEGRAM_REQUEST_WRITE_TIMEOUT_SECONDS = 20.0
+TELEGRAM_REQUEST_POOL_TIMEOUT_SECONDS = 30.0
+TELEGRAM_REQUEST_CONNECTION_POOL_SIZE = 256
+
+TELEGRAM_GET_UPDATES_TIMEOUT_SECONDS = 60
+TELEGRAM_GET_UPDATES_CONNECT_TIMEOUT_SECONDS = 20.0
+TELEGRAM_GET_UPDATES_READ_TIMEOUT_SECONDS = 75.0
+TELEGRAM_GET_UPDATES_WRITE_TIMEOUT_SECONDS = 20.0
+TELEGRAM_GET_UPDATES_POOL_TIMEOUT_SECONDS = 30.0
+TELEGRAM_GET_UPDATES_CONNECTION_POOL_SIZE = 2
+TELEGRAM_POLL_INTERVAL_SECONDS = 0.0
+POLLING_WATCHDOG_INTERVAL_SECONDS = 60
+POLLING_BACKLOG_PENDING_THRESHOLD = 1
+POLLING_BACKLOG_STALL_THRESHOLD_SECONDS = 180
+
+BOT_PROCESS_STARTED_AT_UTC = datetime.now(timezone.utc)
+LAST_UPDATE_RECEIVED_AT_UTC: datetime | None = None
+POLLING_BACKLOG_ACTIVE = False
+
+
+def resolve_telegram_proxy_url() -> str | None:
+    if not BOT_PROXY_ENABLED:
+        return None
+    return BOT_PROXY_ENDPOINT or None
+
+
+def build_telegram_request_kwargs(
+    *,
+    proxy_url: str | None,
+    connection_pool_size: int,
+    connect_timeout: float,
+    read_timeout: float,
+    write_timeout: float,
+    pool_timeout: float,
+) -> dict:
+    kwargs = {
+        "connection_pool_size": connection_pool_size,
+        "connect_timeout": connect_timeout,
+        "read_timeout": read_timeout,
+        "write_timeout": write_timeout,
+        "pool_timeout": pool_timeout,
+        "http_version": "1.1",
+        # Avoid implicit proxy/env surprises; proxy, if needed, is configured explicitly.
+        "httpx_kwargs": {"trust_env": False},
+    }
+    if proxy_url is not None:
+        kwargs["proxy"] = proxy_url
+    return kwargs
+
+
+def build_bot_application() -> Application:
+    proxy_url = resolve_telegram_proxy_url()
+    request = HTTPXRequest(
+        **build_telegram_request_kwargs(
+            proxy_url=proxy_url,
+            connection_pool_size=TELEGRAM_REQUEST_CONNECTION_POOL_SIZE,
+            connect_timeout=TELEGRAM_REQUEST_CONNECT_TIMEOUT_SECONDS,
+            read_timeout=TELEGRAM_REQUEST_READ_TIMEOUT_SECONDS,
+            write_timeout=TELEGRAM_REQUEST_WRITE_TIMEOUT_SECONDS,
+            pool_timeout=TELEGRAM_REQUEST_POOL_TIMEOUT_SECONDS,
+        )
+    )
+    get_updates_request = HTTPXRequest(
+        **build_telegram_request_kwargs(
+            proxy_url=proxy_url,
+            connection_pool_size=TELEGRAM_GET_UPDATES_CONNECTION_POOL_SIZE,
+            connect_timeout=TELEGRAM_GET_UPDATES_CONNECT_TIMEOUT_SECONDS,
+            read_timeout=TELEGRAM_GET_UPDATES_READ_TIMEOUT_SECONDS,
+            write_timeout=TELEGRAM_GET_UPDATES_WRITE_TIMEOUT_SECONDS,
+            pool_timeout=TELEGRAM_GET_UPDATES_POOL_TIMEOUT_SECONDS,
+        )
+    )
+    return (
+        Application.builder()
+        .token(TELEGRAM_BOT_TOKEN)
+        .request(request)
+        .get_updates_request(get_updates_request)
+        .build()
+    )
+
+
+def is_polling_backlog_detected(
+    *,
+    pending_update_count: int,
+    last_update_received_at: datetime | None,
+    process_started_at: datetime,
+    now_utc: datetime,
+    pending_threshold: int = POLLING_BACKLOG_PENDING_THRESHOLD,
+    stall_threshold_seconds: int = POLLING_BACKLOG_STALL_THRESHOLD_SECONDS,
+) -> bool:
+    reference_dt = last_update_received_at or process_started_at
+    stall_duration_seconds = (now_utc - reference_dt).total_seconds()
+    return pending_update_count >= pending_threshold and stall_duration_seconds >= stall_threshold_seconds
 
 # Годовой план пополнений
 PLAN_ANNUAL_CONTRIB_RUB = float(os.getenv("PLAN_ANNUAL_CONTRIB_RUB", "400000"))
@@ -434,6 +551,8 @@ def is_authorized(update: Update) -> bool:
 
 
 def log_update_received(update: Update, command_name: str | None = None) -> None:
+    global LAST_UPDATE_RECEIVED_AT_UTC
+    LAST_UPDATE_RECEIVED_AT_UTC = datetime.now(timezone.utc)
     logger.info(
         "bot_update_received",
         "Received Telegram update.",
@@ -524,6 +643,7 @@ def fmt_compact_pct(x: float | None, precision: int = 1, signed: bool = False) -
 
 
 def build_help_text() -> str:
+    schedule_label = globals().get("DAILY_JOB_SCHEDULE_LABEL", "18:00")
     return (
         "Доступные команды:\n\n"
         "/today — сводка по портфелю на сегодня\n"
@@ -540,9 +660,9 @@ def build_help_text() -> str:
         "/invest <sum> — подсказать, как распределить новое пополнение\n"
         "/help — эта подсказка\n\n"
         "Автоматически:\n"
-        "• каждый день в 18:00 (по времени хоста) — проверка триггеров (максимум, годовой план)\n"
-        "• по пятницам в 18:00 (по времени хоста) — недельный отчёт\n"
-        "• в последний день месяца в 18:00 (по времени хоста) — дополнительный отчёт за месяц\n"
+        f"• каждый день в {schedule_label} — проверка триггеров (максимум, годовой план)\n"
+        f"• по пятницам в {schedule_label} — недельный отчёт\n"
+        f"• в последний день месяца в {schedule_label} — дополнительный отчёт за месяц\n"
         "• каждое новое пополнение счёта — подсказка, как распределить пополнение по таргетам."
     )
 
@@ -4600,6 +4720,61 @@ async def jobqueue_smoke_test_job(context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def polling_watchdog_job(context: ContextTypes.DEFAULT_TYPE):
+    global POLLING_BACKLOG_ACTIVE
+
+    now_utc = datetime.now(timezone.utc)
+    reference_dt = LAST_UPDATE_RECEIVED_AT_UTC or BOT_PROCESS_STARTED_AT_UTC
+    stall_duration_seconds = int((now_utc - reference_dt).total_seconds())
+
+    try:
+        webhook_info = await context.bot.get_webhook_info()
+        pending_update_count = int(webhook_info.pending_update_count or 0)
+    except Exception:
+        logger.exception(
+            "bot_polling_watchdog_failed",
+            "Polling watchdog failed to query Telegram webhook state.",
+            {
+                "stall_duration_seconds": stall_duration_seconds,
+                "last_update_received_at": to_iso_datetime(LAST_UPDATE_RECEIVED_AT_UTC),
+                "process_started_at": to_iso_datetime(BOT_PROCESS_STARTED_AT_UTC),
+            },
+        )
+        return
+
+    backlog_detected = is_polling_backlog_detected(
+        pending_update_count=pending_update_count,
+        last_update_received_at=LAST_UPDATE_RECEIVED_AT_UTC,
+        process_started_at=BOT_PROCESS_STARTED_AT_UTC,
+        now_utc=now_utc,
+    )
+    ctx = {
+        "pending_update_count": pending_update_count,
+        "stall_duration_seconds": stall_duration_seconds,
+        "pending_threshold": POLLING_BACKLOG_PENDING_THRESHOLD,
+        "stall_threshold_seconds": POLLING_BACKLOG_STALL_THRESHOLD_SECONDS,
+        "last_update_received_at": to_iso_datetime(LAST_UPDATE_RECEIVED_AT_UTC),
+        "process_started_at": to_iso_datetime(BOT_PROCESS_STARTED_AT_UTC),
+    }
+
+    if backlog_detected and not POLLING_BACKLOG_ACTIVE:
+        POLLING_BACKLOG_ACTIVE = True
+        logger.error(
+            "bot_polling_backlog_detected",
+            "Telegram polling appears stalled: updates are accumulating.",
+            ctx,
+        )
+        return
+
+    if not backlog_detected and POLLING_BACKLOG_ACTIVE:
+        POLLING_BACKLOG_ACTIVE = False
+        logger.info(
+            "bot_polling_backlog_cleared",
+            "Telegram polling backlog cleared.",
+            ctx,
+        )
+
+
 # =============== HANDLERS =================
 
 
@@ -4934,10 +5109,11 @@ async def cmd_invest(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def daily_job(context: ContextTypes.DEFAULT_TYPE):
     """
-    Авто-рассылки по расписанию (по времени хоста):
-    - каждый день в 18:00 (по времени хоста): проверка триггеров (новый максимум / годовой план)
-    - каждую пятницу в 18:00 (по времени хоста): недельный отчёт (/week)
-    - в последний день месяца в 18:00 (по времени хоста): месячный отчёт (/month)
+    Авто-рассылки по расписанию (по TIMEZONE):
+    - каждый день в DAILY_SUMMARY_HOUR:DAILY_SUMMARY_MINUTE (по TIMEZONE): проверка триггеров
+      (новый максимум / годовой план)
+    - каждую пятницу в DAILY_SUMMARY_HOUR:DAILY_SUMMARY_MINUTE (по TIMEZONE): недельный отчёт (/week)
+    - в последний день месяца в DAILY_SUMMARY_HOUR:DAILY_SUMMARY_MINUTE (по TIMEZONE): месячный отчёт (/month)
 
     Важно: если Markdown сломается из-за динамических данных — отправляем тем же текстом без разметки.
     """
@@ -4947,7 +5123,7 @@ async def daily_job(context: ContextTypes.DEFAULT_TYPE):
     is_friday = today.weekday() == 4  # Monday=0 ... Friday=4
     started_at = datetime.now(TZ)
     started_monotonic = datetime.now(timezone.utc)
-    scheduled_for = f"18:00 {HOST_TZ}"
+    scheduled_for = DAILY_JOB_SCHEDULE_LABEL
 
     logger.info(
         "daily_job_started",
@@ -5213,6 +5389,32 @@ async def check_invest_notifications(context: ContextTypes.DEFAULT_TYPE):
             return
 
 
+async def on_application_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    err = getattr(context, "error", None)
+    update_id = getattr(update, "update_id", None)
+    user_id = getattr(getattr(update, "effective_user", None), "id", None)
+    chat_id = getattr(getattr(update, "effective_chat", None), "id", None)
+    ctx = {
+        "update_id": update_id,
+        "user_id": user_id,
+        "chat_id": chat_id,
+        "error_type": type(err).__name__ if err is not None else None,
+        "error_message": str(err) if err is not None else None,
+    }
+    if err is not None:
+        logger.raw_logger.error(
+            "Unhandled Telegram application error.",
+            extra={"event": "bot_application_error", "ctx": ctx},
+            exc_info=(type(err), err, err.__traceback__),
+        )
+        return
+    logger.error(
+        "bot_application_error",
+        "Unhandled Telegram application error without exception object.",
+        ctx,
+    )
+
+
 def main() -> int:
     if not TELEGRAM_BOT_TOKEN:
         logger.error(
@@ -5221,7 +5423,7 @@ def main() -> int:
         )
         return 1
 
-    app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+    app = build_bot_application()
 
     app.add_handler(MessageHandler(filters.COMMAND, debug_command_probe), group=-1)
     app.add_handler(CommandHandler("start", cmd_start))
@@ -5237,13 +5439,25 @@ def main() -> int:
     app.add_handler(CommandHandler("targets", cmd_targets))
     app.add_handler(CommandHandler("rebalance", cmd_rebalance))
     app.add_handler(CommandHandler("invest", cmd_invest))
+    app.add_error_handler(on_application_error)
+
+    logger.info(
+        "bot_telegram_transport_configured",
+        "Configured Telegram transport for polling and bot API requests.",
+        {
+            "proxy_enabled": BOT_PROXY_ENABLED,
+            "proxy_url": BOT_PROXY_ENDPOINT if BOT_PROXY_ENABLED else None,
+            "request_pool_size": TELEGRAM_REQUEST_CONNECTION_POOL_SIZE,
+            "request_pool_timeout_seconds": TELEGRAM_REQUEST_POOL_TIMEOUT_SECONDS,
+            "get_updates_pool_size": TELEGRAM_GET_UPDATES_CONNECTION_POOL_SIZE,
+            "get_updates_pool_timeout_seconds": TELEGRAM_GET_UPDATES_POOL_TIMEOUT_SECONDS,
+            "get_updates_timeout_seconds": TELEGRAM_GET_UPDATES_TIMEOUT_SECONDS,
+            "get_updates_read_timeout_seconds": TELEGRAM_GET_UPDATES_READ_TIMEOUT_SECONDS,
+        },
+    )
 
     # Ежедневный джоб
-    job_time = time(
-        hour=18,
-        minute=0,
-        tzinfo=HOST_TZ,
-    )
+    job_time = build_daily_job_time()
     if app.job_queue is None:
         raise RuntimeError(
             "JobQueue не инициализирован. Убедись, что установлен пакет "
@@ -5253,6 +5467,24 @@ def main() -> int:
     app.job_queue.run_daily(daily_job, time=job_time, name="daily_summary")
     app.job_queue.run_repeating(check_income_events, interval=60, first=10, name="income_events_notifier")
     app.job_queue.run_repeating(check_invest_notifications, interval=60, first=15, name="invest_notifier")
+    app.job_queue.run_repeating(
+        polling_watchdog_job,
+        interval=POLLING_WATCHDOG_INTERVAL_SECONDS,
+        first=POLLING_WATCHDOG_INTERVAL_SECONDS,
+        name="polling_watchdog",
+    )
+    logger.info(
+        "bot_jobqueue_jobs_registered",
+        "JobQueue jobs registered.",
+        {
+            "daily_job_schedule": DAILY_JOB_SCHEDULE_LABEL,
+            "schedule_timezone": TZ_NAME,
+            "target_chat_ids": sorted(TARGET_CHAT_IDS),
+            "income_events_interval_seconds": 60,
+            "invest_interval_seconds": 60,
+            "polling_watchdog_interval_seconds": POLLING_WATCHDOG_INTERVAL_SECONDS,
+        },
+    )
 
     if JOBQUEUE_SMOKE_TEST_ON_START:
         app.job_queue.run_once(
@@ -5273,11 +5505,14 @@ def main() -> int:
         "bot_started",
         "Bot started.",
         {
-            "daily_job_time_local": "18:00",
-            "host_timezone": str(HOST_TZ),
+            "daily_job_schedule": DAILY_JOB_SCHEDULE_LABEL,
+            "schedule_timezone": TZ_NAME,
         },
     )
-    app.run_polling()
+    app.run_polling(
+        timeout=TELEGRAM_GET_UPDATES_TIMEOUT_SECONDS,
+        poll_interval=TELEGRAM_POLL_INTERVAL_SECONDS,
+    )
     return 0
 
 

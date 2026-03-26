@@ -82,6 +82,7 @@ services:
     environment:
       APP_ENV: ${APP_ENV:-dev}
       APP_SERVICE: ${APP_SERVICE_BOT:-iis_tracker_bot}
+      TZ: ${TIMEZONE:-Europe/Moscow}
       DB_HOST: db
       DB_PORT: "5432"
       DB_NAME: ${POSTGRES_DB}
