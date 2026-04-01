@@ -25,6 +25,7 @@ def load_symbols():
         "get_latest_snapshot_account_id",
         "resolve_reporting_account_id",
         "build_net_external_flow_by_day",
+        "compute_period_delta_excluding_external_flow",
         "compute_twr_series",
         "compute_xnpv",
         "compute_xirr",
@@ -70,6 +71,7 @@ normalize_reporting_account_id = SYMBOLS["normalize_reporting_account_id"]
 choose_reporting_account_id = SYMBOLS["choose_reporting_account_id"]
 resolve_reporting_account_id = SYMBOLS["resolve_reporting_account_id"]
 build_net_external_flow_by_day = SYMBOLS["build_net_external_flow_by_day"]
+compute_period_delta_excluding_external_flow = SYMBOLS["compute_period_delta_excluding_external_flow"]
 compute_twr_series = SYMBOLS["compute_twr_series"]
 compute_xnpv = SYMBOLS["compute_xnpv"]
 compute_xirr = SYMBOLS["compute_xirr"]
@@ -172,6 +174,29 @@ class TWRComputationTests(unittest.TestCase):
         self.assertIsNotNone(data)
         _dates, _values, twr = data
         self.assertEqual(twr, [0.0, 0.0, 0.0])
+
+
+class PeriodDeltaCalculationTests(unittest.TestCase):
+    def test_compute_period_delta_excluding_external_flow_matches_today_example(self):
+        delta_abs, delta_pct = compute_period_delta_excluding_external_flow(428549.0, 481136.0, 52000.0)
+        self.assertAlmostEqual(delta_abs, 587.0, places=8)
+        self.assertAlmostEqual(delta_pct, 587.0 / 428549.0 * 100.0, places=8)
+        self.assertAlmostEqual(round(delta_pct, 2), 0.14, places=2)
+
+    def test_compute_period_delta_excluding_external_flow_uses_net_deposit_and_withdrawal(self):
+        delta_abs, delta_pct = compute_period_delta_excluding_external_flow(100.0, 155.0, 40.0)
+        self.assertAlmostEqual(delta_abs, 15.0, places=8)
+        self.assertAlmostEqual(delta_pct, 15.0, places=8)
+
+    def test_compute_period_delta_excluding_external_flow_neutralizes_pure_withdrawal(self):
+        delta_abs, delta_pct = compute_period_delta_excluding_external_flow(200.0, 150.0, -50.0)
+        self.assertAlmostEqual(delta_abs, 0.0, places=8)
+        self.assertAlmostEqual(delta_pct, 0.0, places=8)
+
+    def test_compute_period_delta_excluding_external_flow_returns_none_without_non_zero_base(self):
+        self.assertEqual(compute_period_delta_excluding_external_flow(None, 100.0, 0.0), (None, None))
+        self.assertEqual(compute_period_delta_excluding_external_flow(0.0, 100.0, 0.0), (None, None))
+        self.assertEqual(compute_period_delta_excluding_external_flow(100.0, None, 0.0), (None, None))
 
 
 class XIRRAndRunRateTests(unittest.TestCase):

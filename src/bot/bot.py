@@ -1160,6 +1160,51 @@ def get_deposits_for_period(
     return float(row or 0)
 
 
+def get_net_external_flow_for_period(
+    session,
+    account_id: str,
+    start_dt: datetime,
+    end_dt: datetime,
+) -> float:
+    row = session.execute(
+        text(
+            f"""
+        {OPERATIONS_DEDUP_CTE}
+        SELECT COALESCE(
+            SUM(
+                CASE
+                    WHEN operation_type IN :deposit_types THEN ABS(amount)
+                    WHEN operation_type IN :withdrawal_types THEN -ABS(amount)
+                    ELSE 0
+                END
+            ),
+            0
+        ) AS s
+        FROM operations_dedup
+        WHERE account_id = :account_id
+          AND date >= :start_dt
+          AND date < :end_dt
+          AND operation_type IN :operation_types
+          AND state = :executed_state
+        """
+        ).bindparams(
+            bindparam("deposit_types", expanding=True),
+            bindparam("withdrawal_types", expanding=True),
+            bindparam("operation_types", expanding=True),
+        ),
+        {
+            "account_id": account_id,
+            "start_dt": start_dt,
+            "end_dt": end_dt,
+            "deposit_types": DEPOSIT_OPERATION_TYPES,
+            "withdrawal_types": WITHDRAWAL_OPERATION_TYPES,
+            "operation_types": DEPOSIT_OPERATION_TYPES + WITHDRAWAL_OPERATION_TYPES,
+            "executed_state": EXECUTED_OPERATION_STATE,
+        },
+    ).scalar_one()
+    return float(row or 0)
+
+
 def _is_undefined_table_error(exc: Exception, table_name: str) -> bool:
     if not isinstance(exc, ProgrammingError):
         return False
@@ -2409,6 +2454,19 @@ def get_max_value_to_date(session, account_id: str, d: date | None):
 # ========= BUSINESS CALCULATIONS ==========
 
 
+def compute_period_delta_excluding_external_flow(
+    start_value: float | None,
+    end_value: float | None,
+    net_external_flow: float,
+) -> tuple[float | None, float | None]:
+    if start_value in (None, 0) or end_value is None:
+        return None, None
+
+    delta_abs = end_value - start_value - net_external_flow
+    delta_pct = delta_abs / start_value * 100.0
+    return delta_abs, delta_pct
+
+
 def build_today_summary() -> str:
     """
     Формирует текст сводки "на сегодня" используя шаблоны из today_templates.
@@ -2424,6 +2482,12 @@ def build_today_summary() -> str:
             return REPORTING_ACCOUNT_UNAVAILABLE_TEXT
 
         snaps = get_latest_snapshots(session, account_id, limit=2)
+        net_external_flow_today = get_net_external_flow_for_period(
+            session,
+            account_id,
+            day_start,
+            day_end_exclusive,
+        )
         total_deposits = get_total_deposits(session, account_id)
         coupons, dividends = get_income_for_period(session, account_id, day_start, day_end)
         commissions = get_commissions_for_period(session, account_id, day_start, day_end)
@@ -2453,9 +2517,12 @@ def build_today_summary() -> str:
     # Изменение к предыдущему дню
     delta_abs = None
     delta_pct = None
-    if last_value is not None and prev_value is not None and prev_value != 0:
-        delta_abs = last_value - prev_value
-        delta_pct = delta_abs / prev_value * 100.0
+    if last_value is not None and prev_value is not None:
+        delta_abs, delta_pct = compute_period_delta_excluding_external_flow(
+            prev_value,
+            last_value,
+            net_external_flow_today,
+        )
 
     # Общая доходность
     pnl_abs = None
@@ -2516,6 +2583,14 @@ def build_week_summary() -> str:
         # 2. Текущая стоимость
         current_value = float(latest_snap["total_value"]) if latest_snap["total_value"] is not None else 0.0
 
+        # Внешний cashflow за рабочую неделю для корректной дельты
+        net_external_flow_week = get_net_external_flow_for_period(
+            session,
+            account_id,
+            week_start,
+            week_end_exclusive,
+        )
+
         # 3. Изменение за неделю
         # Ищем снапшот до начала недели, чтобы посчитать дельту
         # Если снапшота ровно в start_date нет, берем ближайший предыдущий
@@ -2532,11 +2607,14 @@ def build_week_summary() -> str:
         # Но если портфель создан внутри недели, можно считать start_value = 0?
         # Будем считать дельту только если есть старое значение.
         if start_val_row is not None and start_value != 0:
-            week_delta_abs = current_value - start_value
-            week_delta_pct = week_delta_abs / start_value * 100.0
+            week_delta_abs, week_delta_pct = compute_period_delta_excluding_external_flow(
+                start_value,
+                current_value,
+                net_external_flow_week,
+            )
         elif start_val_row is None:
             # Портфель появился на этой неделе
-            week_delta_abs = current_value
+            week_delta_abs = current_value - net_external_flow_week
             week_delta_pct = 0.0 # Или None, как удобнее
 
         # 4. Пополнения/доходы/расходы за текущую рабочую неделю
@@ -2628,6 +2706,12 @@ def build_month_summary() -> str:
             start_dt=month_start_dt,
             end_dt=month_end_exclusive,
         )
+        net_external_flow_month = get_net_external_flow_for_period(
+            session,
+            account_id=account_id,
+            start_dt=month_start_dt,
+            end_dt=month_end_exclusive,
+        )
 
         coupons, dividends = get_income_for_period(session, account_id, month_start_dt, month_end_dt)
         commissions = get_commissions_for_period(session, account_id, month_start_dt, month_end_dt)
@@ -2680,9 +2764,11 @@ def build_month_summary() -> str:
     if start_snap and end_snap:
         start_val = float(start_snap["total_value"])
         end_val = float(end_snap["total_value"])
-        if start_val != 0:
-            delta_abs = end_val - start_val
-            delta_pct = delta_abs / start_val * 100.0
+        delta_abs, delta_pct = compute_period_delta_excluding_external_flow(
+            start_val,
+            end_val,
+            net_external_flow_month,
+        )
 
     # Формирование контекста шаблона
     month_name = MONTHS_RU.get(month, str(month))
