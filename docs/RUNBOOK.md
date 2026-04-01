@@ -31,6 +31,8 @@ docker volume create financetracker_fintracker-db
 docker compose up -d --build
 ```
 
+При создании контейнера `tracker` entrypoint автоматически устанавливает сертификаты из `docker/certs/` в системную trust store.
+
 4. Проверьте статус:
 
 ```bash
@@ -52,6 +54,12 @@ docker compose up -d --build --force-recreate --remove-orphans
 docker compose ps
 docker compose logs --tail=200 tracker
 docker compose logs --tail=200 bot
+```
+
+Если менялись только файлы в `docker/certs/`, достаточно пересоздать `tracker`:
+
+```bash
+docker compose up -d --force-recreate tracker
 ```
 
 ## Backup И Restore
