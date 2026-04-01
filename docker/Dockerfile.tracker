@@ -4,7 +4,9 @@ FROM python:3.12-slim
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
-    DEBIAN_FRONTEND=noninteractive
+    DEBIAN_FRONTEND=noninteractive \
+    REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt \
+    SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
 
 # System deps (psycopg/pg, timezone, certs)
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -16,6 +18,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
+COPY docker/tracker-entrypoint.sh /usr/local/bin/tracker-entrypoint.sh
+RUN chmod +x /usr/local/bin/tracker-entrypoint.sh
+
 # Python deps
 COPY requirements/tracker.txt ./requirements.txt
 RUN pip install -r requirements.txt
@@ -26,4 +31,4 @@ COPY src/common/ ./common/
 # App code
 COPY src/tracker/ ./
 
-CMD ["python", "-u", "app.py"]
+ENTRYPOINT ["tracker-entrypoint.sh"]

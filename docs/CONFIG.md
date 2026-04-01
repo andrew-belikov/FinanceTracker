@@ -38,9 +38,11 @@
 
 ## Сеть
 
-- `VERIFY_SSL` — проверка SSL сертификата при запросах к API (`true/false`).
+- `VERIFY_SSL` — проверка SSL сертификата при запросах к API (`true/false`). Рекомендуемое значение: `true`.
 - `BOT_PROXY_ENABLED` — включает outbound proxy только для контейнера `bot` (`true/false`).
 - `BOT_VLESS_URL` — VLESS+Reality share link для `xray-client`. Рекомендуется хранить значение в кавычках, чтобы `#label` в конце ссылки не отрезался парсером `.env`.
+
+Для `tracker` при старте контейнера автоматически устанавливаются доверенные сертификаты из каталога `docker/certs/`, поэтому обычный deploy через `docker compose up -d --build --force-recreate --remove-orphans` пересоздаёт контейнер уже с актуальной trust store.
 
 ### Proxy только для `bot`
 
