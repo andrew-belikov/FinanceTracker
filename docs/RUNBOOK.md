@@ -1,13 +1,11 @@
 # Runbook FinanceTracker
 
 Все команды ниже предполагают запуск из корня репозитория, где лежит основной [`compose.yml`](../compose.yml).
-
-Примеры используют POSIX shell. Для PowerShell заменяйте перенаправление stdin на `Get-Content ... | docker compose exec -T db psql ...`.
+Примеры используют POSIX shell и описывают единственный поддерживаемый workflow: `docker compose` из корня репозитория.
 
 ## Базовые Принципы
 
 - Основной Docker entrypoint это корневой `compose.yml`.
-- `docker/compose.yml` существует только для compatibility-сценариев.
 - `docker compose config` требует существующий локальный `.env`, потому что в сервисах используется `env_file: .env`.
 - Не используйте `docker compose down -v`, если хотите сохранить данные Postgres.
 
@@ -80,26 +78,25 @@ cat backup.sql | docker compose exec -T db psql -U "$POSTGRES_USER" -d "$POSTGRE
 
 ## Когда Нужны SQL-Миграции
 
-На чистой БД проект запускается и без них, но миграции нужны, если:
+На чистой БД проект запускается и без них, но исторические SQL-скрипты нужны, если:
 
-- у вас уже есть старая таблица `deposits`, и нужно сохранить данные;
-- нужен compatibility-view `deposits`;
-- нужен точный migrated shape таблицы `operations`;
-- нужны дополнительные поля и ручные ограничения из SQL-скриптов.
+- вы обновляете старую БД со схемой `deposits`;
+- вам нужен точный migrated shape таблицы `operations`;
+- в текущей БД ещё нет таблицы `income_events` или дополнительных полей из поздних миграций.
 
 ## Миграции В Репозитории
 
 | Файл | Когда применять | Что меняет | Важные caveats |
 | --- | --- | --- | --- |
-| `migrations/20260221_operations_from_deposits.sql` | при переходе со старой схемы `deposits` | создаёт `operations`, переименовывает старую `deposits` в `deposits_legacy`, создаёт compatibility-view `deposits` | новый код читает пополнения из `operations`, а не из `deposits` |
-| `migrations/20260221_operations_from_deposits.rollback.sql` | только если нужен частичный rollback compatibility-слоя | возвращает `deposits` как таблицу, если есть `deposits_legacy` | не удаляет `operations` |
+| `migrations/20260221_operations_from_deposits.sql` | при переходе со старой схемы `deposits` | создаёт `operations`, переименовывает старую `deposits` в `deposits_legacy`, создаёт исторический compatibility-view `deposits` | активный runtime-код читает пополнения из `operations`, а не из `deposits` |
+| `migrations/20260221_operations_from_deposits.rollback.sql` | только если нужен частичный rollback исторического compatibility-слоя | возвращает `deposits` как таблицу, если есть `deposits_legacy` | не удаляет `operations` |
 | `migrations/20260225_operations_add_instrument_columns.sql` | если существующая `operations` ещё без `instrument_uid` и `figi` | добавляет 2 колонки | после применения `tracker` дозаполняет пустые поля на последующих синках |
 | `migrations/20260226_income_events.sql` | если существующая схема ещё без `income_events` | создаёт таблицу событий дохода | без этой таблицы минутные income-notifications и часть отчётных сумм не работают |
 | `migrations/20260304_operations_operation_item_fields.sql` | если существующая `operations` ещё без расширенных полей `OperationItem` | добавляет колонки `state`, `commission`, `yield`, `instrument_type` и другие | также добавляет unique-констрейнт по `operation_id`; после миграции возможен backfill исторических строк |
 
 ## Рекомендуемый Порядок Миграции
 
-1. Остановите writer и reader:
+1. Если миграция затрагивает рабочие сервисы, остановите writer и reader:
 
 ```bash
 docker compose stop tracker bot
@@ -111,7 +108,7 @@ docker compose stop tracker bot
 docker compose exec -T db pg_dump -U "$POSTGRES_USER" "$POSTGRES_DB" > pre_migration_backup.sql
 ```
 
-3. Примените нужные SQL-скрипты:
+3. Примените только нужные SQL-скрипты:
 
 ```bash
 docker compose exec -T db psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" < migrations/20260221_operations_from_deposits.sql
@@ -135,11 +132,16 @@ docker compose logs --tail=200 bot
 
 ## SQL-Проверки После Миграции
 
-Проверить таблицы и compatibility-слой:
+Проверить таблицы, которые реально должны появиться после выбранных миграций:
 
 ```bash
 docker compose exec -T db psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "\d operations"
 docker compose exec -T db psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "\d income_events"
+```
+
+Если вы обновляли именно старую схему `deposits`, можно дополнительно проверить исторический compatibility-view:
+
+```bash
 docker compose exec -T db psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "\d deposits"
 ```
 
@@ -252,6 +254,7 @@ docker compose exec -T db psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "SELECT 
 ```bash
 PYTHONPYCACHEPREFIX=/tmp/pycache python3 -m compileall src
 python3 -m unittest discover -s tests
+docker compose config > /dev/null
 ```
 
 Нюансы среды:

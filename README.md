@@ -50,15 +50,17 @@ Postgres  <--- tracker (snapshots)
   bot (reports)
 ```
 
-## Быстрый старт (Windows, Docker Desktop)
+## Быстрый старт (Linux/macOS, Docker)
+
+Единственный поддерживаемый operational workflow: запуск `docker compose` из корня репозитория с корневым `compose.yml`.
 
 1) Клонируйте репозиторий и перейдите в папку проекта.
 
 2) Создайте файл окружения:
 
-```powershell
-Copy-Item .\.env.example .\.env
-notepad .\.env
+```bash
+cp .env.example .env
+${EDITOR:-vi} .env
 ```
 
 Заполните минимум:
@@ -69,21 +71,21 @@ notepad .\.env
 
 3) (Опционально) создайте внешний volume для Postgres.
 
-Проект по умолчанию использует внешний volume `financetracker_fintracker-db` (удобно, чтобы данные переживали пересборки).
+Проект по умолчанию использует внешний volume `financetracker_fintracker-db`, чтобы данные переживали пересборки.
 
-```powershell
+```bash
 docker volume create financetracker_fintracker-db
 ```
 
 4) Запустите стек:
 
-```powershell
+```bash
 docker compose up -d --build
 ```
 
-Проверка статуса и логов:
+5) Проверьте статус и логи:
 
-```powershell
+```bash
 docker compose ps
 docker compose logs --tail=200 bot
 docker compose logs --tail=200 tracker
@@ -110,7 +112,7 @@ BOT_VLESS_URL=""
 
 После изменения `.env` пересоберите и перезапустите стек:
 
-```powershell
+```bash
 docker compose up -d --build --force-recreate --remove-orphans
 docker compose ps
 docker compose logs --tail=200 xray-client
@@ -119,7 +121,7 @@ docker compose logs --tail=200 bot
 
 Быстрый smoke-test маршрута `bot -> xray-client -> Telegram`:
 
-```powershell
+```bash
 docker compose exec bot python proxy_smoke.py
 ```
 
@@ -147,7 +149,7 @@ docker compose exec bot python proxy_smoke.py
 
 ## Обновление (пересборка без потери данных)
 
-```powershell
+```bash
 docker compose up -d --build --force-recreate --remove-orphans
 ```
 
@@ -155,12 +157,11 @@ docker compose up -d --build --force-recreate --remove-orphans
 
 Надёжный порядок (перезапуск всех сервисов + сохранность БД):
 
-```powershell
+```bash
 # 1) (Опционально, но рекомендуется) бэкап текущей БД
-docker compose exec -T db pg_dump -U $env:POSTGRES_USER $env:POSTGRES_DB > backup_before_redeploy.sql
+docker compose exec -T db pg_dump -U "$POSTGRES_USER" "$POSTGRES_DB" > backup_before_redeploy.sql
 
 # 2) Обновить код
-# (внутри репозитория)
 git pull --ff-only
 
 # 3) Пересобрать и перезапустить весь стек
@@ -204,8 +205,8 @@ docker compose logs --tail=200 bot
 
 Пример дампа:
 
-```powershell
-docker exec -i financetracker-db-1 pg_dump -U $env:POSTGRES_USER $env:POSTGRES_DB > backup.sql
+```bash
+docker compose exec -T db pg_dump -U "$POSTGRES_USER" "$POSTGRES_DB" > backup.sql
 ```
 
 
@@ -217,267 +218,77 @@ docker exec -i financetracker-db-1 pg_dump -U $env:POSTGRES_USER $env:POSTGRES_D
 Перед коммитом рекомендуется выполнить:
 
 ```bash
-python -m compileall src
-docker compose config
+python3 -m compileall src
+docker compose config > /dev/null
 ```
 
 
 ## SQL-миграции
 
-В репозитории есть SQL-миграция `migrations/20260221_operations_from_deposits.sql`.
+На чистой БД проект стартует без ручного применения SQL-скриптов. Исторические миграции нужны только при обновлении уже существующей базы или при переходе со старой схемы `deposits`.
 
-Она:
-- создаёт таблицу `operations`;
-- сохраняет старую таблицу как `deposits_legacy`;
-- создаёт view `deposits` только для legacy/backward compatibility старых SQL-запросов;
-- новый код должен читать пополнения из `operations` (с фильтром по `operation_type`), а не из `deposits`;
-- не копирует данные напрямую из `deposits_legacy`: исторические операции догружаются tracker-сервисом из API.
+Активный код читает пополнения и прочие операции из `operations`. View `deposits`, если он вообще присутствует, нужен только как исторический compatibility-артефакт старой миграции.
 
-Применение вручную:
+Основные SQL-файлы:
+- `migrations/20260221_operations_from_deposits.sql` — переводит старую схему `deposits` в `operations` и оставляет исторический compatibility-view `deposits`;
+- `migrations/20260225_operations_add_instrument_columns.sql` — добавляет в `operations` поля `instrument_uid` и `figi`;
+- `migrations/20260226_income_events.sql` — создаёт таблицу `income_events` для уведомлений и отчётных сумм;
+- `migrations/20260304_operations_operation_item_fields.sql` — расширяет `operations` полями из `OperationItem` и добавляет уникальность по `operation_id`;
+- `migrations/20260324_dataset_source_fields.sql` — добавляет поля для source-aware `/dataset` и таблицу `asset_aliases`;
+- `migrations/20260324_rebalance_targets_and_invest_notifications.sql` — создаёт `rebalance_targets` и `invest_notifications`.
 
-```powershell
-Get-Content .\migrations\20260221_operations_from_deposits.sql | docker compose exec -T db psql -U $env:POSTGRES_USER -d $env:POSTGRES_DB
-```
+### Историческая миграция со схемы `deposits`
 
-### Коротко: миграция на новую схему
-
-```powershell
+```bash
 # 1) Остановить writer/reader, чтобы зафиксировать состояние на время миграции
 docker compose stop tracker bot
 
-# 2) Применить SQL-миграцию
-Get-Content .\migrations\20260221_operations_from_deposits.sql | docker compose exec -T db psql -U $env:POSTGRES_USER -d $env:POSTGRES_DB
+# 2) Сделать бэкап перед изменениями
+docker compose exec -T db pg_dump -U "$POSTGRES_USER" "$POSTGRES_DB" > pre_operations_migration_backup.sql
 
-# 3) Поднять сервисы обратно
+# 3) Применить историческую SQL-миграцию
+docker compose exec -T db psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" < migrations/20260221_operations_from_deposits.sql
+
+# 4) Поднять сервисы обратно
 docker compose up -d tracker bot
 
-# 4) Проверить результат миграции
-docker compose exec -T db psql -U $env:POSTGRES_USER -d $env:POSTGRES_DB -c "SELECT operation_type, COUNT(*) FROM operations GROUP BY operation_type ORDER BY operation_type;"
-docker compose exec -T db psql -U $env:POSTGRES_USER -d $env:POSTGRES_DB -c "SELECT COUNT(*) AS deposits_rows FROM deposits;"
-```
-
-Ожидаемый результат: данные операций и пополнений читаются из `operations`; view `deposits` остаётся только для обратной совместимости legacy-запросов.
-
-### Как применить миграцию без потери данных (рекомендуемый порядок)
-
-1) Остановить запись в БД со стороны приложений (короткое окно на миграцию):
-
-```powershell
-docker compose stop tracker bot
-```
-
-2) Сделать бэкап БД перед изменениями:
-
-```powershell
-docker compose exec -T db pg_dump -U $env:POSTGRES_USER $env:POSTGRES_DB > pre_operations_migration_backup.sql
-```
-
-3) Применить миграцию:
-
-```powershell
-Get-Content .\migrations\20260221_operations_from_deposits.sql | docker compose exec -T db psql -U $env:POSTGRES_USER -d $env:POSTGRES_DB
-```
-
-4) Проверить, что совместимость сохранена (данные по пополнениям читаются через `deposits`):
-
-```powershell
-docker compose exec -T db psql -U $env:POSTGRES_USER -d $env:POSTGRES_DB -c "SELECT COUNT(*) AS operations_input FROM operations WHERE operation_type='OPERATION_TYPE_INPUT';"
-docker compose exec -T db psql -U $env:POSTGRES_USER -d $env:POSTGRES_DB -c "SELECT COUNT(*) AS deposits_rows FROM deposits;"
-docker compose exec -T db psql -U $env:POSTGRES_USER -d $env:POSTGRES_DB -c "SELECT date, amount, currency, description, source FROM deposits ORDER BY date DESC LIMIT 10;"
-```
-
-5) Запустить сервисы обратно и дать tracker догрузить историю операций из API:
-
-```powershell
-docker compose up -d tracker bot
+# 5) Проверить, что активный код работает через operations
+docker compose exec -T db psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "SELECT operation_type, COUNT(*) FROM operations GROUP BY operation_type ORDER BY operation_type;"
 docker compose logs --tail=200 tracker
-```
-
-6) После стабилизации проверить, что в `operations` появились операции и бот читает пополнения напрямую из `operations` (с фильтром по `operation_type`):
-
-```powershell
-docker compose exec -T db psql -U $env:POSTGRES_USER -d $env:POSTGRES_DB -c "SELECT operation_type, COUNT(*) FROM operations GROUP BY operation_type ORDER BY operation_type;"
 docker compose logs --tail=200 bot
 ```
 
-Откат (с ограничениями) — `migrations/20260221_operations_from_deposits.rollback.sql`:
+Если вы обновляли именно старую `deposits`-схему, можно дополнительно проверить исторический compatibility-view:
 
-- view `deposits` удаляется;
-- если есть `deposits_legacy`, она возвращается как таблица `deposits`;
-- таблица `operations` не удаляется.
-
-```powershell
-Get-Content .\migrations\20260221_operations_from_deposits.rollback.sql | docker compose exec -T db psql -U $env:POSTGRES_USER -d $env:POSTGRES_DB
+```bash
+docker compose exec -T db psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "\d deposits"
+docker compose exec -T db psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "SELECT COUNT(*) AS deposits_rows FROM deposits;"
 ```
 
-Дополнительная миграция `migrations/20260225_operations_add_instrument_columns.sql` добавляет в `operations`
-поля `instrument_uid` и `figi`.
+Откат с ограничениями остаётся в `migrations/20260221_operations_from_deposits.rollback.sql`: он возвращает `deposits` как таблицу при наличии `deposits_legacy`, но не удаляет `operations`.
 
-```powershell
-Get-Content .\migrations\20260225_operations_add_instrument_columns.sql | docker compose exec -T db psql -U $env:POSTGRES_USER -d $env:POSTGRES_DB
+### Дополнительные миграции
+
+```bash
+docker compose exec -T db psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" < migrations/20260225_operations_add_instrument_columns.sql
+docker compose exec -T db psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" < migrations/20260226_income_events.sql
+docker compose exec -T db psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" < migrations/20260304_operations_operation_item_fields.sql
+docker compose exec -T db psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" < migrations/20260324_dataset_source_fields.sql
+docker compose exec -T db psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" < migrations/20260324_rebalance_targets_and_invest_notifications.sql
 ```
 
+Нюансы:
+- `tracker` после миграций в `operations` может сделать backfill пустых полей для уже существующих строк;
+- `income_events` нужен для минутных уведомлений о купонах/дивидендах и части отчётных сумм;
+- миграцию `20260324_rebalance_targets_and_invest_notifications.sql` нужно применить до пересборки `tracker`, иначе новый код не сможет писать расширенные поля `portfolio_positions`.
 
-Миграция `migrations/20260304_operations_operation_item_fields.sql` расширяет таблицу `operations` полями
-из `OperationItem` (кроме `trades_info.trades`) и добавляет уникальность по `operation_id`
-для идемпотентного upsert.
+### Разовый repair после старого Windows backup
 
-```powershell
-Get-Content .\migrations\20260304_operations_operation_item_fields.sql | docker compose exec -T db psql -U $env:POSTGRES_USER -d $env:POSTGRES_DB
-```
+Если после старого Windows backup в `operations.description` появилась битая кириллица, можно выполнить разовый repair внутри контейнера `tracker`:
 
-Синхронизация операций теперь использует `OperationsService/GetOperationsByCursor` с `withoutTrades=true`
-и постраничной обработкой `nextCursor`.
-Если после миграции у старых записей новые поля операции пустые, tracker автоматически
-делает backfill с даты открытия счёта и затем возвращается к инкрементальному режиму.
-
-Миграция `migrations/20260226_income_events.sql` добавляет таблицу `income_events`.
-
-Новая схема уведомлений:
-- `tracker` фиксирует события купонов/дивидендов в `income_events`;
-- `bot` раз в минуту читает `income_events.notified = false`, отправляет уведомления и помечает событие как отправленное.
-
-```powershell
-Get-Content .\migrations\20260226_income_events.sql | docker compose exec -T db psql -U $env:POSTGRES_USER -d $env:POSTGRES_DB
-```
-
-Миграция `migrations/20260324_dataset_source_fields.sql` добавляет поля в `portfolio_positions`
-для source-aware `/dataset` и создаёт таблицу `asset_aliases`.
-
-Она нужна, чтобы:
-- `positions_current` экспортировал `asset_uid`, `instrument_uid`, `position_uid`, `logical_asset_id`;
-- `/dataset` мог строить reconciliation по классам активов из snapshot totals;
-- смена FIGI не ломала склейку по логическому активу.
-
-```powershell
-Get-Content .\migrations\20260324_dataset_source_fields.sql | docker compose exec -T db psql -U $env:POSTGRES_USER -d $env:POSTGRES_DB
-```
-
-Миграция `migrations/20260324_rebalance_targets_and_invest_notifications.sql` добавляет таблицы
-`rebalance_targets` и `invest_notifications` для `/targets`, `/rebalance`, `/invest`
-и автоматических подсказок по новым пополнениям.
-
-```powershell
-Get-Content .\migrations\20260324_rebalance_targets_and_invest_notifications.sql | docker compose exec -T db psql -U $env:POSTGRES_USER -d $env:POSTGRES_DB
-```
-
-Важно: эту миграцию нужно применить **до** пересборки `tracker`, иначе новый код tracker
-не сможет записывать расширенные поля `portfolio_positions`.
-
-Если после переноса backup с Windows в `operations.description` появилась битая кириллица,
-можно выполнить разовый repair внутри контейнера `tracker`:
-
-```powershell
+```bash
 docker compose exec -T tracker python repair_operations_description_encoding.py
 ```
-
-Для временного переключения между ветками есть helper-скрипт
-`scripts/migrate_branch_switch.ps1`.
-
-Он:
-- находит новые SQL-файлы в `migrations/` для целевой ветки через `git diff FROM...TO`;
-- поднимает `db`, останавливает `tracker`/`bot`, применяет найденные миграции;
-- выполняет `compileall`, `docker compose config` и `unittest`;
-- пересобирает и поднимает контейнеры, затем показывает статус и последние логи.
-
-Примеры:
-
-```powershell
-.\scripts\migrate_branch_switch.ps1 -FromBranch main -ToBranch dev
-.\scripts\migrate_branch_switch.ps1 -FromBranch dev -ToBranch main
-```
-
-Запуск из Windows:
-
-```powershell
-cd C:\path\to\FinanceTracker
-powershell -ExecutionPolicy Bypass -File .\scripts\migrate_branch_switch.ps1 -FromBranch main -ToBranch dev
-```
-
-Если вы уже открыли PowerShell в корне репозитория:
-
-```powershell
-.\scripts\migrate_branch_switch.ps1 -FromBranch main -ToBranch dev
-```
-
-Если Windows блокирует запуск `.ps1`, можно разово разрешить выполнение для текущего окна:
-
-```powershell
-Set-ExecutionPolicy -Scope Process Bypass
-.\scripts\migrate_branch_switch.ps1 -FromBranch main -ToBranch dev
-```
-
-### Пошагово: деплой + миграция + проверка (Windows Terminal / PowerShell)
-
-1) Откройте Windows Terminal (PowerShell) в папке репозитория и обновите код:
-
-```powershell
-git pull --ff-only
-```
-
-2) Остановите сервисы `tracker` и `bot` на время миграции (БД остаётся запущенной):
-
-```powershell
-docker compose stop tracker bot
-```
-
-3) Примените миграцию `income_events`:
-
-```powershell
-Get-Content .\migrations\20260226_income_events.sql | docker compose exec -T db psql -U $env:POSTGRES_USER -d $env:POSTGRES_DB
-```
-
-4) Пересоберите и поднимите весь стек:
-
-```powershell
-docker compose up -d --build --force-recreate --remove-orphans
-```
-
-5) Проверьте статус контейнеров:
-
-```powershell
-docker compose ps
-```
-
-6) Проверьте, что таблица создана:
-
-```powershell
-docker compose exec -T db psql -U $env:POSTGRES_USER -d $env:POSTGRES_DB -c "\d income_events"
-```
-
-7) Проверьте, что tracker создаёт события, а bot отправляет уведомления:
-
-```powershell
-docker compose logs --tail=200 tracker
-docker compose logs --tail=200 bot
-```
-
-Ожидаемо:
-- в логах tracker появляются записи `income_event_created`;
-- в логах bot появляются `income_event_notification_sent`.
-
-8) Быстрая проверка вручную (тестовое событие в БД):
-
-```powershell
-docker compose exec -T db psql -U $env:POSTGRES_USER -d $env:POSTGRES_DB -c "INSERT INTO income_events (account_id, figi, event_date, event_type, gross_amount, tax_amount, net_amount, net_yield_pct) VALUES ('manual-check', 'TESTFIGI', CURRENT_DATE, 'dividend', 100.00, -13.00, 87.00, 1.23) ON CONFLICT DO NOTHING;"
-docker compose logs --tail=200 bot
-```
-
-9) Проверка, что событие пометилось как отправленное:
-
-```powershell
-docker compose exec -T db psql -U $env:POSTGRES_USER -d $env:POSTGRES_DB -c "SELECT id, account_id, figi, event_type, net_amount, net_yield_pct, notified, created_at FROM income_events ORDER BY created_at DESC LIMIT 20;"
-```
-
-10) Если нужно откатить только миграцию `income_events`, удалите таблицу вручную (осторожно, удалит данные событий):
-
-```powershell
-docker compose exec -T db psql -U $env:POSTGRES_USER -d $env:POSTGRES_DB -c "DROP TABLE IF EXISTS income_events;"
-```
-
-После применения tracker при очередной синхронизации:
-- заполняет новые поля для новых операций;
-- делает backfill для уже существующих операций (обновляет строки, где `instrument_uid`/`figi` ещё `NULL`).
 
 ## Конфигурация
 
@@ -495,22 +306,22 @@ docker compose exec -T db psql -U $env:POSTGRES_USER -d $env:POSTGRES_DB -c "DRO
 
 1) Проверить, что контейнеры запущены:
 
-```powershell
+```bash
 docker compose ps
 ```
 
 2) Проверить логи на старте (без traceback/DB errors):
 
-```powershell
+```bash
 docker compose logs --tail=200 bot
 docker compose logs --tail=200 tracker
 ```
 
 3) Проверить данные операций в БД (по умолчанию бот считает пополнениями `OPERATION_TYPE_INPUT`):
 
-```powershell
-docker compose exec -T db psql -U $env:POSTGRES_USER -d $env:POSTGRES_DB -c "SELECT operation_type, COUNT(*) FROM operations GROUP BY operation_type ORDER BY operation_type;"
-docker compose exec -T db psql -U $env:POSTGRES_USER -d $env:POSTGRES_DB -c "SELECT MAX(date)::date AS latest_input_date FROM operations WHERE operation_type='OPERATION_TYPE_INPUT';"
+```bash
+docker compose exec -T db psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "SELECT operation_type, COUNT(*) FROM operations GROUP BY operation_type ORDER BY operation_type;"
+docker compose exec -T db psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "SELECT MAX(date)::date AS latest_input_date FROM operations WHERE operation_type='OPERATION_TYPE_INPUT';"
 ```
 
 4) В Telegram вручную проверить команды бота:

@@ -11,8 +11,8 @@
 Из корня проекта:
 
 ```bash
-python -m compileall src
-docker compose config
+python3 -m compileall src
+docker compose config > /dev/null
 ```
 
 GitHub Actions workflow `CI` дублирует базовую проверку на `push` и `pull_request`:
