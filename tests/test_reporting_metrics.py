@@ -8,7 +8,7 @@ from zoneinfo import ZoneInfo
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-BOT_FILE = PROJECT_ROOT / "src" / "bot" / "bot.py"
+SERVICES_FILE = PROJECT_ROOT / "src" / "bot" / "services.py"
 RUNTIME_FILE = PROJECT_ROOT / "src" / "bot" / "runtime.py"
 QUERIES_FILE = PROJECT_ROOT / "src" / "bot" / "queries.py"
 
@@ -74,7 +74,7 @@ def load_symbols():
         namespace=shared_namespace,
     )
     return load_selected_symbols(
-        BOT_FILE,
+        SERVICES_FILE,
         set(),
         {
             "build_net_external_flow_by_day",
