@@ -8,33 +8,10 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 BOT_FILE = PROJECT_ROOT / "src" / "bot" / "bot.py"
+RUNTIME_FILE = PROJECT_ROOT / "src" / "bot" / "runtime.py"
 
-
-def load_symbols():
-    module_ast = ast.parse(BOT_FILE.read_text(encoding="utf-8"), filename=str(BOT_FILE))
-    wanted_assignments = {
-        "MONTHS_RU_GENITIVE",
-        "REBALANCE_ASSET_CLASSES",
-        "REBALANCE_TARGET_ALIASES",
-        "REBALANCE_CLASS_LABELS",
-        "REBALANCE_GROUP_TO_CLASS",
-        "REBALANCE_TOLERANCE_PCT",
-    }
-    wanted_functions = {
-        "normalize_decimal",
-        "_instrument_type_to_group",
-        "quantize_ruble_amount",
-        "parse_decimal_input",
-        "parse_rebalance_targets_args",
-        "aggregate_rebalance_values_by_class",
-        "compute_rebalance_plan",
-        "compute_invest_plan",
-        "format_rebalance_weight",
-        "format_human_date_ru",
-        "_build_rebalance_diff_lines",
-        "build_help_text",
-    }
-
+def load_selected_symbols(file_path: Path, wanted_assignments: set[str], wanted_functions: set[str], namespace=None):
+    module_ast = ast.parse(file_path.read_text(encoding="utf-8"), filename=str(file_path))
     selected_nodes = []
     for node in module_ast.body:
         if isinstance(node, ast.Assign):
@@ -57,15 +34,51 @@ def load_symbols():
                 arg.annotation = None
             selected_nodes.append(copied)
 
+    loaded_namespace = {} if namespace is None else dict(namespace)
     isolated_module = ast.Module(body=selected_nodes, type_ignores=[])
-    code = compile(isolated_module, filename=str(BOT_FILE), mode="exec")
-    namespace = {
-        "Decimal": Decimal,
-        "InvalidOperation": InvalidOperation,
-        "ROUND_HALF_UP": ROUND_HALF_UP,
-    }
-    exec(code, namespace)
-    return namespace
+    code = compile(isolated_module, filename=str(file_path), mode="exec")
+    exec(code, loaded_namespace)
+    return loaded_namespace
+
+
+def load_symbols():
+    runtime_symbols = load_selected_symbols(
+        RUNTIME_FILE,
+        {"MONTHS_RU_GENITIVE"},
+        {"normalize_decimal"},
+        namespace={
+            "Decimal": Decimal,
+        },
+    )
+    return load_selected_symbols(
+        BOT_FILE,
+        {
+            "REBALANCE_ASSET_CLASSES",
+            "REBALANCE_TARGET_ALIASES",
+            "REBALANCE_CLASS_LABELS",
+            "REBALANCE_GROUP_TO_CLASS",
+            "REBALANCE_TOLERANCE_PCT",
+        },
+        {
+            "_instrument_type_to_group",
+            "quantize_ruble_amount",
+            "parse_decimal_input",
+            "parse_rebalance_targets_args",
+            "aggregate_rebalance_values_by_class",
+            "compute_rebalance_plan",
+            "compute_invest_plan",
+            "format_rebalance_weight",
+            "format_human_date_ru",
+            "_build_rebalance_diff_lines",
+            "build_help_text",
+        },
+        namespace={
+            **runtime_symbols,
+            "Decimal": Decimal,
+            "InvalidOperation": InvalidOperation,
+            "ROUND_HALF_UP": ROUND_HALF_UP,
+        },
+    )
 
 
 SYMBOLS = load_symbols()
