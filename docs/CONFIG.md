@@ -42,6 +42,7 @@
 - `VERIFY_SSL` — проверка SSL сертификата при запросах к API (`true/false`). Рекомендуемое значение: `true`.
 - `BOT_PROXY_ENABLED` — включает outbound proxy только для контейнера `bot` (`true/false`).
 - `BOT_VLESS_URL` — VLESS+Reality share link для `xray-client`. Рекомендуется хранить значение в кавычках, чтобы `#label` в конце ссылки не отрезался парсером `.env`.
+- `BOT_STARTUP_RETRY_DELAY_SECONDS` — пауза между supervised-перезапусками процесса `bot.py`, если Telegram API временно недоступен через proxy или прямой транспорт (по умолчанию `15` секунд).
 
 Для `tracker` при старте контейнера автоматически устанавливаются доверенные сертификаты из каталога `docker/certs/`, поэтому обычный deploy через `docker compose up -d --build --force-recreate --remove-orphans` пересоздаёт контейнер уже с актуальной trust store.
 
@@ -51,6 +52,7 @@
 - При `BOT_PROXY_ENABLED=true` рядом поднимается сервис `xray-client`, а `bot` направляет только внешний HTTP(S)-трафик через `http://xray-client:3128`.
 - Внутренние адреса (`localhost`, `127.0.0.1`, `db`, `tracker`, `xray-client`) добавляются в `NO_PROXY`, поэтому внутренние обращения не уходят в proxy.
 - Long polling (`getUpdates`) и обычные Bot API запросы используют один и тот же явный proxy endpoint из `BOT_PROXY_ENDPOINT`; это снижает риск зависшего polling при переезде между хостами.
+- Если `bot.py` не может инициализироваться из-за транспортного `TimedOut` / `NetworkError`, `entrypoint.py` не завершает весь контейнер сразу, а перезапускает сам процесс бота с паузой `BOT_STARTUP_RETRY_DELAY_SECONDS`.
 - Если watchdog два раза подряд видит backlog Telegram updates при превышении порога стагнации, `bot` завершает процесс и рассчитывает на автоматический рестарт контейнера через `restart: unless-stopped`.
 - `tracker` и `db` не получают proxy env и продолжают работать напрямую.
 

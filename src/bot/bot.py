@@ -26,6 +26,7 @@ Telegram-бот для проекта iis_tracker.
 - Все остальные пользователи игнорируются.
 """
 
+from telegram.error import NetworkError, TimedOut
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -105,6 +106,8 @@ COMMAND_HANDLERS = (
     ("rebalance", cmd_rebalance),
     ("invest", cmd_invest),
 )
+
+BOT_STARTUP_RETRY_EXIT_CODE = 76
 
 
 def register_handlers(app: Application) -> None:
@@ -221,6 +224,10 @@ async def on_application_error(update: object, context: ContextTypes.DEFAULT_TYP
     )
 
 
+def is_retryable_telegram_transport_error(exc: Exception) -> bool:
+    return isinstance(exc, (TimedOut, NetworkError))
+
+
 def main() -> int:
     if not TELEGRAM_BOT_TOKEN:
         logger.error(
@@ -255,10 +262,26 @@ def main() -> int:
             "schedule_timezone": TZ_NAME,
         },
     )
-    app.run_polling(
-        timeout=TELEGRAM_GET_UPDATES_TIMEOUT_SECONDS,
-        poll_interval=TELEGRAM_POLL_INTERVAL_SECONDS,
-    )
+    try:
+        app.run_polling(
+            timeout=TELEGRAM_GET_UPDATES_TIMEOUT_SECONDS,
+            poll_interval=TELEGRAM_POLL_INTERVAL_SECONDS,
+        )
+    except Exception as exc:
+        if not is_retryable_telegram_transport_error(exc):
+            raise
+        logger.exception(
+            "bot_telegram_transport_failed",
+            "Telegram transport failed while initializing or polling; requesting supervised restart.",
+            {
+                "error_type": type(exc).__name__,
+                "error_message": str(exc),
+                "retry_exit_code": BOT_STARTUP_RETRY_EXIT_CODE,
+                "proxy_enabled": BOT_PROXY_ENABLED,
+                "proxy_url": BOT_PROXY_ENDPOINT if BOT_PROXY_ENABLED else None,
+            },
+        )
+        return BOT_STARTUP_RETRY_EXIT_CODE
     return get_bot_exit_code()
 
 
