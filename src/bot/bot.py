@@ -68,58 +68,48 @@ from runtime import (
 
 # ==========================================
 
-# =============== HELPERS ==================
+COMMAND_HANDLERS = (
+    ("start", cmd_start),
+    ("help", cmd_help),
+    ("today", cmd_today),
+    ("week", cmd_week),
+    ("month", cmd_month),
+    ("year", cmd_year),
+    ("dataset", cmd_dataset),
+    ("structure", cmd_structure),
+    ("history", cmd_history),
+    ("twr", cmd_twr),
+    ("targets", cmd_targets),
+    ("rebalance", cmd_rebalance),
+    ("invest", cmd_invest),
+)
 
 
-# =============== HANDLERS =================
-
-
-# ============ DAILY JOB (JOBQUEUE) ========
-
-
-def main() -> int:
-    if not TELEGRAM_BOT_TOKEN:
-        logger.error(
-            "missing_telegram_bot_token",
-            "TELEGRAM_BOT_TOKEN не задан. Передай его через env-переменную.",
-        )
-        return 1
-
-    app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
-
+def register_handlers(app: Application) -> None:
     app.add_handler(MessageHandler(filters.COMMAND, debug_command_probe), group=-1)
-    app.add_handler(CommandHandler("start", cmd_start))
-    app.add_handler(CommandHandler("help", cmd_help))
-    app.add_handler(CommandHandler("today", cmd_today))
-    app.add_handler(CommandHandler("week", cmd_week))
-    app.add_handler(CommandHandler("month", cmd_month))
-    app.add_handler(CommandHandler("year", cmd_year))
-    app.add_handler(CommandHandler("dataset", cmd_dataset))
-    app.add_handler(CommandHandler("structure", cmd_structure))
-    app.add_handler(CommandHandler("history", cmd_history))
-    app.add_handler(CommandHandler("twr", cmd_twr))
-    app.add_handler(CommandHandler("targets", cmd_targets))
-    app.add_handler(CommandHandler("rebalance", cmd_rebalance))
-    app.add_handler(CommandHandler("invest", cmd_invest))
+    for command_name, handler in COMMAND_HANDLERS:
+        app.add_handler(CommandHandler(command_name, handler))
 
-    # Ежедневный джоб
-    job_time = time(
-        hour=18,
-        minute=0,
-        tzinfo=HOST_TZ,
-    )
-    if app.job_queue is None:
+
+def configure_jobs(app: Application) -> None:
+    job_queue = app.job_queue
+    if job_queue is None:
         raise RuntimeError(
             "JobQueue не инициализирован. Убедись, что установлен пакет "
             '"python-telegram-bot[job-queue]" и что Application создаётся корректно.'
         )
 
-    app.job_queue.run_daily(daily_job, time=job_time, name="daily_summary")
-    app.job_queue.run_repeating(check_income_events, interval=60, first=10, name="income_events_notifier")
-    app.job_queue.run_repeating(check_invest_notifications, interval=60, first=15, name="invest_notifier")
+    job_time = time(
+        hour=18,
+        minute=0,
+        tzinfo=HOST_TZ,
+    )
+    job_queue.run_daily(daily_job, time=job_time, name="daily_summary")
+    job_queue.run_repeating(check_income_events, interval=60, first=10, name="income_events_notifier")
+    job_queue.run_repeating(check_invest_notifications, interval=60, first=15, name="invest_notifier")
 
     if JOBQUEUE_SMOKE_TEST_ON_START:
-        app.job_queue.run_once(
+        job_queue.run_once(
             jobqueue_smoke_test_job,
             when=JOBQUEUE_SMOKE_TEST_DELAY_SECONDS,
             name="jobqueue_smoke_test",
@@ -132,6 +122,24 @@ def main() -> int:
                 "target_chat_ids": sorted(TARGET_CHAT_IDS),
             },
         )
+
+
+def build_application() -> Application:
+    app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+    register_handlers(app)
+    configure_jobs(app)
+    return app
+
+
+def main() -> int:
+    if not TELEGRAM_BOT_TOKEN:
+        logger.error(
+            "missing_telegram_bot_token",
+            "TELEGRAM_BOT_TOKEN не задан. Передай его через env-переменную.",
+        )
+        return 1
+
+    app = build_application()
 
     logger.info(
         "bot_started",
