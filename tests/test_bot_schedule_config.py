@@ -9,33 +9,12 @@ from zoneinfo import ZoneInfo
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-BOT_FILE = PROJECT_ROOT / "src" / "bot" / "bot.py"
+RUNTIME_FILE = PROJECT_ROOT / "src" / "bot" / "runtime.py"
+SERVICES_FILE = PROJECT_ROOT / "src" / "bot" / "services.py"
 
 
-def load_symbols():
-    module_ast = ast.parse(BOT_FILE.read_text(encoding="utf-8"), filename=str(BOT_FILE))
-    wanted_assignments = {
-        "TZ_NAME",
-        "DAILY_JOB_HOUR",
-        "DAILY_JOB_MINUTE",
-        "DAILY_JOB_SCHEDULE_LABEL",
-        "BOT_PROXY_ENABLED",
-        "BOT_PROXY_ENDPOINT",
-        "POLLING_BACKLOG_PENDING_THRESHOLD",
-        "POLLING_BACKLOG_STALL_THRESHOLD_SECONDS",
-        "POLLING_BACKLOG_RECOVERY_CONFIRMATION_COUNT",
-    }
-    wanted_functions = {
-        "build_daily_job_time",
-        "format_daily_job_schedule",
-        "build_help_text",
-        "resolve_telegram_proxy_url",
-        "build_telegram_request_kwargs",
-        "is_polling_backlog_detected",
-        "next_polling_backlog_detection_streak",
-        "should_trigger_polling_self_heal",
-    }
-
+def load_selected_symbols(file_path: Path, wanted_assignments: set[str], wanted_functions: set[str], namespace=None):
+    module_ast = ast.parse(file_path.read_text(encoding="utf-8"), filename=str(file_path))
     selected_nodes = []
     for node in module_ast.body:
         if isinstance(node, ast.Assign):
@@ -58,13 +37,20 @@ def load_symbols():
                 arg.annotation = None
             selected_nodes.append(copied)
 
+    loaded_namespace = {} if namespace is None else namespace
     isolated_module = ast.Module(body=selected_nodes, type_ignores=[])
-    code = compile(isolated_module, filename=str(BOT_FILE), mode="exec")
+    code = compile(isolated_module, filename=str(file_path), mode="exec")
+    exec(code, loaded_namespace)
+    return loaded_namespace
+
+
+def load_symbols():
     namespace = {
         "os": os,
         "TZ": ZoneInfo("Europe/Moscow"),
     }
     exec("from datetime import time\n", namespace)
+
     with mock.patch.dict(
         os.environ,
         {
@@ -76,7 +62,36 @@ def load_symbols():
         },
         clear=False,
     ):
-        exec(code, namespace)
+        load_selected_symbols(
+            RUNTIME_FILE,
+            {
+                "TZ_NAME",
+                "DAILY_JOB_HOUR",
+                "DAILY_JOB_MINUTE",
+                "DAILY_JOB_SCHEDULE_LABEL",
+                "BOT_PROXY_ENABLED",
+                "BOT_PROXY_ENDPOINT",
+                "POLLING_BACKLOG_PENDING_THRESHOLD",
+                "POLLING_BACKLOG_STALL_THRESHOLD_SECONDS",
+                "POLLING_BACKLOG_RECOVERY_CONFIRMATION_COUNT",
+            },
+            {
+                "build_daily_job_time",
+                "format_daily_job_schedule",
+                "resolve_telegram_proxy_url",
+                "build_telegram_request_kwargs",
+                "is_polling_backlog_detected",
+                "next_polling_backlog_detection_streak",
+                "should_trigger_polling_self_heal",
+            },
+            namespace=namespace,
+        )
+        load_selected_symbols(
+            SERVICES_FILE,
+            set(),
+            {"build_help_text"},
+            namespace=namespace,
+        )
     return namespace
 
 

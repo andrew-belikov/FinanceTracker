@@ -8,30 +8,12 @@ from zoneinfo import ZoneInfo
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-BOT_FILE = PROJECT_ROOT / "src" / "bot" / "bot.py"
+SERVICES_FILE = PROJECT_ROOT / "src" / "bot" / "services.py"
+RUNTIME_FILE = PROJECT_ROOT / "src" / "bot" / "runtime.py"
+QUERIES_FILE = PROJECT_ROOT / "src" / "bot" / "queries.py"
 
-
-def load_symbols():
-    module_ast = ast.parse(BOT_FILE.read_text(encoding="utf-8"), filename=str(BOT_FILE))
-    wanted_assignments = {
-        "DEPOSIT_OPERATION_TYPES",
-        "WITHDRAWAL_OPERATION_TYPES",
-        "TINKOFF_ACCOUNT_ID",
-    }
-    wanted_functions = {
-        "to_local_market_date",
-        "normalize_reporting_account_id",
-        "choose_reporting_account_id",
-        "get_latest_snapshot_account_id",
-        "resolve_reporting_account_id",
-        "build_net_external_flow_by_day",
-        "compute_period_delta_excluding_external_flow",
-        "compute_twr_series",
-        "compute_xnpv",
-        "compute_xirr",
-        "project_run_rate_value",
-    }
-
+def load_selected_symbols(file_path: Path, wanted_assignments: set[str], wanted_functions: set[str], namespace=None):
+    module_ast = ast.parse(file_path.read_text(encoding="utf-8"), filename=str(file_path))
     selected_nodes = []
     for node in module_ast.body:
         if isinstance(node, ast.Assign):
@@ -54,16 +36,56 @@ def load_symbols():
                 arg.annotation = None
             selected_nodes.append(copied)
 
+    loaded_namespace = {} if namespace is None else namespace
     isolated_module = ast.Module(body=selected_nodes, type_ignores=[])
-    code = compile(isolated_module, filename=str(BOT_FILE), mode="exec")
-    namespace = {
+    code = compile(isolated_module, filename=str(file_path), mode="exec")
+    exec(code, loaded_namespace)
+    return loaded_namespace
+
+
+def load_symbols():
+    shared_namespace = {
         "os": os,
-        "text": lambda sql: sql,
         "TZ": ZoneInfo("Europe/Moscow"),
     }
-    exec("from datetime import date, datetime, timezone\n", namespace)
-    exec(code, namespace)
-    return namespace
+    exec("from datetime import date, datetime, timezone\n", shared_namespace)
+    shared_namespace["text"] = lambda sql: sql
+    load_selected_symbols(
+        RUNTIME_FILE,
+        {
+            "DEPOSIT_OPERATION_TYPES",
+            "WITHDRAWAL_OPERATION_TYPES",
+            "TINKOFF_ACCOUNT_ID",
+        },
+        {
+            "to_local_market_date",
+        },
+        namespace=shared_namespace,
+    )
+    load_selected_symbols(
+        QUERIES_FILE,
+        set(),
+        {
+            "normalize_reporting_account_id",
+            "choose_reporting_account_id",
+            "get_latest_snapshot_account_id",
+            "resolve_reporting_account_id",
+        },
+        namespace=shared_namespace,
+    )
+    return load_selected_symbols(
+        SERVICES_FILE,
+        set(),
+        {
+            "build_net_external_flow_by_day",
+            "compute_period_delta_excluding_external_flow",
+            "compute_twr_series",
+            "compute_xnpv",
+            "compute_xirr",
+            "project_run_rate_value",
+        },
+        namespace=shared_namespace,
+    )
 
 
 SYMBOLS = load_symbols()
