@@ -1489,6 +1489,118 @@ def mark_invest_notification_sent(
     return True
 
 
+def claim_daily_job_run(
+    session,
+    *,
+    job_name: str,
+    run_date: date,
+) -> bool | None:
+    try:
+        created_at = datetime.now(timezone.utc).replace(tzinfo=None)
+        result = session.execute(
+            text(
+                """
+                INSERT INTO bot_daily_job_runs (
+                    job_name,
+                    run_date,
+                    status,
+                    created_at
+                )
+                VALUES (
+                    :job_name,
+                    :run_date,
+                    :status,
+                    :created_at
+                )
+                ON CONFLICT (job_name, run_date) DO NOTHING
+                """
+            ),
+            {
+                "job_name": job_name,
+                "run_date": run_date,
+                "status": "started",
+                "created_at": created_at,
+            },
+        )
+        session.commit()
+    except Exception as exc:
+        session.rollback()
+        if _is_undefined_table_error(exc, "bot_daily_job_runs"):
+            return None
+        raise
+    return bool(result.rowcount)
+
+
+def complete_daily_job_run(
+    session,
+    *,
+    job_name: str,
+    run_date: date,
+    sent_total: int,
+    failed_total: int,
+) -> bool | None:
+    try:
+        completed_at = datetime.now(timezone.utc).replace(tzinfo=None)
+        result = session.execute(
+            text(
+                """
+                UPDATE bot_daily_job_runs
+                SET status = :status,
+                    completed_at = :completed_at,
+                    sent_total = :sent_total,
+                    failed_total = :failed_total
+                WHERE job_name = :job_name
+                  AND run_date = :run_date
+                """
+            ),
+            {
+                "job_name": job_name,
+                "run_date": run_date,
+                "status": "completed",
+                "completed_at": completed_at,
+                "sent_total": sent_total,
+                "failed_total": failed_total,
+            },
+        )
+        session.commit()
+    except Exception as exc:
+        session.rollback()
+        if _is_undefined_table_error(exc, "bot_daily_job_runs"):
+            return None
+        raise
+    return bool(result.rowcount)
+
+
+def release_daily_job_run(
+    session,
+    *,
+    job_name: str,
+    run_date: date,
+) -> bool | None:
+    try:
+        result = session.execute(
+            text(
+                """
+                DELETE FROM bot_daily_job_runs
+                WHERE job_name = :job_name
+                  AND run_date = :run_date
+                  AND completed_at IS NULL
+                """
+            ),
+            {
+                "job_name": job_name,
+                "run_date": run_date,
+            },
+        )
+        session.commit()
+    except Exception as exc:
+        session.rollback()
+        if _is_undefined_table_error(exc, "bot_daily_job_runs"):
+            return None
+        raise
+    return bool(result.rowcount)
+
+
 def get_unnotified_income_events(session, account_id: str) -> list[dict]:
     try:
         return (

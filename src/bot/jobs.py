@@ -3,14 +3,19 @@ from datetime import datetime, timezone
 from telegram.ext import ContextTypes
 
 from queries import (
+    claim_daily_job_run,
+    complete_daily_job_run,
     get_pending_invest_notifications,
     get_unnotified_income_events,
     mark_income_event_notified,
     mark_invest_notification_sent,
+    release_daily_job_run,
     resolve_reporting_account_id,
 )
 from runtime import (
+    DAILY_JOB_HOUR,
     DAILY_JOB_SCHEDULE_LABEL,
+    DAILY_JOB_MINUTE,
     POLLING_BACKLOG_PENDING_THRESHOLD,
     POLLING_BACKLOG_RECOVERY_CONFIRMATION_COUNT,
     POLLING_BACKLOG_STALL_THRESHOLD_SECONDS,
@@ -45,6 +50,8 @@ POLLING_BACKLOG_ACTIVE = False
 POLLING_BACKLOG_DETECTION_STREAK = 0
 POLLING_SELF_HEAL_REQUESTED = False
 BOT_EXIT_CODE = 0
+DAILY_JOB_NAME = "daily_summary"
+DAILY_JOB_STARTUP_CATCHUP_DELAY_SECONDS = 5
 
 
 def reset_polling_watchdog_state() -> None:
@@ -61,6 +68,20 @@ def reset_polling_watchdog_state() -> None:
 
 def get_bot_exit_code() -> int:
     return BOT_EXIT_CODE
+
+
+def is_daily_job_catchup_due(now_local: datetime) -> bool:
+    scheduled_at = now_local.replace(
+        hour=DAILY_JOB_HOUR,
+        minute=DAILY_JOB_MINUTE,
+        second=0,
+        microsecond=0,
+    )
+    return now_local >= scheduled_at
+
+
+def should_release_daily_job_run(sent_total: int, failed_total: int) -> bool:
+    return sent_total == 0 and failed_total > 0
 
 
 async def jobqueue_smoke_test_job(context: ContextTypes.DEFAULT_TYPE):
@@ -183,6 +204,32 @@ async def polling_watchdog_job(context: ContextTypes.DEFAULT_TYPE):
 
 
 async def daily_job(context: ContextTypes.DEFAULT_TYPE):
+    await _run_daily_job(context, trigger_source="scheduled")
+
+
+async def daily_job_startup_catchup(context: ContextTypes.DEFAULT_TYPE):
+    now_local = datetime.now(TZ)
+    if not is_daily_job_catchup_due(now_local):
+        logger.info(
+            "daily_job_catchup_not_due",
+            "Skipping startup catch-up because daily job time has not been reached yet.",
+            {
+                "today": now_local.date().isoformat(),
+                "scheduled_for": DAILY_JOB_SCHEDULE_LABEL,
+                "started_at": now_local.isoformat(),
+            },
+        )
+        return
+
+    await _run_daily_job(context, trigger_source="startup_catchup", now_local=now_local)
+
+
+async def _run_daily_job(
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    trigger_source: str,
+    now_local: datetime | None = None,
+):
     """
     Авто-рассылки по расписанию (по TIMEZONE):
     - каждый день в заданное время: проверка триггеров (новый максимум / годовой план)
@@ -191,13 +238,41 @@ async def daily_job(context: ContextTypes.DEFAULT_TYPE):
 
     Важно: если Markdown сломается из-за динамических данных — отправляем тем же текстом без разметки.
     """
-    now_local = datetime.now(TZ)
+    now_local = now_local or datetime.now(TZ)
     today = now_local.date()
     is_month_end = today == last_day_of_month(today)
     is_friday = today.weekday() == 4  # Monday=0 ... Friday=4
     started_at = datetime.now(TZ)
     started_monotonic = datetime.now(timezone.utc)
     scheduled_for = DAILY_JOB_SCHEDULE_LABEL
+    tracking_available = False
+
+    with db_session() as session:
+        run_claimed = claim_daily_job_run(session, job_name=DAILY_JOB_NAME, run_date=today)
+
+    if run_claimed is False:
+        logger.info(
+            "daily_job_already_processed",
+            "Daily job already processed for this date; skipping duplicate run.",
+            {
+                "today": today.isoformat(),
+                "scheduled_for": scheduled_for,
+                "trigger_source": trigger_source,
+            },
+        )
+        return
+
+    if run_claimed is None:
+        logger.warning(
+            "daily_job_tracking_unavailable",
+            "Daily job run tracking is unavailable because migration is not applied.",
+            {
+                "today": today.isoformat(),
+                "trigger_source": trigger_source,
+            },
+        )
+    else:
+        tracking_available = True
 
     logger.info(
         "daily_job_started",
@@ -208,6 +283,8 @@ async def daily_job(context: ContextTypes.DEFAULT_TYPE):
             "started_at": started_at.isoformat(),
             "is_month_end": is_month_end,
             "is_friday": is_friday,
+            "trigger_source": trigger_source,
+            "tracking_available": tracking_available,
         },
     )
 
@@ -239,15 +316,25 @@ async def daily_job(context: ContextTypes.DEFAULT_TYPE):
             "month_report_ready": bool(month_text),
             "week_report_ready": bool(week_text),
             "triggers_count": len(triggers),
+            "trigger_source": trigger_source,
         },
     )
 
     # Нечего отправлять — выходим тихо.
     if not month_text and not week_text and not triggers:
+        if tracking_available:
+            with db_session() as session:
+                complete_daily_job_run(
+                    session,
+                    job_name=DAILY_JOB_NAME,
+                    run_date=today,
+                    sent_total=0,
+                    failed_total=0,
+                )
         logger.info(
             "daily_job_no_messages",
             "Daily job had no messages to send.",
-            {"today": today.isoformat()},
+            {"today": today.isoformat(), "trigger_source": trigger_source},
         )
         return
 
@@ -308,6 +395,28 @@ async def daily_job(context: ContextTypes.DEFAULT_TYPE):
                 )
 
     duration_ms = int((datetime.now(timezone.utc) - started_monotonic).total_seconds() * 1000)
+    if tracking_available:
+        with db_session() as session:
+            if should_release_daily_job_run(sent_total=sent_total, failed_total=failed_total):
+                release_daily_job_run(session, job_name=DAILY_JOB_NAME, run_date=today)
+                logger.warning(
+                    "daily_job_run_released_for_retry",
+                    "Released daily job claim because all sends failed.",
+                    {
+                        "today": today.isoformat(),
+                        "trigger_source": trigger_source,
+                        "sent_total": sent_total,
+                        "failed_total": failed_total,
+                    },
+                )
+            else:
+                complete_daily_job_run(
+                    session,
+                    job_name=DAILY_JOB_NAME,
+                    run_date=today,
+                    sent_total=sent_total,
+                    failed_total=failed_total,
+                )
     logger.info(
         "daily_job_completed",
         "Daily job completed.",
@@ -316,6 +425,8 @@ async def daily_job(context: ContextTypes.DEFAULT_TYPE):
             "duration_ms": duration_ms,
             "sent_total": sent_total,
             "failed_total": failed_total,
+            "trigger_source": trigger_source,
+            "tracking_available": tracking_available,
         },
     )
 

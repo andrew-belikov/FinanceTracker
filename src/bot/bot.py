@@ -56,6 +56,8 @@ from jobs import (
     check_income_events,
     check_invest_notifications,
     daily_job,
+    daily_job_startup_catchup,
+    DAILY_JOB_STARTUP_CATCHUP_DELAY_SECONDS,
     get_bot_exit_code,
     jobqueue_smoke_test_job,
     polling_watchdog_job,
@@ -126,6 +128,11 @@ def configure_jobs(app: Application) -> None:
 
     job_time = build_daily_job_time()
     job_queue.run_daily(daily_job, time=job_time, name="daily_summary")
+    job_queue.run_once(
+        daily_job_startup_catchup,
+        when=DAILY_JOB_STARTUP_CATCHUP_DELAY_SECONDS,
+        name="daily_summary_startup_catchup",
+    )
     job_queue.run_repeating(check_income_events, interval=60, first=10, name="income_events_notifier")
     job_queue.run_repeating(check_invest_notifications, interval=60, first=15, name="invest_notifier")
     job_queue.run_repeating(
@@ -141,6 +148,7 @@ def configure_jobs(app: Application) -> None:
             "daily_job_schedule": DAILY_JOB_SCHEDULE_LABEL,
             "schedule_timezone": TZ_NAME,
             "target_chat_ids": sorted(TARGET_CHAT_IDS),
+            "daily_job_startup_catchup_delay_seconds": DAILY_JOB_STARTUP_CATCHUP_DELAY_SECONDS,
             "income_events_interval_seconds": 60,
             "invest_interval_seconds": 60,
             "polling_watchdog_interval_seconds": POLLING_WATCHDOG_INTERVAL_SECONDS,
