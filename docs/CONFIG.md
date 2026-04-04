@@ -50,6 +50,7 @@
 - При `BOT_PROXY_ENABLED=true` рядом поднимается сервис `xray-client`, а `bot` направляет только внешний HTTP(S)-трафик через `http://xray-client:3128`.
 - Внутренние адреса (`localhost`, `127.0.0.1`, `db`, `tracker`, `xray-client`) добавляются в `NO_PROXY`, поэтому внутренние обращения не уходят в proxy.
 - Long polling (`getUpdates`) и обычные Bot API запросы используют один и тот же явный proxy endpoint из `BOT_PROXY_ENDPOINT`; это снижает риск зависшего polling при переезде между хостами.
+- Если watchdog два раза подряд видит backlog Telegram updates при превышении порога стагнации, `bot` завершает процесс и рассчитывает на автоматический рестарт контейнера через `restart: unless-stopped`.
 - `tracker` и `db` не получают proxy env и продолжают работать напрямую.
 
 Быстрая проверка:

@@ -127,10 +127,15 @@ TELEGRAM_POLL_INTERVAL_SECONDS = 0.0
 POLLING_WATCHDOG_INTERVAL_SECONDS = 60
 POLLING_BACKLOG_PENDING_THRESHOLD = 1
 POLLING_BACKLOG_STALL_THRESHOLD_SECONDS = 180
+POLLING_BACKLOG_RECOVERY_CONFIRMATION_COUNT = 2
+POLLING_SELF_HEAL_EXIT_CODE = 75
 
 BOT_PROCESS_STARTED_AT_UTC = datetime.now(timezone.utc)
 LAST_UPDATE_RECEIVED_AT_UTC: datetime | None = None
 POLLING_BACKLOG_ACTIVE = False
+POLLING_BACKLOG_DETECTION_STREAK = 0
+POLLING_SELF_HEAL_REQUESTED = False
+BOT_EXIT_CODE = 0
 
 
 def resolve_telegram_proxy_url() -> str | None:
@@ -206,6 +211,25 @@ def is_polling_backlog_detected(
     reference_dt = last_update_received_at or process_started_at
     stall_duration_seconds = (now_utc - reference_dt).total_seconds()
     return pending_update_count >= pending_threshold and stall_duration_seconds >= stall_threshold_seconds
+
+
+def next_polling_backlog_detection_streak(
+    *,
+    backlog_detected: bool,
+    current_streak: int,
+) -> int:
+    if not backlog_detected:
+        return 0
+    return current_streak + 1
+
+
+def should_trigger_polling_self_heal(
+    *,
+    backlog_detected: bool,
+    detection_streak: int,
+    recovery_confirmation_count: int = POLLING_BACKLOG_RECOVERY_CONFIRMATION_COUNT,
+) -> bool:
+    return backlog_detected and detection_streak >= recovery_confirmation_count
 
 # Годовой план пополнений
 PLAN_ANNUAL_CONTRIB_RUB = float(os.getenv("PLAN_ANNUAL_CONTRIB_RUB", "400000"))
@@ -4807,7 +4831,10 @@ async def jobqueue_smoke_test_job(context: ContextTypes.DEFAULT_TYPE):
 
 
 async def polling_watchdog_job(context: ContextTypes.DEFAULT_TYPE):
+    global BOT_EXIT_CODE
     global POLLING_BACKLOG_ACTIVE
+    global POLLING_BACKLOG_DETECTION_STREAK
+    global POLLING_SELF_HEAL_REQUESTED
 
     now_utc = datetime.now(timezone.utc)
     reference_dt = LAST_UPDATE_RECEIVED_AT_UTC or BOT_PROCESS_STARTED_AT_UTC
@@ -4834,11 +4861,19 @@ async def polling_watchdog_job(context: ContextTypes.DEFAULT_TYPE):
         process_started_at=BOT_PROCESS_STARTED_AT_UTC,
         now_utc=now_utc,
     )
+    POLLING_BACKLOG_DETECTION_STREAK = next_polling_backlog_detection_streak(
+        backlog_detected=backlog_detected,
+        current_streak=POLLING_BACKLOG_DETECTION_STREAK,
+    )
     ctx = {
         "pending_update_count": pending_update_count,
         "stall_duration_seconds": stall_duration_seconds,
         "pending_threshold": POLLING_BACKLOG_PENDING_THRESHOLD,
         "stall_threshold_seconds": POLLING_BACKLOG_STALL_THRESHOLD_SECONDS,
+        "detection_streak": POLLING_BACKLOG_DETECTION_STREAK,
+        "recovery_confirmation_count": POLLING_BACKLOG_RECOVERY_CONFIRMATION_COUNT,
+        "self_heal_requested": POLLING_SELF_HEAL_REQUESTED,
+        "self_heal_exit_code": POLLING_SELF_HEAL_EXIT_CODE,
         "last_update_received_at": to_iso_datetime(LAST_UPDATE_RECEIVED_AT_UTC),
         "process_started_at": to_iso_datetime(BOT_PROCESS_STARTED_AT_UTC),
     }
@@ -4850,10 +4885,28 @@ async def polling_watchdog_job(context: ContextTypes.DEFAULT_TYPE):
             "Telegram polling appears stalled: updates are accumulating.",
             ctx,
         )
+
+    if (
+        not POLLING_SELF_HEAL_REQUESTED
+        and should_trigger_polling_self_heal(
+            backlog_detected=backlog_detected,
+            detection_streak=POLLING_BACKLOG_DETECTION_STREAK,
+        )
+    ):
+        POLLING_SELF_HEAL_REQUESTED = True
+        BOT_EXIT_CODE = POLLING_SELF_HEAL_EXIT_CODE
+        ctx["self_heal_requested"] = True
+        logger.critical(
+            "bot_polling_self_heal_triggered",
+            "Confirmed Telegram polling stall. Stopping bot process for automatic restart.",
+            ctx,
+        )
+        context.application.stop_running()
         return
 
     if not backlog_detected and POLLING_BACKLOG_ACTIVE:
         POLLING_BACKLOG_ACTIVE = False
+        POLLING_SELF_HEAL_REQUESTED = False
         logger.info(
             "bot_polling_backlog_cleared",
             "Telegram polling backlog cleared.",
@@ -5502,12 +5555,26 @@ async def on_application_error(update: object, context: ContextTypes.DEFAULT_TYP
 
 
 def main() -> int:
+    global BOT_EXIT_CODE
+    global BOT_PROCESS_STARTED_AT_UTC
+    global LAST_UPDATE_RECEIVED_AT_UTC
+    global POLLING_BACKLOG_ACTIVE
+    global POLLING_BACKLOG_DETECTION_STREAK
+    global POLLING_SELF_HEAL_REQUESTED
+
     if not TELEGRAM_BOT_TOKEN:
         logger.error(
             "missing_telegram_bot_token",
             "TELEGRAM_BOT_TOKEN не задан. Передай его через env-переменную.",
         )
         return 1
+
+    BOT_EXIT_CODE = 0
+    BOT_PROCESS_STARTED_AT_UTC = datetime.now(timezone.utc)
+    LAST_UPDATE_RECEIVED_AT_UTC = None
+    POLLING_BACKLOG_ACTIVE = False
+    POLLING_BACKLOG_DETECTION_STREAK = 0
+    POLLING_SELF_HEAL_REQUESTED = False
 
     app = build_bot_application()
 
@@ -5599,7 +5666,7 @@ def main() -> int:
         timeout=TELEGRAM_GET_UPDATES_TIMEOUT_SECONDS,
         poll_interval=TELEGRAM_POLL_INTERVAL_SECONDS,
     )
-    return 0
+    return BOT_EXIT_CODE
 
 
 if __name__ == "__main__":
