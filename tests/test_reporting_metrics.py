@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 BOT_FILE = PROJECT_ROOT / "src" / "bot" / "bot.py"
 RUNTIME_FILE = PROJECT_ROOT / "src" / "bot" / "runtime.py"
+QUERIES_FILE = PROJECT_ROOT / "src" / "bot" / "queries.py"
 
 def load_selected_symbols(file_path: Path, wanted_assignments: set[str], wanted_functions: set[str], namespace=None):
     module_ast = ast.parse(file_path.read_text(encoding="utf-8"), filename=str(file_path))
@@ -35,7 +36,7 @@ def load_selected_symbols(file_path: Path, wanted_assignments: set[str], wanted_
                 arg.annotation = None
             selected_nodes.append(copied)
 
-    loaded_namespace = {} if namespace is None else dict(namespace)
+    loaded_namespace = {} if namespace is None else namespace
     isolated_module = ast.Module(body=selected_nodes, type_ignores=[])
     code = compile(isolated_module, filename=str(file_path), mode="exec")
     exec(code, loaded_namespace)
@@ -43,12 +44,13 @@ def load_selected_symbols(file_path: Path, wanted_assignments: set[str], wanted_
 
 
 def load_symbols():
-    runtime_namespace = {
+    shared_namespace = {
         "os": os,
         "TZ": ZoneInfo("Europe/Moscow"),
     }
-    exec("from datetime import date, datetime, timezone\n", runtime_namespace)
-    runtime_symbols = load_selected_symbols(
+    exec("from datetime import date, datetime, timezone\n", shared_namespace)
+    shared_namespace["text"] = lambda sql: sql
+    load_selected_symbols(
         RUNTIME_FILE,
         {
             "DEPOSIT_OPERATION_TYPES",
@@ -58,27 +60,30 @@ def load_symbols():
         {
             "to_local_market_date",
         },
-        namespace=runtime_namespace,
+        namespace=shared_namespace,
     )
-    return load_selected_symbols(
-        BOT_FILE,
+    load_selected_symbols(
+        QUERIES_FILE,
         set(),
         {
             "normalize_reporting_account_id",
             "choose_reporting_account_id",
             "get_latest_snapshot_account_id",
             "resolve_reporting_account_id",
+        },
+        namespace=shared_namespace,
+    )
+    return load_selected_symbols(
+        BOT_FILE,
+        set(),
+        {
             "build_net_external_flow_by_day",
             "compute_twr_series",
             "compute_xnpv",
             "compute_xirr",
             "project_run_rate_value",
         },
-        namespace={
-            **runtime_symbols,
-            "os": os,
-            "text": lambda sql: sql,
-        },
+        namespace=shared_namespace,
     )
 
 
