@@ -32,9 +32,11 @@ services:
       APP_SERVICE: xray_client
       BOT_PROXY_ENABLED: ${BOT_PROXY_ENABLED:-false}
       BOT_VLESS_URL: ${BOT_VLESS_URL:-}
-      XRAY_LOCAL_PROXY_PORT: "3128"
+      BOT_VLESS_FALLBACK_URL: ${BOT_VLESS_FALLBACK_URL:-}
+      XRAY_HEALTHCHECK_URL: https://api.ipify.org
+      XRAY_LOCAL_PROXY_PORT: "1080"
     expose:
-      - "3128"
+      - "1080"
     healthcheck:
       test: ["CMD", "python", "-u", "-m", "xray_client.healthcheck"]
       interval: 10s
@@ -89,7 +91,7 @@ services:
       DB_USER: ${POSTGRES_USER}
       DB_PASSWORD: ${POSTGRES_PASSWORD}
       BOT_PROXY_ENABLED: ${BOT_PROXY_ENABLED:-false}
-      BOT_PROXY_ENDPOINT: http://xray-client:3128
+      BOT_PROXY_ENDPOINT: socks5h://xray-client:1080
       BOT_PROXY_NO_PROXY: localhost,127.0.0.1,db,tracker,xray-client
     restart: unless-stopped
 

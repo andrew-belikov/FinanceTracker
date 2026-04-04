@@ -60,7 +60,7 @@ JOBQUEUE_SMOKE_TEST_DELAY_SECONDS = int(os.getenv("JOBQUEUE_SMOKE_TEST_DELAY_SEC
 BOT_PROXY_ENABLED = (
     os.getenv("BOT_PROXY_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
 )
-BOT_PROXY_ENDPOINT = os.getenv("BOT_PROXY_ENDPOINT", "http://xray-client:3128").strip()
+BOT_PROXY_ENDPOINT = os.getenv("BOT_PROXY_ENDPOINT", "socks5h://xray-client:1080").strip()
 
 TELEGRAM_REQUEST_CONNECT_TIMEOUT_SECONDS = 20.0
 TELEGRAM_REQUEST_READ_TIMEOUT_SECONDS = 20.0

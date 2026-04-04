@@ -58,7 +58,7 @@ def load_symbols():
             "DAILY_SUMMARY_HOUR": "18",
             "DAILY_SUMMARY_MINUTE": "0",
             "BOT_PROXY_ENABLED": "true",
-            "BOT_PROXY_ENDPOINT": "http://xray-client:3128",
+            "BOT_PROXY_ENDPOINT": "socks5h://xray-client:1080",
         },
         clear=False,
     ):
@@ -121,12 +121,12 @@ class BotScheduleConfigTests(unittest.TestCase):
     def test_resolve_telegram_proxy_url_uses_proxy_env(self):
         self.assertEqual(
             self.symbols["resolve_telegram_proxy_url"](),
-            "http://xray-client:3128",
+            "socks5h://xray-client:1080",
         )
 
     def test_build_telegram_request_kwargs_sets_explicit_proxy_and_disables_trust_env(self):
         kwargs = self.symbols["build_telegram_request_kwargs"](
-            proxy_url="http://xray-client:3128",
+            proxy_url="socks5h://xray-client:1080",
             connection_pool_size=2,
             connect_timeout=20.0,
             read_timeout=75.0,
@@ -134,7 +134,7 @@ class BotScheduleConfigTests(unittest.TestCase):
             pool_timeout=30.0,
         )
 
-        self.assertEqual(kwargs["proxy"], "http://xray-client:3128")
+        self.assertEqual(kwargs["proxy"], "socks5h://xray-client:1080")
         self.assertEqual(kwargs["connection_pool_size"], 2)
         self.assertEqual(kwargs["read_timeout"], 75.0)
         self.assertEqual(kwargs["httpx_kwargs"], {"trust_env": False})

@@ -43,7 +43,7 @@ def merge_csv_values(values: Iterable[str]) -> str:
 
 def configure_proxy_env() -> tuple[bool, str, str]:
     proxy_enabled = is_enabled(os.getenv("BOT_PROXY_ENABLED"))
-    proxy_endpoint = os.getenv("BOT_PROXY_ENDPOINT", "http://xray-client:3128").strip()
+    proxy_endpoint = os.getenv("BOT_PROXY_ENDPOINT", "socks5h://xray-client:1080").strip()
     no_proxy = merge_csv_values(
         [
             ",".join(REQUIRED_NO_PROXY),
@@ -71,7 +71,7 @@ def configure_proxy_env() -> tuple[bool, str, str]:
 def wait_for_proxy_endpoint(proxy_endpoint: str, timeout_seconds: float = 30.0) -> bool:
     parsed = urlparse(proxy_endpoint)
     host = parsed.hostname or "xray-client"
-    port = parsed.port or 3128
+    port = parsed.port or 1080
     deadline = time.monotonic() + timeout_seconds
     while time.monotonic() < deadline:
         try:
