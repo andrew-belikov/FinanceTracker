@@ -7,8 +7,6 @@ import socket
 import subprocess
 import sys
 import time
-import urllib.error
-import urllib.request
 
 from common.logging_setup import configure_logging, get_logger, relay_text_stream
 from xray_client.render_config import build_config
@@ -16,6 +14,8 @@ from xray_client.render_config import build_config
 
 STATUS_FILE = "/tmp/xray-client-status.json"
 CONFIG_FILE = "/tmp/xray-client-config.json"
+DEFAULT_HEALTHCHECK_URL = "https://api.ipify.org"
+DEFAULT_PROXY_SCHEME = "socks5h"
 
 
 os.environ.setdefault("APP_SERVICE", "xray_client")
@@ -32,6 +32,20 @@ def write_status(payload: dict) -> None:
         json.dump(payload, handle, ensure_ascii=True)
 
 
+def iter_vless_candidates(primary_url: str, fallback_url: str) -> list[tuple[str, str]]:
+    candidates: list[tuple[str, str]] = []
+    seen_urls: set[str] = set()
+    for role, raw_url in (
+        ("primary", primary_url.strip()),
+        ("fallback", fallback_url.strip()),
+    ):
+        if not raw_url or raw_url in seen_urls:
+            continue
+        seen_urls.add(raw_url)
+        candidates.append((role, raw_url))
+    return candidates
+
+
 def wait_for_proxy(port: int, timeout_seconds: float, proc: subprocess.Popen[str]) -> bool:
     deadline = time.monotonic() + timeout_seconds
     while time.monotonic() < deadline:
@@ -45,18 +59,40 @@ def wait_for_proxy(port: int, timeout_seconds: float, proc: subprocess.Popen[str
     return False
 
 
-def run_smoke_through_proxy(port: int) -> tuple[bool, str]:
-    proxy_url = f"http://127.0.0.1:{port}"
-    proxy_handler = urllib.request.ProxyHandler({"http": proxy_url, "https": proxy_url})
-    opener = urllib.request.build_opener(proxy_handler)
-    request = urllib.request.Request("https://api.telegram.org", headers={"User-Agent": "FinanceTrackerXrayClient/1.0"})
-    try:
-        with opener.open(request, timeout=15.0) as response:
-            return True, f"http_status={getattr(response, 'status', 200)}"
-    except urllib.error.HTTPError as exc:
-        return True, f"http_status={exc.code}"
-    except Exception as exc:  # pragma: no cover - network-dependent
-        return False, str(exc)
+def build_proxy_check_command(port: int, target_url: str, proxy_scheme: str = DEFAULT_PROXY_SCHEME) -> list[str]:
+    if proxy_scheme not in {"socks5", "socks5h"}:
+        raise ValueError(f"Unsupported proxy scheme: {proxy_scheme}")
+    return [
+        "curl",
+        "--max-time",
+        "10",
+        "--socks5-hostname",
+        f"127.0.0.1:{port}",
+        "--fail",
+        "--silent",
+        "--show-error",
+        "--output",
+        "/dev/null",
+        target_url,
+    ]
+
+
+def run_smoke_through_proxy(
+    port: int,
+    target_url: str,
+    proxy_scheme: str = DEFAULT_PROXY_SCHEME,
+) -> tuple[bool, str]:
+    completed = subprocess.run(
+        build_proxy_check_command(port, target_url, proxy_scheme=proxy_scheme),
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if completed.returncode == 0:
+        return True, f"target_url={target_url}"
+
+    details = completed.stderr.strip() or completed.stdout.strip() or f"exit_code={completed.returncode}"
+    return False, details
 
 
 def stop_process(proc: subprocess.Popen[str], timeout_seconds: float = 10.0) -> None:
@@ -71,55 +107,7 @@ def stop_process(proc: subprocess.Popen[str], timeout_seconds: float = 10.0) -> 
         proc.wait(timeout=timeout_seconds)
 
 
-def main() -> int:
-    proxy_enabled = is_enabled(os.getenv("BOT_PROXY_ENABLED"))
-    listen_port = int(os.getenv("XRAY_LOCAL_PROXY_PORT", "3128"))
-
-    if not proxy_enabled:
-        write_status({"mode": "disabled"})
-        logger.info(
-            "xray_proxy_disabled",
-            "Xray proxy mode is disabled.",
-            {"listen_port": listen_port},
-        )
-        return 0
-
-    vless_url = os.getenv("BOT_VLESS_URL", "").strip()
-    if not vless_url:
-        logger.error(
-            "xray_missing_vless_url",
-            "Xray proxy is enabled but BOT_VLESS_URL is empty.",
-            {"listen_port": listen_port},
-        )
-        return 1
-
-    config, link = build_config(vless_url, listen_port=listen_port)
-    with open(CONFIG_FILE, "w", encoding="utf-8") as handle:
-        json.dump(config, handle, ensure_ascii=True, indent=2)
-        handle.write("\n")
-
-    logger.info(
-        "xray_config_rendered",
-        "Rendered Xray client configuration.",
-        {
-            "listen_port": listen_port,
-            "link_summary": link.masked_summary(),
-            "config_file": CONFIG_FILE,
-        },
-    )
-    logger.info(
-        "xray_process_starting",
-        "Starting local Xray proxy process.",
-        {"listen_port": listen_port},
-    )
-
-    proc = subprocess.Popen(
-        ["/usr/local/bin/xray", "run", "-config", CONFIG_FILE],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        bufsize=1,
-    )
+def start_relay_threads(proc: subprocess.Popen[str]) -> list:
     relay_threads = []
     if proc.stdout is not None:
         relay_threads.append(
@@ -141,6 +129,43 @@ def main() -> int:
                 ctx={"child_process": "xray"},
             )
         )
+    return relay_threads
+
+
+def join_relay_threads(relay_threads: list) -> None:
+    for thread in relay_threads:
+        thread.join(timeout=1.0)
+
+
+def main() -> int:
+    proxy_enabled = is_enabled(os.getenv("BOT_PROXY_ENABLED"))
+    listen_port = int(os.getenv("XRAY_LOCAL_PROXY_PORT", "1080"))
+    healthcheck_url = os.getenv("XRAY_HEALTHCHECK_URL", DEFAULT_HEALTHCHECK_URL).strip() or DEFAULT_HEALTHCHECK_URL
+
+    if not proxy_enabled:
+        write_status({"mode": "disabled"})
+        logger.info(
+            "xray_proxy_disabled",
+            "Xray proxy mode is disabled.",
+            {"listen_port": listen_port},
+        )
+        return 0
+
+    vless_url = os.getenv("BOT_VLESS_URL", "")
+    fallback_vless_url = os.getenv("BOT_VLESS_FALLBACK_URL", "")
+    candidates = iter_vless_candidates(vless_url, fallback_vless_url)
+    if not candidates:
+        logger.error(
+            "xray_missing_vless_url",
+            "Xray proxy is enabled but both BOT_VLESS_URL and BOT_VLESS_FALLBACK_URL are empty.",
+            {"listen_port": listen_port},
+        )
+        return 1
+    log_level = os.getenv("XRAY_LOG_LEVEL", "warning").strip() or "warning"
+    proc = None
+    relay_threads: list = []
+    active_candidate_role: str | None = None
+    active_link_summary: str | None = None
 
     def stop_child(signum: int, _frame) -> None:
         logger.info(
@@ -152,49 +177,160 @@ def main() -> int:
 
     signal.signal(signal.SIGTERM, stop_child)
     signal.signal(signal.SIGINT, stop_child)
+    for index, (candidate_role, candidate_url) in enumerate(candidates, start=1):
+        try:
+            config, link = build_config(
+                candidate_url,
+                listen_port=listen_port,
+                log_level=log_level,
+            )
+        except Exception:
+            logger.exception(
+                "xray_config_render_failed",
+                "Failed to render Xray configuration for candidate VLESS URL.",
+                {
+                    "listen_port": listen_port,
+                    "candidate_role": candidate_role,
+                    "candidate_index": index,
+                    "candidate_count": len(candidates),
+                },
+            )
+            continue
 
-    if not wait_for_proxy(listen_port, timeout_seconds=20.0, proc=proc):
+        with open(CONFIG_FILE, "w", encoding="utf-8") as handle:
+            json.dump(config, handle, ensure_ascii=True, indent=2)
+            handle.write("\n")
+
+        logger.info(
+            "xray_config_rendered",
+            "Rendered Xray client configuration.",
+            {
+                "listen_port": listen_port,
+                "candidate_role": candidate_role,
+                "candidate_index": index,
+                "candidate_count": len(candidates),
+                "link_summary": link.masked_summary(),
+                "config_file": CONFIG_FILE,
+            },
+        )
+        logger.info(
+            "xray_process_starting",
+            "Starting local Xray proxy process.",
+            {
+                "listen_port": listen_port,
+                "candidate_role": candidate_role,
+                "candidate_index": index,
+                "candidate_count": len(candidates),
+            },
+        )
+
+        proc = subprocess.Popen(
+            ["/usr/local/bin/xray", "run", "-config", CONFIG_FILE],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+        )
+        relay_threads = start_relay_threads(proc)
+
+        if not wait_for_proxy(listen_port, timeout_seconds=20.0, proc=proc):
+            logger.error(
+                "xray_proxy_unavailable",
+                "Local Xray proxy endpoint did not become ready in time.",
+                {
+                    "listen_port": listen_port,
+                    "candidate_role": candidate_role,
+                    "candidate_index": index,
+                    "candidate_count": len(candidates),
+                },
+            )
+            stop_process(proc)
+            join_relay_threads(relay_threads)
+            proc = None
+            relay_threads = []
+            continue
+
+        logger.info(
+            "xray_proxy_ready",
+            "Local Xray proxy endpoint is ready.",
+            {
+                "listen_port": listen_port,
+                "candidate_role": candidate_role,
+                "candidate_index": index,
+                "candidate_count": len(candidates),
+            },
+        )
+
+        smoke_ok, smoke_details = run_smoke_through_proxy(
+            listen_port,
+            target_url=healthcheck_url,
+            proxy_scheme=DEFAULT_PROXY_SCHEME,
+        )
+        smoke_ctx = {
+            "listen_port": listen_port,
+            "candidate_role": candidate_role,
+            "candidate_index": index,
+            "candidate_count": len(candidates),
+            "ok": smoke_ok,
+            "details": smoke_details,
+            "target_url": healthcheck_url,
+        }
+        if smoke_ok:
+            active_candidate_role = candidate_role
+            active_link_summary = link.masked_summary()
+            write_status(
+                {
+                    "mode": "enabled",
+                    "port": listen_port,
+                    "proxy_scheme": DEFAULT_PROXY_SCHEME,
+                    "healthcheck_url": healthcheck_url,
+                    "active_link_role": candidate_role,
+                    "link_summary": active_link_summary,
+                }
+            )
+            logger.info(
+                "xray_proxy_smoke_completed",
+                "Xray proxy smoke test succeeded.",
+                smoke_ctx,
+            )
+            break
+
         logger.error(
-            "xray_proxy_unavailable",
-            "Local Xray proxy endpoint did not become ready in time.",
-            {"listen_port": listen_port},
+            "xray_proxy_smoke_failed",
+            "Xray proxy smoke test failed.",
+            smoke_ctx,
         )
         stop_process(proc)
-        for thread in relay_threads:
-            thread.join(timeout=1.0)
+        join_relay_threads(relay_threads)
+        proc = None
+        relay_threads = []
+        if index < len(candidates):
+            logger.warning(
+                "xray_proxy_fallback_attempt_scheduled",
+                "Current VLESS candidate failed; trying the next candidate.",
+                {
+                    "listen_port": listen_port,
+                    "failed_candidate_role": candidate_role,
+                    "next_candidate_role": candidates[index][0],
+                },
+            )
+
+    if proc is None or active_candidate_role is None:
+        logger.error(
+            "xray_all_candidates_failed",
+            "All configured VLESS candidates failed to start a working proxy route.",
+            {"listen_port": listen_port, "candidate_count": len(candidates)},
+        )
         return 1
 
-    write_status({"mode": "enabled", "port": listen_port})
-    logger.info(
-        "xray_proxy_ready",
-        "Local Xray proxy endpoint is ready.",
-        {"listen_port": listen_port},
-    )
-
-    smoke_ok, smoke_details = run_smoke_through_proxy(listen_port)
-    smoke_ctx = {
-        "listen_port": listen_port,
-        "ok": smoke_ok,
-        "details": smoke_details,
-    }
-    if smoke_ok:
-        logger.info(
-            "xray_telegram_smoke_completed",
-            "Xray proxy Telegram smoke test succeeded.",
-            smoke_ctx,
-        )
-    else:
-        logger.error(
-            "xray_telegram_smoke_failed",
-            "Xray proxy Telegram smoke test failed.",
-            smoke_ctx,
-        )
-
     return_code = proc.wait()
-    for thread in relay_threads:
-        thread.join(timeout=1.0)
+    join_relay_threads(relay_threads)
 
-    exit_ctx = {"return_code": return_code}
+    exit_ctx = {
+        "return_code": return_code,
+        "active_link_role": active_candidate_role,
+        "link_summary": active_link_summary,
+    }
     if return_code == 0:
         logger.info("xray_process_exited", "Xray process exited cleanly.", exit_ctx)
     else:

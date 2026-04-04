@@ -3,12 +3,15 @@ from __future__ import annotations
 import json
 import os
 import socket
+import subprocess
 import sys
 
 from common.logging_setup import configure_logging, get_logger
 
 
 STATUS_FILE = "/tmp/xray-client-status.json"
+DEFAULT_HEALTHCHECK_URL = "https://api.ipify.org"
+DEFAULT_PROXY_SCHEME = "socks5h"
 
 
 os.environ.setdefault("APP_SERVICE", "xray_client")
@@ -19,6 +22,38 @@ logger = get_logger(__name__)
 def load_status() -> dict:
     with open(STATUS_FILE, "r", encoding="utf-8") as handle:
         return json.load(handle)
+
+
+def build_proxy_check_command(port: int, target_url: str, proxy_scheme: str = DEFAULT_PROXY_SCHEME) -> list[str]:
+    if proxy_scheme not in {"socks5", "socks5h"}:
+        raise ValueError(f"Unsupported proxy scheme: {proxy_scheme}")
+    return [
+        "curl",
+        "--max-time",
+        "10",
+        "--socks5-hostname",
+        f"127.0.0.1:{port}",
+        "--fail",
+        "--silent",
+        "--show-error",
+        "--output",
+        "/dev/null",
+        target_url,
+    ]
+
+
+def run_proxy_request_smoke(port: int, target_url: str, proxy_scheme: str = DEFAULT_PROXY_SCHEME) -> tuple[bool, str]:
+    completed = subprocess.run(
+        build_proxy_check_command(port, target_url, proxy_scheme=proxy_scheme),
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if completed.returncode == 0:
+        return True, ""
+
+    details = completed.stderr.strip() or completed.stdout.strip() or f"exit_code={completed.returncode}"
+    return False, details
 
 
 def main() -> int:
@@ -71,7 +106,7 @@ def main() -> int:
 
     try:
         with socket.create_connection(("127.0.0.1", port), timeout=3.0):
-            return 0
+            pass
     except OSError as exc:
         logger.error(
             "xray_healthcheck_proxy_unreachable",
@@ -79,6 +114,38 @@ def main() -> int:
             {"port": port, "error": str(exc)},
         )
         return 1
+
+    proxy_scheme = (status.get("proxy_scheme") or DEFAULT_PROXY_SCHEME).strip() or DEFAULT_PROXY_SCHEME
+    healthcheck_url = (status.get("healthcheck_url") or DEFAULT_HEALTHCHECK_URL).strip() or DEFAULT_HEALTHCHECK_URL
+
+    try:
+        ok, details = run_proxy_request_smoke(
+            port,
+            healthcheck_url,
+            proxy_scheme=proxy_scheme,
+        )
+    except ValueError:
+        logger.exception(
+            "xray_healthcheck_invalid_proxy_scheme",
+            "Healthcheck status contains an unsupported proxy scheme.",
+            {"proxy_scheme": proxy_scheme},
+        )
+        return 1
+
+    if ok:
+        return 0
+
+    logger.error(
+        "xray_healthcheck_proxy_request_failed",
+        "Healthcheck could not complete an outbound request through the local proxy.",
+        {
+            "port": port,
+            "proxy_scheme": proxy_scheme,
+            "healthcheck_url": healthcheck_url,
+            "details": details,
+        },
+    )
+    return 1
 
 
 if __name__ == "__main__":

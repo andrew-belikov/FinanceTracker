@@ -3,9 +3,9 @@ from __future__ import annotations
 import os
 import socket
 import sys
-import urllib.error
-import urllib.request
 from urllib.parse import urlparse
+
+import httpx
 
 from common.logging_setup import configure_logging, get_logger
 
@@ -33,14 +33,21 @@ def probe_tcp(host: str, port: int, timeout: float) -> tuple[bool, str]:
         return False, str(exc)
 
 
-def probe_telegram(timeout: float) -> tuple[bool, str]:
-    request = urllib.request.Request(build_telegram_probe_url(), headers={"User-Agent": "FinanceTrackerBotProxySmoke/1.0"})
+def probe_telegram(timeout: float, proxy_url: str | None) -> tuple[bool, str]:
+    client_kwargs = {
+        "timeout": timeout,
+        "trust_env": False,
+        "follow_redirects": False,
+    }
+    if proxy_url:
+        client_kwargs["proxy"] = proxy_url
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            status_code = getattr(response, "status", 200)
-            return True, f"http_status={status_code}"
-    except urllib.error.HTTPError as exc:
-        return True, f"http_status={exc.code}"
+        with httpx.Client(**client_kwargs) as client:
+            response = client.get(
+                build_telegram_probe_url(),
+                headers={"User-Agent": "FinanceTrackerBotProxySmoke/1.0"},
+            )
+            return True, f"http_status={response.status_code}"
     except Exception as exc:  # pragma: no cover - network-dependent
         return False, str(exc)
 
@@ -107,7 +114,10 @@ def collect_results() -> tuple[int, list[dict[str, str]]]:
     if not ok:
         exit_code = 1
 
-    ok, details = probe_telegram(timeout=15.0)
+    ok, details = probe_telegram(
+        timeout=15.0,
+        proxy_url=proxy_url if proxy_enabled else None,
+    )
     results.append(
         {
             "check": "telegram_api",
