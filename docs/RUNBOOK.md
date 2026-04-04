@@ -93,6 +93,7 @@ cat backup.sql | docker compose exec -T db psql -U "$POSTGRES_USER" -d "$POSTGRE
 | `migrations/20260225_operations_add_instrument_columns.sql` | если существующая `operations` ещё без `instrument_uid` и `figi` | добавляет 2 колонки | после применения `tracker` дозаполняет пустые поля на последующих синках |
 | `migrations/20260226_income_events.sql` | если существующая схема ещё без `income_events` | создаёт таблицу событий дохода | без этой таблицы минутные income-notifications и часть отчётных сумм не работают |
 | `migrations/20260304_operations_operation_item_fields.sql` | если существующая `operations` ещё без расширенных полей `OperationItem` | добавляет колонки `state`, `commission`, `yield`, `instrument_type` и другие | также добавляет unique-констрейнт по `operation_id`; после миграции возможен backfill исторических строк |
+| `migrations/20260404_bot_daily_job_runs.sql` | если нужен startup catch-up для daily job без дублей | создаёт таблицу `bot_daily_job_runs` | без этой таблицы бот не сможет надёжно добирать пропущенный daily job после позднего рестарта |
 
 ## Рекомендуемый Порядок Миграции
 
@@ -115,6 +116,7 @@ docker compose exec -T db psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" < migration
 docker compose exec -T db psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" < migrations/20260225_operations_add_instrument_columns.sql
 docker compose exec -T db psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" < migrations/20260226_income_events.sql
 docker compose exec -T db psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" < migrations/20260304_operations_operation_item_fields.sql
+docker compose exec -T db psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" < migrations/20260404_bot_daily_job_runs.sql
 ```
 
 4. Поднимите сервисы обратно:

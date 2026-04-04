@@ -242,6 +242,7 @@ docker compose config > /dev/null
 - `migrations/20260304_operations_operation_item_fields.sql` — расширяет `operations` полями из `OperationItem` и добавляет уникальность по `operation_id`;
 - `migrations/20260324_dataset_source_fields.sql` — добавляет поля для source-aware `/dataset` и таблицу `asset_aliases`;
 - `migrations/20260324_rebalance_targets_and_invest_notifications.sql` — создаёт `rebalance_targets` и `invest_notifications`.
+- `migrations/20260404_bot_daily_job_runs.sql` — создаёт `bot_daily_job_runs` для идемпотентного daily job и startup catch-up после позднего рестарта.
 
 ### Историческая миграция со схемы `deposits`
 
@@ -281,12 +282,14 @@ docker compose exec -T db psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" < migration
 docker compose exec -T db psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" < migrations/20260304_operations_operation_item_fields.sql
 docker compose exec -T db psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" < migrations/20260324_dataset_source_fields.sql
 docker compose exec -T db psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" < migrations/20260324_rebalance_targets_and_invest_notifications.sql
+docker compose exec -T db psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" < migrations/20260404_bot_daily_job_runs.sql
 ```
 
 Нюансы:
 - `tracker` после миграций в `operations` может сделать backfill пустых полей для уже существующих строк;
 - `income_events` нужен для минутных уведомлений о купонах/дивидендах и части отчётных сумм;
 - миграцию `20260324_rebalance_targets_and_invest_notifications.sql` нужно применить до пересборки `tracker`, иначе новый код не сможет писать расширенные поля `portfolio_positions`.
+- миграция `20260404_bot_daily_job_runs.sql` нужна боту, чтобы не терять ежедневные trigger-уведомления после старта позже `DAILY_SUMMARY_HOUR:DAILY_SUMMARY_MINUTE`.
 
 ### Разовый repair после старого Windows backup
 
@@ -304,6 +307,7 @@ docker compose exec -T tracker python repair_operations_description_encoding.py
 - каждый день в `DAILY_SUMMARY_HOUR:DAILY_SUMMARY_MINUTE` по таймзоне `TIMEZONE` проверяются триггеры: новый максимум и выполнение годового плана;
 - по пятницам в то же время дополнительно отправляется недельный отчёт;
 - в последний день месяца в то же время дополнительно отправляется месячный отчёт.
+- если бот стартовал позже ежедневного слота, он один раз добирает пропущенный daily job после запуска и не дублирует его в пределах той же даты.
 
 
 ## Чек-лист проверки бота после обновления
