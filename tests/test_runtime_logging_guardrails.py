@@ -11,6 +11,7 @@ RUNTIME_FILES = [
     PROJECT_ROOT / "src" / "bot" / "charts.py",
     PROJECT_ROOT / "src" / "bot" / "dataset.py",
     PROJECT_ROOT / "src" / "bot" / "entrypoint.py",
+    PROJECT_ROOT / "src" / "bot" / "handlers.py",
     PROJECT_ROOT / "src" / "bot" / "jobs.py",
     PROJECT_ROOT / "src" / "bot" / "proxy_smoke.py",
     PROJECT_ROOT / "src" / "bot" / "queries.py",
