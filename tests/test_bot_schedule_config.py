@@ -23,6 +23,7 @@ def load_symbols():
         "BOT_PROXY_ENDPOINT",
         "POLLING_BACKLOG_PENDING_THRESHOLD",
         "POLLING_BACKLOG_STALL_THRESHOLD_SECONDS",
+        "POLLING_BACKLOG_RECOVERY_CONFIRMATION_COUNT",
     }
     wanted_functions = {
         "build_daily_job_time",
@@ -31,6 +32,8 @@ def load_symbols():
         "resolve_telegram_proxy_url",
         "build_telegram_request_kwargs",
         "is_polling_backlog_detected",
+        "next_polling_backlog_detection_streak",
+        "should_trigger_polling_self_heal",
     }
 
     selected_nodes = []
@@ -147,6 +150,39 @@ class BotScheduleConfigTests(unittest.TestCase):
         )
 
         self.assertFalse(detected)
+
+    def test_next_polling_backlog_detection_streak_increments_only_while_backlog_persists(self):
+        next_streak = self.symbols["next_polling_backlog_detection_streak"](
+            backlog_detected=True,
+            current_streak=1,
+        )
+        cleared_streak = self.symbols["next_polling_backlog_detection_streak"](
+            backlog_detected=False,
+            current_streak=next_streak,
+        )
+
+        self.assertEqual(next_streak, 2)
+        self.assertEqual(cleared_streak, 0)
+
+    def test_should_trigger_polling_self_heal_only_after_confirmed_backlog(self):
+        recovery_confirmation_count = self.symbols["POLLING_BACKLOG_RECOVERY_CONFIRMATION_COUNT"]
+
+        first_detection = self.symbols["should_trigger_polling_self_heal"](
+            backlog_detected=True,
+            detection_streak=recovery_confirmation_count - 1,
+        )
+        confirmed_detection = self.symbols["should_trigger_polling_self_heal"](
+            backlog_detected=True,
+            detection_streak=recovery_confirmation_count,
+        )
+        healthy_state = self.symbols["should_trigger_polling_self_heal"](
+            backlog_detected=False,
+            detection_streak=recovery_confirmation_count,
+        )
+
+        self.assertFalse(first_detection)
+        self.assertTrue(confirmed_detection)
+        self.assertFalse(healthy_state)
 
 
 if __name__ == "__main__":
