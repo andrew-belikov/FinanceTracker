@@ -7,7 +7,7 @@ from pathlib import Path
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-BOT_FILE = PROJECT_ROOT / "src" / "bot" / "bot.py"
+SERVICES_FILE = PROJECT_ROOT / "src" / "bot" / "services.py"
 RUNTIME_FILE = PROJECT_ROOT / "src" / "bot" / "runtime.py"
 
 def load_selected_symbols(file_path: Path, wanted_assignments: set[str], wanted_functions: set[str], namespace=None):
@@ -51,7 +51,7 @@ def load_symbols():
         },
     )
     return load_selected_symbols(
-        BOT_FILE,
+        SERVICES_FILE,
         {
             "REBALANCE_ASSET_CLASSES",
             "REBALANCE_TARGET_ALIASES",

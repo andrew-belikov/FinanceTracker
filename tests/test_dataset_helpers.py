@@ -5,7 +5,7 @@ from copy import deepcopy
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-BOT_FILE = PROJECT_ROOT / "src" / "bot" / "bot.py"
+SERVICES_FILE = PROJECT_ROOT / "src" / "bot" / "services.py"
 RUNTIME_FILE = PROJECT_ROOT / "src" / "bot" / "runtime.py"
 
 def load_selected_symbols(file_path: Path, wanted_assignments: set[str], wanted_functions: set[str], namespace=None):
@@ -60,7 +60,7 @@ def load_symbols():
         namespace=runtime_namespace,
     )
     return load_selected_symbols(
-        BOT_FILE,
+        SERVICES_FILE,
         set(),
         {
             "classify_operation_group",
