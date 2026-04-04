@@ -132,6 +132,7 @@ docker compose exec bot python proxy_smoke.py
 - в логах `xray-client` ищите события `xray_proxy_ready`, `xray_telegram_smoke_completed` и `xray_process_output`;
 - `proxy_smoke.py` внутри `bot` пишет одно структурированное событие `bot_startup_smoke_completed` или `bot_startup_smoke_failed` и подтверждает доступность Telegram API и прямой TCP-доступ к `db`;
 - long polling бота и обычные Bot API вызовы используют один и тот же явный proxy endpoint `BOT_PROXY_ENDPOINT`, чтобы `getUpdates` не зависел от неявного env-resolve внутри клиента;
+- если Telegram API временно недоступен через proxy, `bot.py` возвращает специальный код supervision, а `entrypoint.py` перезапускает процесс бота внутри контейнера с паузой `BOT_STARTUP_RETRY_DELAY_SECONDS` вместо жёсткого crash-loop всего контейнера;
 - watchdog long polling подтверждает backlog двумя подряд проверками и при подтверждённом зависании завершает процесс бота, чтобы `restart: unless-stopped` автоматически поднял контейнер заново;
 - при `BOT_PROXY_ENABLED=false` `xray-client` пишет событие `xray_proxy_disabled`, а `tracker` продолжает работать как раньше.
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import socket
+import subprocess
 import sys
 import time
 from typing import Iterable
@@ -13,6 +14,7 @@ from proxy_smoke import run_startup_smoke
 
 PROXY_ENV_KEYS = ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY")
 REQUIRED_NO_PROXY = ("localhost", "127.0.0.1", "db", "tracker", "xray-client")
+BOT_STARTUP_RETRY_EXIT_CODE = 76
 
 
 configure_logging()
@@ -80,8 +82,23 @@ def wait_for_proxy_endpoint(proxy_endpoint: str, timeout_seconds: float = 30.0) 
     return False
 
 
+def get_bot_startup_retry_delay_seconds() -> int:
+    raw_value = (os.getenv("BOT_STARTUP_RETRY_DELAY_SECONDS", "15").strip() or "15")
+    return max(0, int(raw_value))
+
+
+def should_retry_bot_process(exit_code: int, retry_exit_code: int = BOT_STARTUP_RETRY_EXIT_CODE) -> bool:
+    return exit_code == retry_exit_code
+
+
+def run_bot_process() -> int:
+    completed = subprocess.run(["python", "-u", "bot.py"], check=False)
+    return completed.returncode
+
+
 def main() -> int:
     proxy_enabled, proxy_endpoint, no_proxy = configure_proxy_env()
+    startup_retry_delay_seconds = get_bot_startup_retry_delay_seconds()
     logger.info(
         "bot_proxy_environment_configured",
         "Bot proxy environment configured.",
@@ -96,7 +113,10 @@ def main() -> int:
         logger.info(
             "bot_proxy_wait_started",
             "Waiting for bot proxy endpoint.",
-            {"proxy_endpoint": proxy_endpoint},
+            {
+                "proxy_endpoint": proxy_endpoint,
+                "startup_retry_delay_seconds": startup_retry_delay_seconds,
+            },
         )
         if not wait_for_proxy_endpoint(proxy_endpoint):
             logger.error(
@@ -107,9 +127,29 @@ def main() -> int:
             return 1
 
     run_startup_smoke()
-    logger.info("bot_process_exec_started", "Starting bot process.")
-    os.execvp("python", ["python", "-u", "bot.py"])
-    return 0
+    attempt = 1
+    while True:
+        logger.info(
+            "bot_process_exec_started",
+            "Starting bot process.",
+            {"attempt": attempt},
+        )
+        exit_code = run_bot_process()
+        if not should_retry_bot_process(exit_code):
+            return exit_code
+
+        logger.warning(
+            "bot_process_retry_scheduled",
+            "Bot process requested restart after Telegram transport failure.",
+            {
+                "attempt": attempt,
+                "exit_code": exit_code,
+                "retry_exit_code": BOT_STARTUP_RETRY_EXIT_CODE,
+                "retry_delay_seconds": startup_retry_delay_seconds,
+            },
+        )
+        time.sleep(startup_retry_delay_seconds)
+        attempt += 1
 
 
 if __name__ == "__main__":
