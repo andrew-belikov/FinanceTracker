@@ -8,8 +8,15 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 RUNTIME_FILES = [
     PROJECT_ROOT / "src" / "bot" / "bot.py",
+    PROJECT_ROOT / "src" / "bot" / "charts.py",
+    PROJECT_ROOT / "src" / "bot" / "dataset.py",
     PROJECT_ROOT / "src" / "bot" / "entrypoint.py",
+    PROJECT_ROOT / "src" / "bot" / "handlers.py",
+    PROJECT_ROOT / "src" / "bot" / "jobs.py",
     PROJECT_ROOT / "src" / "bot" / "proxy_smoke.py",
+    PROJECT_ROOT / "src" / "bot" / "queries.py",
+    PROJECT_ROOT / "src" / "bot" / "runtime.py",
+    PROJECT_ROOT / "src" / "bot" / "services.py",
     PROJECT_ROOT / "src" / "tracker" / "app.py",
     PROJECT_ROOT / "src" / "tracker" / "repair_operations_description_encoding.py",
     PROJECT_ROOT / "src" / "xray_client" / "entrypoint.py",

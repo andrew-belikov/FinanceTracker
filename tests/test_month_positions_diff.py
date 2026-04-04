@@ -4,11 +4,11 @@ from pathlib import Path
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-BOT_FILE = PROJECT_ROOT / "src" / "bot" / "bot.py"
+SERVICES_FILE = PROJECT_ROOT / "src" / "bot" / "services.py"
 
 
 def load_compute_positions_diff_lines():
-    module_ast = ast.parse(BOT_FILE.read_text(encoding="utf-8"), filename=str(BOT_FILE))
+    module_ast = ast.parse(SERVICES_FILE.read_text(encoding="utf-8"), filename=str(SERVICES_FILE))
     target_node = None
     for node in module_ast.body:
         if isinstance(node, ast.FunctionDef) and node.name == "compute_positions_diff_lines":
@@ -18,7 +18,7 @@ def load_compute_positions_diff_lines():
         raise RuntimeError("compute_positions_diff_lines not found")
 
     isolated_module = ast.Module(body=[target_node], type_ignores=[])
-    code = compile(isolated_module, filename=str(BOT_FILE), mode="exec")
+    code = compile(isolated_module, filename=str(SERVICES_FILE), mode="exec")
     namespace = {}
     exec(code, namespace)
     return namespace["compute_positions_diff_lines"]
