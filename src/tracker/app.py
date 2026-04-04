@@ -1,5 +1,5 @@
 """
-iis_tracker: ежедневные снапшоты портфеля + таблица пополнений
+iis_tracker: ежедневные снапшоты портфеля + синхронизация операций
 для одного T-Invest счёта (ИИС).
 
 Функционал:
@@ -8,7 +8,7 @@ iis_tracker: ежедневные снапшоты портфеля + табли
 - для каждого дня:
     * сохраняем агрегаты по портфелю;
     * сохраняем состав портфеля (позиции);
-    * синхронизируем операции в таблицу operations (для совместимости deposits читается через view).
+    * синхронизируем операции в таблицу operations.
 """
 
 import os
@@ -195,30 +195,6 @@ class PortfolioPosition(Base):
 
     snapshot = relationship("PortfolioSnapshot", back_populates="positions")
     instrument = relationship("Instrument")
-
-
-class Deposit(Base):
-    __tablename__ = "deposits"
-    __table_args__ = (
-        UniqueConstraint(
-            "account_id",
-            "operation_id",
-            name="uq_deposits_account_operation",
-        ),
-    )
-
-    id = Column(Integer, primary_key=True)
-    account_id = Column(String, nullable=False)  # ID счёта в Т-Инвест
-
-    operation_id = Column(String, nullable=False)
-    date = Column(DateTime, nullable=False)
-    amount = Column(Numeric(18, 2), nullable=False)
-    currency = Column(String, nullable=False)
-
-    description = Column(String, nullable=True)
-    source = Column(String, nullable=True)  # простая попытка классифицировать
-
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
 
 class Operation(Base):
@@ -1179,12 +1155,6 @@ def sync_operations_for_account(db, acc_data: dict):
         "Operations sync completed.",
         {"account_id": acc_id, **stats},
     )
-
-def sync_deposits_for_account(db, acc_data: dict):
-    """Deprecated wrapper for backward compatibility."""
-    return sync_operations_for_account(db, acc_data)
-
-
 def run_snapshot_and_operations_once():
     accounts_data = api_get_accounts()
     acc = choose_account(accounts_data)

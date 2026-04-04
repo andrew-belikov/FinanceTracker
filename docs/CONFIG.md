@@ -1,6 +1,7 @@
 # Конфигурация (.env)
 
 Все параметры задаются через файл `.env` в корне проекта.
+Все команды ниже предполагают запуск `docker compose` из корня репозитория.
 
 ## Обязательные
 
@@ -83,10 +84,10 @@ docker compose exec bot python proxy_smoke.py
 - `SNAPSHOT_INTERVAL_MINUTES` — интервал сохранения снапшотов (в минутах).
 - `SNAPSHOT_HOUR`, `SNAPSHOT_MINUTE` — совместимость со старыми настройками (может не использоваться).
 
-### Совместимость `deposits`
+### Исторический compatibility-слой `deposits`
 
-- View `deposits` сохраняется только для legacy/backward compatibility старых SQL-запросов.
-- Новый код и проверки должны читать данные операций из `operations`.
+- View `deposits` относится только к исторической SQL-миграции со старой схемы.
+- Активный runtime-код и текущие проверки должны читать данные операций из `operations`.
 
 ### Поля инструмента в `operations`
 
@@ -105,14 +106,14 @@ docker compose exec bot python proxy_smoke.py
 - Если после миграции у исторических строк новые поля ещё пустые (`state IS NULL`), tracker
   автоматически делает backfill от даты открытия счёта, затем возвращается к инкрементальной синхронизации.
 
-### Миграция на новую схему (кратко)
+### Историческая миграция со схемы `deposits` (кратко)
 
 ```bash
 # 1) Остановить сервисы, пишущие/читающие БД
 docker compose stop tracker bot
 
 # 2) Применить миграцию
-docker compose exec -T db psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -f migrations/20260221_operations_from_deposits.sql
+docker compose exec -T db psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" < migrations/20260221_operations_from_deposits.sql
 
 # 3) Запустить сервисы обратно
 docker compose up -d tracker bot
@@ -121,4 +122,4 @@ docker compose up -d tracker bot
 docker compose exec -T db psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "SELECT operation_type, COUNT(*) FROM operations GROUP BY operation_type ORDER BY operation_type;"
 ```
 
-Ожидаемый результат: в `operations` есть записи по типам пополнений; `deposits` используется только как совместимый legacy-view.
+Ожидаемый результат: в `operations` есть записи по типам пополнений; `deposits` при наличии остаётся только историческим compatibility-view.
