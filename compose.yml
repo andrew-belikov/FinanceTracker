@@ -40,7 +40,7 @@ services:
     healthcheck:
       test: ["CMD", "python", "-u", "-m", "xray_client.healthcheck"]
       interval: 10s
-      timeout: 5s
+      timeout: 15s
       retries: 6
       start_period: 10s
     restart: on-failure

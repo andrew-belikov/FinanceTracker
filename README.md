@@ -132,9 +132,9 @@ docker compose exec bot python proxy_smoke.py
 - при `BOT_PROXY_ENABLED=false` `xray-client` не попадает в обычный `docker compose ps`, потому что proxy не активен; при необходимости детальный статус виден в `docker compose ps -a xray-client` как `Exited (0)`;
 - все runtime-логи `bot`, `tracker`, `xray-client`, startup smoke и healthcheck идут как JSON Lines в `stdout`; удобнее всего смотреть их через `docker compose logs ...`;
 - при `BOT_PROXY_ENABLED=true` `bot` подключается к локальному SOCKS endpoint `socks5h://xray-client:1080`, а `xray-client` сам проверяет внешний маршрут через `https://api.ipify.org`;
-- если задан `BOT_VLESS_FALLBACK_URL`, контейнер `xray-client` при неуспешном старте основного маршрута автоматически пробует fallback-ссылку и фиксирует активную роль в status file и логах;
+- если задан `BOT_VLESS_FALLBACK_URL`, контейнер `xray-client` автоматически пробует fallback-ссылку не только при неуспешном старте основного маршрута, но и при повторяющихся runtime-сбоях активного канала;
 - основной и fallback URL могут отличаться по transport/security; текущий код умеет как Reality/TCP, так и VLESS с `security=none` и `type=kcp`;
-- в логах `xray-client` ищите события `xray_proxy_ready`, `xray_proxy_smoke_completed` и `xray_process_output`;
+- в логах `xray-client` ищите события `xray_proxy_ready`, `xray_proxy_smoke_completed`, `xray_runtime_smoke_failed`, `xray_runtime_failover_scheduled` и `xray_process_output`;
 - `proxy_smoke.py` внутри `bot` пишет одно структурированное событие `bot_startup_smoke_completed` или `bot_startup_smoke_failed` и подтверждает доступность Telegram API и прямой TCP-доступ к `db`;
 - long polling бота и обычные Bot API вызовы используют один и тот же явный proxy endpoint `BOT_PROXY_ENDPOINT`, чтобы `getUpdates` не зависел от неявного env-resolve внутри клиента;
 - если Telegram API временно недоступен через proxy, `bot.py` возвращает специальный код supervision, а `entrypoint.py` перезапускает процесс бота внутри контейнера с паузой `BOT_STARTUP_RETRY_DELAY_SECONDS` вместо жёсткого crash-loop всего контейнера;

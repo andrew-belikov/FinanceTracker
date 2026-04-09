@@ -1,12 +1,13 @@
 import sys
 import unittest
+from unittest import mock
 from pathlib import Path
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
-from xray_client.entrypoint import iter_vless_candidates
+from xray_client.entrypoint import ActiveProxySession, iter_candidate_indexes, iter_vless_candidates, monitor_active_candidate
 from xray_client.healthcheck import build_proxy_check_command
 from xray_client.render_config import build_config
 
@@ -109,6 +110,88 @@ class XrayProxyConfigTests(unittest.TestCase):
             iter_vless_candidates("vless://shared", "vless://shared"),
             [("primary", "vless://shared")],
         )
+
+    def test_iter_candidate_indexes_wraps_from_requested_start(self):
+        self.assertEqual(iter_candidate_indexes(1, 3), [1, 2, 0])
+
+    def test_monitor_active_candidate_requests_failover_after_threshold(self):
+        proc = mock.Mock()
+        proc.poll.side_effect = [None, None]
+        session = ActiveProxySession(
+            proc=proc,
+            relay_threads=[],
+            candidate_index=0,
+            candidate_role="primary",
+            link_summary="masked://primary",
+        )
+
+        with (
+            mock.patch("xray_client.entrypoint.run_smoke_through_proxy", side_effect=[(False, "timeout"), (False, "timeout")]),
+            mock.patch("xray_client.entrypoint.time.monotonic", return_value=0.0),
+            mock.patch("xray_client.entrypoint.time.sleep"),
+        ):
+            outcome, return_code = monitor_active_candidate(
+                session,
+                listen_port=1080,
+                healthcheck_url="https://api.ipify.org",
+                check_interval_seconds=0.0,
+                failure_threshold=2,
+            )
+
+        self.assertEqual((outcome, return_code), ("failover", None))
+
+    def test_monitor_active_candidate_resets_failures_after_recovery(self):
+        proc = mock.Mock()
+        proc.poll.side_effect = [None, None, None, 23]
+        session = ActiveProxySession(
+            proc=proc,
+            relay_threads=[],
+            candidate_index=0,
+            candidate_role="primary",
+            link_summary="masked://primary",
+        )
+
+        with (
+            mock.patch(
+                "xray_client.entrypoint.run_smoke_through_proxy",
+                side_effect=[(False, "timeout"), (True, "ok"), (False, "timeout")],
+            ) as smoke_mock,
+            mock.patch("xray_client.entrypoint.time.monotonic", return_value=0.0),
+            mock.patch("xray_client.entrypoint.time.sleep"),
+        ):
+            outcome, return_code = monitor_active_candidate(
+                session,
+                listen_port=1080,
+                healthcheck_url="https://api.ipify.org",
+                check_interval_seconds=0.0,
+                failure_threshold=2,
+            )
+
+        self.assertEqual((outcome, return_code), ("process_exit", 23))
+        self.assertEqual(smoke_mock.call_count, 3)
+
+    def test_monitor_active_candidate_returns_process_exit_without_smoke(self):
+        proc = mock.Mock()
+        proc.poll.return_value = 17
+        session = ActiveProxySession(
+            proc=proc,
+            relay_threads=[],
+            candidate_index=0,
+            candidate_role="primary",
+            link_summary="masked://primary",
+        )
+
+        with mock.patch("xray_client.entrypoint.run_smoke_through_proxy") as smoke_mock:
+            outcome, return_code = monitor_active_candidate(
+                session,
+                listen_port=1080,
+                healthcheck_url="https://api.ipify.org",
+                check_interval_seconds=0.0,
+                failure_threshold=2,
+            )
+
+        self.assertEqual((outcome, return_code), ("process_exit", 17))
+        smoke_mock.assert_not_called()
 
 
 if __name__ == "__main__":
