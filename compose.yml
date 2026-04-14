@@ -94,7 +94,7 @@ services:
       REPORTER_REQUEST_TIMEOUT_SECONDS: ${REPORTER_REQUEST_TIMEOUT_SECONDS:-180}
       BOT_PROXY_ENABLED: ${BOT_PROXY_ENABLED:-false}
       BOT_PROXY_ENDPOINT: socks5h://xray-client:1080
-      BOT_PROXY_NO_PROXY: localhost,127.0.0.1,db,tracker,xray-client
+      BOT_PROXY_NO_PROXY: localhost,127.0.0.1,db,tracker,reporter,xray-client
     restart: unless-stopped
 
   reporter:
