@@ -41,11 +41,14 @@
 
 - `tracker` — сервис, который опрашивает Invest API и пишет снапшоты в БД.
 - `bot` — Telegram‑бот, который читает данные из БД, хранит таргеты аллокации и отправляет отчёты.
+- `reporter` — отдельный сервис для PDF/AI-отчётов; он читает БД и ходит в Ollama через внешний Docker network.
 - `db` — Postgres.
 
 ```
 Postgres  <--- tracker (snapshots)
    ^
+   |\
+   | \__ reporter (PDF/AI reports)
    |
   bot (reports)
 ```

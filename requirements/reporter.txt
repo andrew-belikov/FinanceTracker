@@ -1,0 +1,8 @@
+SQLAlchemy
+psycopg2-binary
+matplotlib
+Jinja2
+WeasyPrint
+requests
+jsonschema
+tzdata
