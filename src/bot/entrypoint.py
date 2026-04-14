@@ -13,7 +13,7 @@ from proxy_smoke import run_startup_smoke
 
 
 PROXY_ENV_KEYS = ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY")
-REQUIRED_NO_PROXY = ("localhost", "127.0.0.1", "db", "tracker", "xray-client")
+REQUIRED_NO_PROXY = ("localhost", "127.0.0.1", "db", "tracker", "reporter", "xray-client")
 BOT_STARTUP_RETRY_EXIT_CODE = 76
 
 

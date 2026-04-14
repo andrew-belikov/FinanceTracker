@@ -19,6 +19,12 @@ class ReporterClientError(RuntimeError):
     pass
 
 
+def _open_internal_request(http_request: request.Request):
+    # reporter lives on the internal Docker network and must never inherit the Telegram proxy env.
+    opener = request.build_opener(request.ProxyHandler({}))
+    return opener.open(http_request, timeout=REPORTER_REQUEST_TIMEOUT_SECONDS)
+
+
 def _parse_filename(headers) -> str:
     content_disposition = headers.get("Content-Disposition") or ""
     marker = "filename="
@@ -62,7 +68,7 @@ def request_monthly_report_pdf(
     )
 
     try:
-        with request.urlopen(http_request, timeout=REPORTER_REQUEST_TIMEOUT_SECONDS) as response:
+        with _open_internal_request(http_request) as response:
             content_type = (response.headers.get("Content-Type") or "").lower()
             pdf_bytes = response.read()
             filename = _parse_filename(response.headers)

@@ -67,7 +67,7 @@
 - При `BOT_PROXY_ENABLED=true` рядом поднимается сервис `xray-client`, а `bot` направляет Telegram-трафик через локальный SOCKS endpoint `socks5h://xray-client:1080`.
 - `xray-client` принимает до двух кандидатных ссылок: основную `BOT_VLESS_URL` и fallback `BOT_VLESS_FALLBACK_URL`. Кандидаты проверяются по очереди, активной остаётся первая ссылка, которая успешно прошла startup smoke; дальше сервис продолжает runtime-проверки и при повторяющихся сбоях переключается на следующий кандидат.
 - Основной и fallback URL могут использовать разные transport/security-настройки. Текущий парсер поддерживает Reality/TCP и VLESS с `security=none`, включая `type=kcp`.
-- Внутренние адреса (`localhost`, `127.0.0.1`, `db`, `tracker`, `xray-client`) добавляются в `NO_PROXY`, поэтому внутренние обращения не уходят в proxy.
+- Внутренние адреса (`localhost`, `127.0.0.1`, `db`, `tracker`, `reporter`, `xray-client`) добавляются в `NO_PROXY`, поэтому внутренние обращения не уходят в proxy.
 - Long polling (`getUpdates`) и обычные Bot API запросы используют один и тот же явный proxy endpoint из `BOT_PROXY_ENDPOINT`; это снижает риск зависшего polling при переезде между хостами.
 - Если `bot.py` не может инициализироваться из-за транспортного `TimedOut` / `NetworkError`, `entrypoint.py` не завершает весь контейнер сразу, а перезапускает сам процесс бота с паузой `BOT_STARTUP_RETRY_DELAY_SECONDS`.
 - Если watchdog два раза подряд видит backlog Telegram updates при превышении порога стагнации, `bot` завершает процесс и рассчитывает на автоматический рестарт контейнера через `restart: unless-stopped`.

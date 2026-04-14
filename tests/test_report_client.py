@@ -38,13 +38,18 @@ class ReportClientTests(unittest.TestCase):
                 "Content-Disposition": 'attachment; filename="fintracker_monthly_2026-04.pdf"',
             },
         )
+        opener = mock.Mock()
+        opener.open.return_value = response
 
-        with mock.patch.object(report_client.request, "urlopen", return_value=response):
+        with mock.patch.object(report_client.request, "build_opener", return_value=opener) as build_opener:
             path, filename = report_client.request_monthly_report_pdf(year=2026, month=4)
 
         try:
             self.assertEqual(filename, "fintracker_monthly_2026-04.pdf")
             self.assertEqual(Path(path).read_bytes(), b"%PDF-test")
+            proxy_handler = build_opener.call_args.args[0]
+            self.assertEqual(proxy_handler.proxies, {})
+            opener.open.assert_called_once()
         finally:
             Path(path).unlink(missing_ok=True)
 
@@ -56,12 +61,45 @@ class ReportClientTests(unittest.TestCase):
             hdrs=None,
             fp=io.BytesIO(json.dumps({"message": "Нет данных для отчёта."}).encode("utf-8")),
         )
+        opener = mock.Mock()
+        opener.open.side_effect = http_error
 
-        with mock.patch.object(report_client.request, "urlopen", side_effect=http_error):
+        with mock.patch.object(report_client.request, "build_opener", return_value=opener):
             with self.assertRaises(report_client.ReporterClientError) as exc_info:
                 report_client.request_monthly_report_pdf(year=2026, month=4)
 
         self.assertEqual(str(exc_info.exception), "Нет данных для отчёта.")
+
+    def test_request_monthly_report_pdf_bypasses_proxy_env_for_internal_reporter(self):
+        response = FakeResponse(
+            b"%PDF-test",
+            {
+                "Content-Type": "application/pdf",
+                "Content-Disposition": 'attachment; filename="fintracker_monthly_2026-04.pdf"',
+            },
+        )
+        opener = mock.Mock()
+        opener.open.return_value = response
+
+        with mock.patch.dict(
+            report_client.os.environ,
+            {
+                "HTTP_PROXY": "socks5h://xray-client:1080",
+                "HTTPS_PROXY": "socks5h://xray-client:1080",
+                "ALL_PROXY": "socks5h://xray-client:1080",
+            },
+            clear=False,
+        ):
+            with mock.patch.object(report_client.request, "build_opener", return_value=opener) as build_opener:
+                path, _filename = report_client.request_monthly_report_pdf(year=2026, month=4)
+
+        try:
+            proxy_handler = build_opener.call_args.args[0]
+            self.assertEqual(proxy_handler.proxies, {})
+            opener.open.assert_called_once()
+            self.assertEqual(Path(path).read_bytes(), b"%PDF-test")
+        finally:
+            Path(path).unlink(missing_ok=True)
 
 
 if __name__ == "__main__":
