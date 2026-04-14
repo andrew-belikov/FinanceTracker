@@ -5,9 +5,12 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from common.logging_setup import get_logger
+from report_payload import create_monthly_report_payload
+from report_render import build_monthly_report_artifact
 
 
 REPORT_SCHEMA_VERSION = "monthly_report_stub.v1"
+REPORT_ARTIFACT_SCHEMA_VERSION = "monthly_report_artifact.v1"
 REPORT_PDF_ENGINE = os.getenv("REPORT_PDF_ENGINE", "placeholder").strip() or "placeholder"
 TZ_NAME = os.getenv("TIMEZONE", "Europe/Moscow").strip() or "Europe/Moscow"
 TZ = ZoneInfo(TZ_NAME)
@@ -89,4 +92,52 @@ def build_monthly_pdf_stub_response(payload: dict[str, object] | None) -> dict:
         "schema_version": REPORT_SCHEMA_VERSION,
         "message": "Monthly PDF generation is not implemented yet.",
         "request_keys": sorted(request_payload.keys()),
+    }
+
+
+def build_monthly_report_artifact_for_request(
+    payload: dict[str, object] | None,
+    *,
+    pdf_renderer=None,
+) -> dict:
+    request_payload = payload or {}
+    year = request_payload.get("year")
+    month = request_payload.get("month")
+
+    if year is not None and not isinstance(year, int):
+        raise ReportRequestError("Поле year должно быть целым числом.")
+    if month is not None and not isinstance(month, int):
+        raise ReportRequestError("Поле month должно быть целым числом.")
+
+    resolved_year, resolved_month = resolve_monthly_report_period(
+        year=year,
+        month=month,
+    )
+    report_payload = create_monthly_report_payload(
+        year=resolved_year,
+        month=resolved_month,
+    )
+    artifact = build_monthly_report_artifact(
+        report_payload,
+        pdf_renderer=pdf_renderer,
+    )
+    logger.info(
+        "report_pipeline_monthly_artifact_built",
+        "Built monthly report artifact for reporter request.",
+        {
+            "period": f"{resolved_year}-{resolved_month:02d}",
+            "filename": artifact["filename"],
+            "size_bytes": len(artifact["pdf_bytes"]),
+        },
+    )
+    return {
+        "schema_version": REPORT_ARTIFACT_SCHEMA_VERSION,
+        "report_kind": "monthly_pdf",
+        "period": f"{resolved_year}-{resolved_month:02d}",
+        "filename": artifact["filename"],
+        "html": artifact["html"],
+        "pdf_bytes": artifact["pdf_bytes"],
+        "payload": artifact["payload"],
+        "narrative": artifact["narrative"],
+        "charts": artifact["charts"],
     }
