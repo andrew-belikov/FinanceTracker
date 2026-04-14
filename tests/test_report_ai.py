@@ -105,6 +105,13 @@ class ReportAITests(unittest.TestCase):
         self.assertEqual(result["attempts"], 2)
         self.assertTrue(result["errors"])
 
+    def test_normalize_monthly_ai_output_rejects_english_report_title(self):
+        payload = build_valid_ai_output(build_sample_payload())
+        payload["report_title"] = "April 2026 monthly review"
+
+        with self.assertRaises(report_ai.ReportAIValidationError):
+            report_ai.normalize_monthly_ai_output(payload)
+
 
 if __name__ == "__main__":
     unittest.main()
