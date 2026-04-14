@@ -11,9 +11,10 @@ from unittest import mock
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
+sys.path.insert(0, str(PROJECT_ROOT / "src" / "bot"))
 
 from common.logging_setup import StructuredLogger, _JsonLineFormatter, relay_text_stream
-import bot.proxy_smoke as proxy_smoke
+import proxy_smoke
 import xray_client.healthcheck as xray_healthcheck
 
 

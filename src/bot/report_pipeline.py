@@ -9,9 +9,9 @@ from report_payload import create_monthly_report_payload
 from report_render import build_monthly_report_artifact
 
 
-REPORT_SCHEMA_VERSION = "monthly_report_stub.v1"
+REPORT_SCHEMA_VERSION = "monthly_report_service.v1"
 REPORT_ARTIFACT_SCHEMA_VERSION = "monthly_report_artifact.v1"
-REPORT_PDF_ENGINE = os.getenv("REPORT_PDF_ENGINE", "placeholder").strip() or "placeholder"
+REPORT_PDF_ENGINE = os.getenv("REPORT_PDF_ENGINE", "weasyprint").strip() or "weasyprint"
 TZ_NAME = os.getenv("TIMEZONE", "Europe/Moscow").strip() or "Europe/Moscow"
 TZ = ZoneInfo(TZ_NAME)
 OLLAMA_ENABLED = os.getenv("OLLAMA_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}

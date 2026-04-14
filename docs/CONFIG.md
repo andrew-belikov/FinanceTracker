@@ -42,14 +42,15 @@
 - `VERIFY_SSL` — проверка SSL сертификата при запросах к API (`true/false`). Рекомендуемое значение: `true`.
 - `REPORTER_PORT` — внутренний HTTP-порт сервиса `reporter` для `/healthz` и `POST /reports/monthly/pdf` (по умолчанию `8088`).
 - `REPORTER_MAX_BODY_BYTES` — максимальный размер тела запроса для `POST /reports/monthly/pdf` (по умолчанию `65536`).
-- `REPORTER_INTERNAL_URL` — внутренний compose-URL для будущих вызовов `bot -> reporter`. Рекомендуемое значение: `http://reporter:8088`.
+- `REPORTER_INTERNAL_URL` — внутренний compose-URL для вызовов `bot -> reporter`. Рекомендуемое значение: `http://reporter:8088`.
+- `REPORTER_REQUEST_TIMEOUT_SECONDS` — таймаут внутреннего запроса `bot -> reporter` при сборке `/monthpdf`.
 - `OLLAMA_ENABLED` — включает narrative-layer через локальную `Ollama` (`true/false`). В первом PR может оставаться `false`.
 - `OLLAMA_BASE_URL` — базовый URL `Ollama` для контейнера `reporter`. На `homeserver` корректный путь: `http://ollama:11434`.
 - `OLLAMA_MODEL` — имя модели, которое будет использоваться для narrative generation.
 - `OLLAMA_TIMEOUT_SECONDS` — таймаут обращения к `Ollama`.
 - `OLLAMA_KEEP_ALIVE` — желаемое время удержания модели в памяти.
 - `OLLAMA_NUM_CTX` — желаемый размер context window для prompt.
-- `REPORT_PDF_ENGINE` — backend генерации PDF. В первом PR используется значение `placeholder`.
+- `REPORT_PDF_ENGINE` — backend генерации PDF. Для текущего monthly PDF используется `weasyprint`.
 - `REPORT_DEBUG_SAVE_HTML` — сохранять промежуточный HTML в debug-режиме (`true/false`).
 - `REPORT_DEBUG_SAVE_PAYLOAD` — сохранять render payload в debug-режиме (`true/false`).
 - `BOT_PROXY_ENABLED` — включает outbound proxy только для контейнера `bot` (`true/false`).

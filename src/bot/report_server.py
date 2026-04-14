@@ -8,76 +8,20 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from common.logging_setup import get_logger
+from report_pipeline import (
+    ReportRequestError,
+    build_monthly_report_artifact_for_request,
+    build_report_health_payload,
+)
+from report_render import ReportRenderError
 
 
 REPORTER_HOST = os.getenv("REPORTER_HOST", "0.0.0.0").strip() or "0.0.0.0"
 REPORTER_PORT = int(os.getenv("REPORTER_PORT", "8088"))
 REPORTER_MAX_BODY_BYTES = int(os.getenv("REPORTER_MAX_BODY_BYTES", "65536"))
-REPORT_SCHEMA_VERSION = "monthly_report_stub.v1"
-REPORT_PDF_ENGINE = "placeholder"
-TZ_NAME = os.getenv("TIMEZONE", "Europe/Moscow").strip() or "Europe/Moscow"
+MONTHLY_REPORT_BUILDER = build_monthly_report_artifact_for_request
 
 logger = get_logger(__name__)
-
-
-class ReportRequestError(ValueError):
-    pass
-
-
-def resolve_monthly_report_period(
-    *,
-    year: int | None = None,
-    month: int | None = None,
-) -> tuple[int, int]:
-    from datetime import datetime
-    from zoneinfo import ZoneInfo
-
-    current = datetime.now(ZoneInfo(TZ_NAME))
-    resolved_year = year if year is not None else current.year
-    resolved_month = month if month is not None else current.month
-
-    if resolved_year < 1900 or resolved_year > 2100:
-        raise ReportRequestError("Поле year должно быть в диапазоне 1900..2100.")
-    if resolved_month < 1 or resolved_month > 12:
-        raise ReportRequestError("Поле month должно быть в диапазоне 1..12.")
-
-    return resolved_year, resolved_month
-
-
-def build_report_health_payload() -> dict[str, Any]:
-    return {
-        "status": "ok",
-        "service": "reporter",
-        "schema_version": REPORT_SCHEMA_VERSION,
-        "pdf_engine": REPORT_PDF_ENGINE,
-        "timezone": TZ_NAME,
-        "max_body_bytes": REPORTER_MAX_BODY_BYTES,
-    }
-
-
-def build_monthly_pdf_stub_response(payload: dict[str, Any] | None) -> dict[str, Any]:
-    request_payload = payload or {}
-    year = request_payload.get("year")
-    month = request_payload.get("month")
-
-    if year is not None and not isinstance(year, int):
-        raise ReportRequestError("Поле year должно быть целым числом.")
-    if month is not None and not isinstance(month, int):
-        raise ReportRequestError("Поле month должно быть целым числом.")
-
-    resolved_year, resolved_month = resolve_monthly_report_period(
-        year=year,
-        month=month,
-    )
-    period = f"{resolved_year}-{resolved_month:02d}"
-    return {
-        "status": "not_implemented",
-        "report_kind": "monthly_pdf",
-        "period": period,
-        "schema_version": REPORT_SCHEMA_VERSION,
-        "message": "Monthly PDF generation is not implemented yet.",
-        "request_keys": sorted(request_payload.keys()),
-    }
 
 
 def _normalize_path(raw_path: str) -> str:
@@ -107,6 +51,16 @@ class ReporterRequestHandler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(body)
+
+    def _send_pdf(self, pdf_bytes: bytes, *, filename: str, period: str) -> None:
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "application/pdf")
+        self.send_header("Content-Length", str(len(pdf_bytes)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+        self.send_header("X-Report-Period", period)
+        self.end_headers()
+        self.wfile.write(pdf_bytes)
 
     def _read_request_body(self) -> bytes:
         raw_length = self.headers.get("Content-Length", "0").strip() or "0"
@@ -167,8 +121,7 @@ class ReporterRequestHandler(BaseHTTPRequestHandler):
 
         try:
             request_json = self._read_json_body()
-            response_payload = build_monthly_pdf_stub_response(request_json)
-        except (json.JSONDecodeError, UnicodeDecodeError, ValueError, ReportRequestError) as exc:
+        except (json.JSONDecodeError, UnicodeDecodeError, ValueError) as exc:
             logger.warning(
                 "reporter_monthly_pdf_request_rejected",
                 "Rejected monthly PDF request.",
@@ -187,15 +140,79 @@ class ReporterRequestHandler(BaseHTTPRequestHandler):
             )
             return
 
+        try:
+            artifact = MONTHLY_REPORT_BUILDER(request_json)
+        except (json.JSONDecodeError, UnicodeDecodeError, ValueError, ReportRequestError) as exc:
+            error_code = "invalid_request" if isinstance(exc, ReportRequestError) else "report_unavailable"
+            logger.warning(
+                "reporter_monthly_pdf_request_rejected",
+                "Rejected monthly PDF request.",
+                {
+                    "path": path,
+                    "error": str(exc),
+                },
+            )
+            self._send_json(
+                HTTPStatus.BAD_REQUEST,
+                {
+                    "status": "error",
+                    "error": error_code,
+                    "message": str(exc),
+                },
+            )
+            return
+        except ReportRenderError as exc:
+            logger.exception(
+                "reporter_monthly_pdf_render_failed",
+                "Reporter failed to render monthly PDF.",
+                {
+                    "path": path,
+                    "error": str(exc),
+                },
+            )
+            self._send_json(
+                HTTPStatus.INTERNAL_SERVER_ERROR,
+                {
+                    "status": "error",
+                    "error": "report_render_failed",
+                    "message": str(exc),
+                },
+            )
+            return
+        except Exception as exc:
+            logger.exception(
+                "reporter_monthly_pdf_failed",
+                "Reporter failed to build monthly PDF.",
+                {
+                    "path": path,
+                    "error": str(exc),
+                },
+            )
+            self._send_json(
+                HTTPStatus.INTERNAL_SERVER_ERROR,
+                {
+                    "status": "error",
+                    "error": "report_failed",
+                    "message": "Не удалось собрать monthly PDF report.",
+                },
+            )
+            return
+
         logger.info(
-            "reporter_monthly_pdf_requested",
-            "Monthly PDF request accepted in stub mode.",
+            "reporter_monthly_pdf_built",
+            "Reporter built monthly PDF response.",
             {
                 "path": path,
-                "request_keys": response_payload["request_keys"],
+                "filename": artifact["filename"],
+                "period": artifact["period"],
+                "size_bytes": len(artifact["pdf_bytes"]),
             },
         )
-        self._send_json(HTTPStatus.NOT_IMPLEMENTED, response_payload)
+        self._send_pdf(
+            artifact["pdf_bytes"],
+            filename=artifact["filename"],
+            period=artifact["period"],
+        )
 
 
 def build_reporter_server(host: str | None = None, port: int | None = None) -> ReporterHTTPServer:

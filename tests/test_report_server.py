@@ -7,12 +7,14 @@ import time
 import unittest
 from pathlib import Path
 from typing import Dict, Optional
+from unittest import mock
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 sys.path.insert(0, str(PROJECT_ROOT / "src" / "bot"))
 
+import report_server
 from report_server import build_reporter_server
 
 
@@ -49,34 +51,46 @@ class ReporterServerTests(unittest.TestCase):
         conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=2.0)
         conn.request(method, path, body=body, headers=headers or {})
         response = conn.getresponse()
-        payload = response.read().decode("utf-8")
+        payload = response.read()
+        content_type = response.getheader("Content-Type") or ""
+        content_disposition = response.getheader("Content-Disposition")
         conn.close()
-        return response.status, json.loads(payload)
+        if "application/json" in content_type:
+            return response.status, json.loads(payload.decode("utf-8")), content_type, content_disposition
+        return response.status, payload, content_type, content_disposition
 
     def test_healthz_returns_ok(self):
-        status, payload = self._request("GET", "/healthz")
+        status, payload, _content_type, _disposition = self._request("GET", "/healthz")
 
         self.assertEqual(status, 200)
         self.assertEqual(payload["status"], "ok")
         self.assertEqual(payload["service"], "reporter")
-        self.assertEqual(payload["pdf_engine"], "placeholder")
+        self.assertEqual(payload["pdf_engine"], "weasyprint")
 
-    def test_monthly_pdf_stub_returns_not_implemented(self):
-        status, payload = self._request(
-            "POST",
-            "/reports/monthly/pdf",
-            body=json.dumps({"year": 2026, "month": 4}).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
-        )
+    def test_monthly_pdf_returns_pdf_response(self):
+        with mock.patch.object(
+            report_server,
+            "MONTHLY_REPORT_BUILDER",
+            return_value={
+                "filename": "fintracker_monthly_2026-04.pdf",
+                "period": "2026-04",
+                "pdf_bytes": b"%PDF-test",
+            },
+        ):
+            status, payload, content_type, disposition = self._request(
+                "POST",
+                "/reports/monthly/pdf",
+                body=json.dumps({"year": 2026, "month": 4}).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+            )
 
-        self.assertEqual(status, 501)
-        self.assertEqual(payload["status"], "not_implemented")
-        self.assertEqual(payload["report_kind"], "monthly_pdf")
-        self.assertEqual(payload["period"], "2026-04")
-        self.assertEqual(payload["request_keys"], ["month", "year"])
+        self.assertEqual(status, 200)
+        self.assertEqual(payload, b"%PDF-test")
+        self.assertEqual(content_type, "application/pdf")
+        self.assertEqual(disposition, 'attachment; filename="fintracker_monthly_2026-04.pdf"')
 
     def test_monthly_pdf_stub_rejects_non_object_json(self):
-        status, payload = self._request(
+        status, payload, _content_type, _disposition = self._request(
             "POST",
             "/reports/monthly/pdf",
             body=json.dumps(["bad"]).encode("utf-8"),
@@ -87,7 +101,7 @@ class ReporterServerTests(unittest.TestCase):
         self.assertEqual(payload["error"], "invalid_request")
 
     def test_unknown_path_returns_not_found(self):
-        status, payload = self._request("GET", "/unknown")
+        status, payload, _content_type, _disposition = self._request("GET", "/unknown")
 
         self.assertEqual(status, 404)
         self.assertEqual(payload["error"], "not_found")

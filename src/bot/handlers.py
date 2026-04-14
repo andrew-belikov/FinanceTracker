@@ -1,3 +1,4 @@
+import asyncio
 import os
 import tempfile
 from datetime import datetime
@@ -13,6 +14,7 @@ from charts import (
 )
 from dataset import create_dataset_archive
 from queries import resolve_reporting_account_id
+from report_client import ReporterClientError, request_monthly_report_pdf
 from runtime import (
     INVEST_USAGE_TEXT,
     REBALANCE_FEATURE_UNAVAILABLE_TEXT,
@@ -24,6 +26,7 @@ from runtime import (
     is_authorized,
     log_update_received,
     logger,
+    safe_send_document,
     safe_send_message,
 )
 from services import (
@@ -107,6 +110,105 @@ async def cmd_month(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     text = build_month_summary()
     await safe_send_message(context.bot, update.effective_chat.id, text, parse_mode="Markdown")
+
+
+def _parse_monthpdf_args(args):
+    if not args:
+        return None, None
+
+    if len(args) == 1 and "-" in args[0]:
+        year_str, month_str = args[0].split("-", 1)
+    elif len(args) == 2:
+        year_str, month_str = args
+    else:
+        raise ValueError("Формат: /monthpdf или /monthpdf YYYY MM")
+
+    try:
+        year = int(year_str)
+        month = int(month_str)
+    except ValueError as exc:
+        raise ValueError("Формат: /monthpdf или /monthpdf YYYY MM") from exc
+
+    if year < 1900 or year > 2100 or month < 1 or month > 12:
+        raise ValueError("Формат: /monthpdf или /monthpdf YYYY MM")
+    return year, month
+
+
+async def cmd_monthpdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    log_update_received(update, command_name="/monthpdf")
+    if not is_authorized(update):
+        return
+
+    try:
+        year, month = _parse_monthpdf_args(context.args or [])
+    except ValueError as exc:
+        await update.message.reply_text(str(exc))
+        return
+
+    logger.info(
+        "bot_monthpdf_requested",
+        "Received /monthpdf request.",
+        {
+            "chat_id": getattr(update.effective_chat, "id", None),
+            "year": year,
+            "month": month,
+        },
+    )
+    status_message = await update.message.reply_text("Собираю PDF-отчёт. Это может занять до пары минут.")
+    document_path = None
+    try:
+        document_path, filename = await asyncio.to_thread(
+            request_monthly_report_pdf,
+            year=year,
+            month=month,
+        )
+        await safe_send_document(
+            context.bot,
+            update.effective_chat.id,
+            file_path=document_path,
+            filename=filename,
+            caption="Monthly review в PDF.",
+        )
+        logger.info(
+            "bot_monthpdf_succeeded",
+            "Sent monthly PDF report to Telegram chat.",
+            {
+                "chat_id": getattr(update.effective_chat, "id", None),
+                "filename": filename,
+            },
+        )
+    except ReporterClientError as exc:
+        logger.warning(
+            "bot_monthpdf_failed",
+            "Failed to fetch monthly PDF report from reporter.",
+            {
+                "chat_id": getattr(update.effective_chat, "id", None),
+                "error": str(exc),
+            },
+        )
+        await update.message.reply_text(str(exc))
+    except Exception:
+        logger.exception(
+            "bot_monthpdf_send_failed",
+            "Failed to deliver monthly PDF report to Telegram.",
+            {
+                "chat_id": getattr(update.effective_chat, "id", None),
+            },
+        )
+        await update.message.reply_text("Не удалось отправить PDF-отчёт в Telegram.")
+    finally:
+        if document_path and os.path.exists(document_path):
+            os.remove(document_path)
+        try:
+            await status_message.delete()
+        except Exception:
+            logger.warning(
+                "bot_monthpdf_status_delete_failed",
+                "Failed to delete temporary /monthpdf status message.",
+                {
+                    "chat_id": getattr(update.effective_chat, "id", None),
+                },
+            )
 
 
 async def cmd_year(update: Update, context: ContextTypes.DEFAULT_TYPE):

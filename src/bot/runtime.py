@@ -9,7 +9,7 @@ from zoneinfo import ZoneInfo
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
-from telegram import Update
+from telegram import InputFile, Update
 
 from common.logging_setup import configure_logging, get_logger
 
@@ -320,6 +320,51 @@ async def safe_send_message(bot, chat_id: int, text: str, parse_mode: str = "Mar
             "Telegram message sent without parse mode fallback.",
             {"chat_id": chat_id},
         )
+
+
+async def safe_send_document(
+    bot,
+    chat_id: int,
+    *,
+    file_path: str,
+    filename: str,
+    caption: str | None = None,
+):
+    logger.info(
+        "bot_send_document_started",
+        "Sending Telegram document.",
+        {
+            "chat_id": chat_id,
+            "filename": filename,
+            "has_caption": caption is not None,
+        },
+    )
+    try:
+        with open(file_path, "rb") as file_obj:
+            await bot.send_document(
+                chat_id=chat_id,
+                document=InputFile(file_obj, filename=filename),
+                caption=caption,
+            )
+    except Exception:
+        logger.exception(
+            "bot_send_document_failed",
+            "Telegram document send failed.",
+            {
+                "chat_id": chat_id,
+                "filename": filename,
+            },
+        )
+        raise
+
+    logger.info(
+        "bot_send_document_succeeded",
+        "Telegram document sent.",
+        {
+            "chat_id": chat_id,
+            "filename": filename,
+        },
+    )
 
 
 def to_local_market_date(dt: datetime | None) -> date | None:
