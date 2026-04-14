@@ -2,6 +2,7 @@ import os
 import sys
 import tempfile
 import unittest
+from decimal import Decimal
 from pathlib import Path
 
 
@@ -18,6 +19,53 @@ def build_sample_payload():
 
 
 class ReportRenderTests(unittest.TestCase):
+    def test_classify_day_pnl_rows_excludes_first_synthetic_zero(self):
+        stats = report_render._classify_day_pnl_rows(
+            [
+                {"date": "2026-04-01", "day_pnl": "0"},
+                {"date": "2026-04-02", "day_pnl": "12"},
+                {"date": "2026-04-03", "day_pnl": "-4"},
+                {"date": "2026-04-04", "day_pnl": "0"},
+            ]
+        )
+
+        self.assertEqual(stats["positive"]["count"], 1)
+        self.assertEqual(stats["negative"]["count"], 1)
+        self.assertEqual(stats["neutral"]["count"], 1)
+        self.assertEqual(stats["positive"]["total"], 3)
+
+    def test_build_weight_transition_map_formats_start_to_end(self):
+        transitions = report_render._build_weight_transition_map(
+            [
+                {"logical_asset_id": "asset-1", "weight_pct": "5.0"},
+            ],
+            [
+                {"logical_asset_id": "asset-1", "weight_pct": "2.5"},
+                {"logical_asset_id": "asset-2", "weight_pct": "4.0"},
+            ],
+        )
+
+        self.assertEqual(transitions["asset-1"], "5,0% → 2,5%")
+        self.assertEqual(transitions["asset-2"], "0,0% → 4,0%")
+
+    def test_build_asset_class_breakdown_adds_other_bucket(self):
+        breakdown = report_render._build_asset_class_breakdown(
+            [
+                {"instrument_type": "share", "position_value": Decimal("100")},
+                {"instrument_type": "bond", "position_value": Decimal("50")},
+                {"instrument_type": "future", "position_value": Decimal("20")},
+            ]
+        )
+
+        self.assertEqual(
+            breakdown,
+            [
+                {"key": "stocks", "label": "Акции", "value": Decimal("100")},
+                {"key": "bonds", "label": "Облигации", "value": Decimal("50")},
+                {"key": "other", "label": "Другое", "value": Decimal("20")},
+            ],
+        )
+
     def test_build_deterministic_monthly_narrative_returns_expected_sections(self):
         payload = build_sample_payload()
 
@@ -33,6 +81,7 @@ class ReportRenderTests(unittest.TestCase):
         charts = report_render.build_monthly_report_charts(payload)
 
         html = report_render.build_monthly_report_html(payload, charts=charts)
+        pages = html.split('<section class="page">')[1:]
 
         self.assertGreaterEqual(html.count('<section class="page">'), 5)
         self.assertIn("Динамика за месяц", html)
@@ -41,6 +90,17 @@ class ReportRenderTests(unittest.TestCase):
         self.assertIn("Операции, доходы и качество", html)
         self.assertNotIn("Executive Summary", html)
         self.assertIn("data:image/png;base64,", html)
+        self.assertNotIn("Крупнейшая позиция", pages[0])
+        self.assertNotIn("Расхождение", pages[0])
+        self.assertNotIn("Детерминированный месячный отчёт", pages[0])
+        self.assertIn("Факты месяца", pages[0])
+        self.assertIn("Факты в цифрах", pages[1])
+        self.assertNotIn("Что видно на графике", pages[1])
+        self.assertNotIn("Опорные точки периода", pages[1])
+        self.assertIn("Классы активов", pages[2])
+        self.assertIn("Изм. доли", pages[2])
+        self.assertIn("Нереализованный результат", pages[2])
+        self.assertIn("status-dot", pages[2])
 
     def test_build_monthly_report_pdf_bytes_uses_injected_renderer(self):
         payload = build_sample_payload()
