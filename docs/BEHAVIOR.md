@@ -236,12 +236,19 @@ Fallback:
 
 Он может отправить:
 
-- месячный отчёт, если сегодня последний день месяца;
+- monthly PDF, если сегодня последний день месяца;
 - недельный отчёт, если сегодня пятница;
 - один или несколько trigger-сообщений.
 
 Если на конкретную дату отправлять нечего, джоб завершается тихо.
 Повторный запуск за ту же дату подавляется через таблицу `bot_daily_job_runs`.
+
+Month-end delivery policy:
+
+- primary monthly artifact для auto-send — PDF через внутренний `reporter`;
+- если `reporter` недоступен, PDF не собрался или `Ollama` не прошла валидацию narrative, бот отправляет текстовый `month-end fallback`;
+- monthly PDF auto-send использует отдельный `job_name=monthly_pdf_delivery`, поэтому может ретраиться независимо от `daily_summary`;
+- startup catch-up может добрать `monthly_pdf_delivery`, даже если `daily_summary` за ту же дату уже был закрыт ранее.
 
 ### Триггер Нового Максимума
 

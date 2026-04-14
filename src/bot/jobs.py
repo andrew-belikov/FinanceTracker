@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import os
 from datetime import datetime, timezone
 
 from telegram.ext import ContextTypes
@@ -14,6 +16,7 @@ from queries import (
     release_daily_job_run,
     resolve_reporting_account_id,
 )
+from report_client import ReporterClientError, request_monthly_report_pdf
 from runtime import (
     DAILY_JOB_HOUR,
     DAILY_JOB_SCHEDULE_LABEL,
@@ -36,6 +39,7 @@ from runtime import (
     logger,
     next_polling_backlog_detection_streak,
     normalize_decimal,
+    safe_send_document,
     safe_send_message,
     should_trigger_polling_self_heal,
     to_iso_datetime,
@@ -53,6 +57,7 @@ POLLING_BACKLOG_DETECTION_STREAK = 0
 POLLING_SELF_HEAL_REQUESTED = False
 BOT_EXIT_CODE = 0
 DAILY_JOB_NAME = "daily_summary"
+MONTHLY_PDF_JOB_NAME = "monthly_pdf_delivery"
 DAILY_JOB_STARTUP_CATCHUP_DELAY_SECONDS = 5
 
 
@@ -84,6 +89,80 @@ def is_daily_job_catchup_due(now_local: datetime) -> bool:
 
 def should_release_daily_job_run(sent_total: int, failed_total: int) -> bool:
     return sent_total == 0 and failed_total > 0
+
+
+def _claim_scheduled_job_run(
+    *,
+    job_name: str,
+    run_date,
+    trigger_source: str,
+    scheduled_for: str,
+) -> tuple[bool, bool]:
+    with db_session() as session:
+        run_claimed = claim_daily_job_run(session, job_name=job_name, run_date=run_date)
+
+    if run_claimed is False:
+        logger.info(
+            "daily_job_already_processed",
+            "Daily job already processed for this date; skipping duplicate run.",
+            {
+                "today": run_date.isoformat(),
+                "scheduled_for": scheduled_for,
+                "trigger_source": trigger_source,
+                "job_name": job_name,
+            },
+        )
+        return False, True
+
+    if run_claimed is None:
+        logger.warning(
+            "daily_job_tracking_unavailable",
+            "Daily job run tracking is unavailable because migration is not applied.",
+            {
+                "today": run_date.isoformat(),
+                "trigger_source": trigger_source,
+                "job_name": job_name,
+            },
+        )
+        return True, False
+
+    return True, True
+
+
+def _finalize_scheduled_job_run(
+    *,
+    tracking_available: bool,
+    job_name: str,
+    run_date,
+    trigger_source: str,
+    sent_total: int,
+    failed_total: int,
+) -> None:
+    if not tracking_available:
+        return
+
+    with db_session() as session:
+        if should_release_daily_job_run(sent_total=sent_total, failed_total=failed_total):
+            release_daily_job_run(session, job_name=job_name, run_date=run_date)
+            logger.warning(
+                "daily_job_run_released_for_retry",
+                "Released daily job claim because all sends failed.",
+                {
+                    "today": run_date.isoformat(),
+                    "trigger_source": trigger_source,
+                    "sent_total": sent_total,
+                    "failed_total": failed_total,
+                    "job_name": job_name,
+                },
+            )
+        else:
+            complete_daily_job_run(
+                session,
+                job_name=job_name,
+                run_date=run_date,
+                sent_total=sent_total,
+                failed_total=failed_total,
+            )
 
 
 async def jobqueue_smoke_test_job(context: ContextTypes.DEFAULT_TYPE):
@@ -247,34 +326,24 @@ async def _run_daily_job(
     started_at = datetime.now(TZ)
     started_monotonic = datetime.now(timezone.utc)
     scheduled_for = DAILY_JOB_SCHEDULE_LABEL
-    tracking_available = False
-
-    with db_session() as session:
-        run_claimed = claim_daily_job_run(session, job_name=DAILY_JOB_NAME, run_date=today)
-
-    if run_claimed is False:
-        logger.info(
-            "daily_job_already_processed",
-            "Daily job already processed for this date; skipping duplicate run.",
-            {
-                "today": today.isoformat(),
-                "scheduled_for": scheduled_for,
-                "trigger_source": trigger_source,
-            },
+    daily_should_run, daily_tracking_available = _claim_scheduled_job_run(
+        job_name=DAILY_JOB_NAME,
+        run_date=today,
+        trigger_source=trigger_source,
+        scheduled_for=scheduled_for,
+    )
+    month_pdf_should_run = False
+    month_pdf_tracking_available = False
+    if is_month_end:
+        month_pdf_should_run, month_pdf_tracking_available = _claim_scheduled_job_run(
+            job_name=MONTHLY_PDF_JOB_NAME,
+            run_date=today,
+            trigger_source=trigger_source,
+            scheduled_for=scheduled_for,
         )
+
+    if not daily_should_run and not month_pdf_should_run:
         return
-
-    if run_claimed is None:
-        logger.warning(
-            "daily_job_tracking_unavailable",
-            "Daily job run tracking is unavailable because migration is not applied.",
-            {
-                "today": today.isoformat(),
-                "trigger_source": trigger_source,
-            },
-        )
-    else:
-        tracking_available = True
 
     logger.info(
         "daily_job_started",
@@ -286,36 +355,69 @@ async def _run_daily_job(
             "is_month_end": is_month_end,
             "is_friday": is_friday,
             "trigger_source": trigger_source,
-            "tracking_available": tracking_available,
+            "tracking_available": daily_tracking_available or month_pdf_tracking_available,
+            "daily_should_run": daily_should_run,
+            "month_pdf_should_run": month_pdf_should_run,
         },
     )
 
     month_text = None
+    month_pdf_path = None
+    month_pdf_filename = None
     week_text = None
     triggers: list[str] = []
 
     try:
-        if is_month_end:
+        if month_pdf_should_run:
             month_text = build_month_summary()
     except Exception:
         logger.exception("daily_job_month_summary_failed", "Failed to build month summary.")
 
     try:
-        if is_friday:
+        if daily_should_run and is_friday:
             week_text = build_week_summary()
     except Exception:
         logger.exception("daily_job_week_summary_failed", "Failed to build week summary.")
 
     try:
-        triggers = build_triggers_messages()
+        if daily_should_run:
+            triggers = build_triggers_messages()
     except Exception:
         logger.exception("daily_job_triggers_failed", "Failed to build trigger messages.")
+
+    if month_pdf_should_run:
+        try:
+            month_pdf_path, month_pdf_filename = await asyncio.to_thread(
+                request_monthly_report_pdf,
+                year=today.year,
+                month=today.month,
+            )
+        except ReporterClientError as exc:
+            logger.warning(
+                "daily_job_monthly_pdf_failed",
+                "Failed to fetch monthly PDF report for daily job.",
+                {
+                    "today": today.isoformat(),
+                    "error": str(exc),
+                    "trigger_source": trigger_source,
+                },
+            )
+        except Exception:
+            logger.exception(
+                "daily_job_monthly_pdf_failed",
+                "Failed to fetch monthly PDF report for daily job.",
+                {
+                    "today": today.isoformat(),
+                    "trigger_source": trigger_source,
+                },
+            )
 
     logger.info(
         "daily_job_messages_prepared",
         "Daily job prepared messages.",
         {
             "month_report_ready": bool(month_text),
+            "month_pdf_ready": bool(month_pdf_path),
             "week_report_ready": bool(week_text),
             "triggers_count": len(triggers),
             "trigger_source": trigger_source,
@@ -323,16 +425,15 @@ async def _run_daily_job(
     )
 
     # Нечего отправлять — выходим тихо.
-    if not month_text and not week_text and not triggers:
-        if tracking_available:
-            with db_session() as session:
-                complete_daily_job_run(
-                    session,
-                    job_name=DAILY_JOB_NAME,
-                    run_date=today,
-                    sent_total=0,
-                    failed_total=0,
-                )
+    if not month_pdf_should_run and not week_text and not triggers:
+        _finalize_scheduled_job_run(
+            tracking_available=daily_tracking_available,
+            job_name=DAILY_JOB_NAME,
+            run_date=today,
+            trigger_source=trigger_source,
+            sent_total=0,
+            failed_total=0,
+        )
         logger.info(
             "daily_job_no_messages",
             "Daily job had no messages to send.",
@@ -342,83 +443,131 @@ async def _run_daily_job(
 
     sent_total = 0
     failed_total = 0
+    daily_sent_total = 0
+    daily_failed_total = 0
+    month_sent_total = 0
+    month_failed_total = 0
 
-    for chat_id in TARGET_CHAT_IDS:
-        # Отдельные try/except на каждое сообщение: чтобы одно падение не глушило всё.
-        if is_month_end and month_text:
-            try:
-                await safe_send_message(context.bot, chat_id, month_text, parse_mode="Markdown")
-                sent_total += 1
-                logger.info(
-                    "daily_job_message_sent",
-                    "Daily job message sent.",
-                    {"chat_id": chat_id, "message_type": "month_report"},
-                )
-            except Exception:
-                failed_total += 1
-                logger.exception(
-                    "daily_job_message_send_failed",
-                    "Failed to send daily job month report.",
-                    {"chat_id": chat_id, "message_type": "month_report"},
-                )
+    try:
+        for chat_id in TARGET_CHAT_IDS:
+            # Отдельные try/except на каждое сообщение: чтобы одно падение не глушило всё.
+            if month_pdf_should_run:
+                if month_pdf_path and month_pdf_filename:
+                    try:
+                        await safe_send_document(
+                            context.bot,
+                            chat_id,
+                            file_path=month_pdf_path,
+                            filename=month_pdf_filename,
+                            caption="Monthly review в PDF.",
+                        )
+                        month_sent_total += 1
+                        sent_total += 1
+                        logger.info(
+                            "daily_job_message_sent",
+                            "Daily job message sent.",
+                            {"chat_id": chat_id, "message_type": "month_pdf"},
+                        )
+                    except Exception:
+                        month_failed_total += 1
+                        failed_total += 1
+                        logger.exception(
+                            "daily_job_message_send_failed",
+                            "Failed to send daily job monthly PDF report.",
+                            {"chat_id": chat_id, "message_type": "month_pdf"},
+                        )
+                elif month_text:
+                    try:
+                        await safe_send_message(context.bot, chat_id, month_text, parse_mode="Markdown")
+                        month_sent_total += 1
+                        sent_total += 1
+                        logger.info(
+                            "daily_job_message_sent",
+                            "Daily job message sent.",
+                            {"chat_id": chat_id, "message_type": "month_report_fallback"},
+                        )
+                    except Exception:
+                        month_failed_total += 1
+                        failed_total += 1
+                        logger.exception(
+                            "daily_job_message_send_failed",
+                            "Failed to send daily job month report fallback.",
+                            {"chat_id": chat_id, "message_type": "month_report_fallback"},
+                        )
+                else:
+                    month_failed_total += 1
+                    failed_total += 1
+                    logger.warning(
+                        "daily_job_month_delivery_unavailable",
+                        "Monthly delivery is unavailable because both PDF and fallback text are missing.",
+                        {
+                            "chat_id": chat_id,
+                            "trigger_source": trigger_source,
+                            "today": today.isoformat(),
+                        },
+                    )
 
-        if is_friday and week_text:
-            try:
-                await safe_send_message(context.bot, chat_id, week_text, parse_mode="Markdown")
-                sent_total += 1
-                logger.info(
-                    "daily_job_message_sent",
-                    "Daily job message sent.",
-                    {"chat_id": chat_id, "message_type": "week_report"},
-                )
-            except Exception:
-                failed_total += 1
-                logger.exception(
-                    "daily_job_message_send_failed",
-                    "Failed to send daily job week report.",
-                    {"chat_id": chat_id, "message_type": "week_report"},
-                )
+            if daily_should_run and is_friday and week_text:
+                try:
+                    await safe_send_message(context.bot, chat_id, week_text, parse_mode="Markdown")
+                    daily_sent_total += 1
+                    sent_total += 1
+                    logger.info(
+                        "daily_job_message_sent",
+                        "Daily job message sent.",
+                        {"chat_id": chat_id, "message_type": "week_report"},
+                    )
+                except Exception:
+                    daily_failed_total += 1
+                    failed_total += 1
+                    logger.exception(
+                        "daily_job_message_send_failed",
+                        "Failed to send daily job week report.",
+                        {"chat_id": chat_id, "message_type": "week_report"},
+                    )
 
-        for msg in triggers:
-            try:
-                await safe_send_message(context.bot, chat_id, msg, parse_mode="Markdown")
-                sent_total += 1
-                logger.info(
-                    "daily_job_message_sent",
-                    "Daily job message sent.",
-                    {"chat_id": chat_id, "message_type": "trigger"},
-                )
-            except Exception:
-                failed_total += 1
-                logger.exception(
-                    "daily_job_message_send_failed",
-                    "Failed to send daily job trigger message.",
-                    {"chat_id": chat_id, "message_type": "trigger"},
-                )
+            if daily_should_run:
+                for msg in triggers:
+                    try:
+                        await safe_send_message(context.bot, chat_id, msg, parse_mode="Markdown")
+                        daily_sent_total += 1
+                        sent_total += 1
+                        logger.info(
+                            "daily_job_message_sent",
+                            "Daily job message sent.",
+                            {"chat_id": chat_id, "message_type": "trigger"},
+                        )
+                    except Exception:
+                        daily_failed_total += 1
+                        failed_total += 1
+                        logger.exception(
+                            "daily_job_message_send_failed",
+                            "Failed to send daily job trigger message.",
+                            {"chat_id": chat_id, "message_type": "trigger"},
+                        )
+    finally:
+        if month_pdf_path and os.path.exists(month_pdf_path):
+            os.remove(month_pdf_path)
 
     duration_ms = int((datetime.now(timezone.utc) - started_monotonic).total_seconds() * 1000)
-    if tracking_available:
-        with db_session() as session:
-            if should_release_daily_job_run(sent_total=sent_total, failed_total=failed_total):
-                release_daily_job_run(session, job_name=DAILY_JOB_NAME, run_date=today)
-                logger.warning(
-                    "daily_job_run_released_for_retry",
-                    "Released daily job claim because all sends failed.",
-                    {
-                        "today": today.isoformat(),
-                        "trigger_source": trigger_source,
-                        "sent_total": sent_total,
-                        "failed_total": failed_total,
-                    },
-                )
-            else:
-                complete_daily_job_run(
-                    session,
-                    job_name=DAILY_JOB_NAME,
-                    run_date=today,
-                    sent_total=sent_total,
-                    failed_total=failed_total,
-                )
+    if daily_should_run:
+        _finalize_scheduled_job_run(
+            tracking_available=daily_tracking_available,
+            job_name=DAILY_JOB_NAME,
+            run_date=today,
+            trigger_source=trigger_source,
+            sent_total=daily_sent_total,
+            failed_total=daily_failed_total,
+        )
+    if month_pdf_should_run:
+        _finalize_scheduled_job_run(
+            tracking_available=month_pdf_tracking_available,
+            job_name=MONTHLY_PDF_JOB_NAME,
+            run_date=today,
+            trigger_source=trigger_source,
+            sent_total=month_sent_total,
+            failed_total=month_failed_total,
+        )
     logger.info(
         "daily_job_completed",
         "Daily job completed.",
@@ -427,8 +576,12 @@ async def _run_daily_job(
             "duration_ms": duration_ms,
             "sent_total": sent_total,
             "failed_total": failed_total,
+            "daily_sent_total": daily_sent_total,
+            "daily_failed_total": daily_failed_total,
+            "month_sent_total": month_sent_total,
+            "month_failed_total": month_failed_total,
             "trigger_source": trigger_source,
-            "tracking_available": tracking_available,
+            "tracking_available": daily_tracking_available or month_pdf_tracking_available,
         },
     )
 
