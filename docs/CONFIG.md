@@ -50,7 +50,7 @@
 - `OLLAMA_TIMEOUT_SECONDS` — таймаут обращения к `Ollama`.
 - `OLLAMA_KEEP_ALIVE` — желаемое время удержания модели в памяти.
 - `OLLAMA_NUM_CTX` — желаемый размер context window для prompt.
-- `OLLAMA_MAX_INPUT_CHARS` — жёсткий лимит на размер `monthly_ai_input` перед обрезкой и fallback.
+- `OLLAMA_MAX_INPUT_CHARS` — жёсткий лимит на размер `monthly_ai_input` перед обрезкой. Рекомендуемое стартовое значение: `12000`.
 - `REPORT_PDF_ENGINE` — backend генерации PDF. Для текущего monthly PDF используется `weasyprint`.
 - `REPORT_DEBUG_SAVE_HTML` — сохранять промежуточный HTML в debug-режиме (`true/false`).
 - `REPORT_DEBUG_SAVE_PAYLOAD` — сохранять render payload в debug-режиме (`true/false`).

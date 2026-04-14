@@ -96,7 +96,7 @@ docker compose logs --tail=200 reporter
 ```
 
 Если вы используете monthly PDF reporter на сервере с отдельным LocalLLM compose-стеком, перед запуском убедитесь, что внешняя сеть `localllm_localllm` существует.
-На `homeserver` её создаёт и использует проект `LocalLLM`. `reporter` ожидает `OLLAMA_BASE_URL=http://ollama:11434`, а входной AI payload режется через `OLLAMA_MAX_INPUT_CHARS`, чтобы при переполнении автоматически уходить в deterministic fallback narrative.
+На `homeserver` её создаёт и использует проект `LocalLLM`. `reporter` ожидает `OLLAMA_BASE_URL=http://ollama:11434`, а входной AI payload режется через `OLLAMA_MAX_INPUT_CHARS`. При недоступной `Ollama`, невалидном JSON или semantic-mismatch reporter автоматически переходит на deterministic fallback narrative.
 
 ### Опциональный outbound proxy только для `bot`
 
