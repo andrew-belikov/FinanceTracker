@@ -226,7 +226,7 @@ OLLAMA_BASE_URL=http://ollama:11434
 - `OLLAMA_KEEP_ALIVE=10m`
 - `OLLAMA_NUM_PARALLEL=1`
 - `OLLAMA_MAX_LOADED_MODELS=1`
-- `OLLAMA_MAX_INPUT_CHARS=60000` как внутренний guard на размер `monthly_ai_input`
+- `OLLAMA_MAX_INPUT_CHARS=12000` как консервативный guard на размер `monthly_ai_input`
 
 А в `api/tags` видна только одна модель:
 

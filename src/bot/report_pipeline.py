@@ -5,6 +5,16 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from common.logging_setup import get_logger
+from report_ai import (
+    OLLAMA_BASE_URL,
+    OLLAMA_ENABLED,
+    OLLAMA_KEEP_ALIVE,
+    OLLAMA_MAX_INPUT_CHARS,
+    OLLAMA_MODEL,
+    OLLAMA_NUM_CTX,
+    OLLAMA_TIMEOUT_SECONDS,
+    build_monthly_report_narrative,
+)
 from report_payload import create_monthly_report_payload
 from report_render import build_monthly_report_artifact
 
@@ -14,9 +24,6 @@ REPORT_ARTIFACT_SCHEMA_VERSION = "monthly_report_artifact.v1"
 REPORT_PDF_ENGINE = os.getenv("REPORT_PDF_ENGINE", "weasyprint").strip() or "weasyprint"
 TZ_NAME = os.getenv("TIMEZONE", "Europe/Moscow").strip() or "Europe/Moscow"
 TZ = ZoneInfo(TZ_NAME)
-OLLAMA_ENABLED = os.getenv("OLLAMA_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
-OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://ollama:11434").strip() or "http://ollama:11434"
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5:1.5b").strip() or "qwen2.5:1.5b"
 REPORT_DEBUG_SAVE_HTML = os.getenv("REPORT_DEBUG_SAVE_HTML", "false").strip().lower() in {"1", "true", "yes", "on"}
 REPORT_DEBUG_SAVE_PAYLOAD = os.getenv("REPORT_DEBUG_SAVE_PAYLOAD", "false").strip().lower() in {"1", "true", "yes", "on"}
 
@@ -55,6 +62,10 @@ def build_report_health_payload() -> dict:
         "ollama_enabled": OLLAMA_ENABLED,
         "ollama_base_url": OLLAMA_BASE_URL,
         "ollama_model": OLLAMA_MODEL,
+        "ollama_timeout_seconds": OLLAMA_TIMEOUT_SECONDS,
+        "ollama_keep_alive": OLLAMA_KEEP_ALIVE,
+        "ollama_num_ctx": OLLAMA_NUM_CTX,
+        "ollama_max_input_chars": OLLAMA_MAX_INPUT_CHARS,
         "debug_save_html": REPORT_DEBUG_SAVE_HTML,
         "debug_save_payload": REPORT_DEBUG_SAVE_PAYLOAD,
     }
@@ -117,8 +128,11 @@ def build_monthly_report_artifact_for_request(
         year=resolved_year,
         month=resolved_month,
     )
+    narrative_result = build_monthly_report_narrative(report_payload)
+    report_payload["meta"]["has_ai_narrative"] = narrative_result["source"] == "ollama"
     artifact = build_monthly_report_artifact(
         report_payload,
+        narrative=narrative_result["narrative"],
         pdf_renderer=pdf_renderer,
     )
     logger.info(
@@ -128,6 +142,7 @@ def build_monthly_report_artifact_for_request(
             "period": f"{resolved_year}-{resolved_month:02d}",
             "filename": artifact["filename"],
             "size_bytes": len(artifact["pdf_bytes"]),
+            "narrative_source": narrative_result["source"],
         },
     )
     return {
@@ -139,5 +154,10 @@ def build_monthly_report_artifact_for_request(
         "pdf_bytes": artifact["pdf_bytes"],
         "payload": artifact["payload"],
         "narrative": artifact["narrative"],
+        "narrative_source": narrative_result["source"],
+        "ai_input": narrative_result["ai_input"],
+        "ai_attempts": narrative_result["attempts"],
+        "ai_errors": narrative_result["errors"],
+        "ai_telemetry": narrative_result["telemetry"],
         "charts": artifact["charts"],
     }
