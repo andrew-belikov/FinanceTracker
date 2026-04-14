@@ -21,7 +21,7 @@ class ReportPipelineTests(unittest.TestCase):
         payload = build_sample_payload()
         ai_narrative = {
             "schema_version": "monthly_ai_output.v1",
-            "report_title": "Тестовый monthly review",
+            "report_title": "Тестовый обзор портфеля",
             "executive_summary": ["Портфель закрыл месяц в плюсе."],
             "performance_commentary": ["Главный график показал ровную траекторию."],
             "instrument_takeaways": ["Крупнейшая позиция сохранила лидерство."],
@@ -55,7 +55,7 @@ class ReportPipelineTests(unittest.TestCase):
         self.assertEqual(artifact["pdf_bytes"], b"%PDF-pipeline")
         self.assertEqual(artifact["narrative_source"], "ollama")
         self.assertTrue(artifact["payload"]["meta"]["has_ai_narrative"])
-        self.assertEqual(artifact["narrative"]["report_title"], "Тестовый monthly review")
+        self.assertEqual(artifact["narrative"]["report_title"], "Тестовый обзор портфеля")
 
     def test_build_monthly_report_artifact_for_request_validates_month_type(self):
         with self.assertRaises(report_pipeline.ReportRequestError):

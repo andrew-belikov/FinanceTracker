@@ -24,7 +24,7 @@ class ReportRenderTests(unittest.TestCase):
         narrative = report_render.build_deterministic_monthly_narrative(payload)
 
         self.assertEqual(narrative["schema_version"], "monthly_fallback_narrative.v1")
-        self.assertTrue(narrative["report_title"])
+        self.assertIn("обзор портфеля", narrative["report_title"])
         self.assertTrue(narrative["executive_summary"])
         self.assertTrue(narrative["performance_commentary"])
 
@@ -35,10 +35,11 @@ class ReportRenderTests(unittest.TestCase):
         html = report_render.build_monthly_report_html(payload, charts=charts)
 
         self.assertGreaterEqual(html.count('<section class="page">'), 5)
-        self.assertIn("Performance", html)
-        self.assertIn("Structure & Current Positions", html)
-        self.assertIn("Instruments Deep Dive", html)
-        self.assertIn("Cashflows & Quality", html)
+        self.assertIn("Динамика за месяц", html)
+        self.assertIn("Структура на конец месяца", html)
+        self.assertIn("Инструменты за месяц", html)
+        self.assertIn("Операции, доходы и качество", html)
+        self.assertNotIn("Executive Summary", html)
         self.assertIn("data:image/png;base64,", html)
 
     def test_build_monthly_report_pdf_bytes_uses_injected_renderer(self):
@@ -55,7 +56,7 @@ class ReportRenderTests(unittest.TestCase):
         )
 
         self.assertEqual(pdf_bytes, b"%PDF-mock")
-        self.assertIn("monthly review", captured["html"])
+        self.assertIn("обзор портфеля", captured["html"])
 
     def test_save_debug_report_html_writes_file(self):
         html = "<html><body>test</body></html>"

@@ -265,6 +265,8 @@ def normalize_monthly_ai_output(payload: dict[str, Any]) -> dict[str, Any]:
         errors.append("Поле report_title обязательно.")
     elif len(report_title) > 90:
         errors.append("Поле report_title слишком длинное.")
+    elif any(term in report_title.lower() for term in ("monthly review", "executive summary", "performance")):
+        errors.append("Поле report_title должно быть на русском языке.")
 
     if errors:
         raise ReportAIValidationError(errors)
@@ -302,6 +304,7 @@ def build_monthly_ai_system_prompt() -> str:
     return (
         "Ты пишешь narrative-блоки для monthly PDF-отчёта по инвестиционному портфелю.\n"
         "Пиши только на русском языке.\n"
+        "Не используй английские термины вроде monthly review, executive summary, performance.\n"
         "Ты не считаешь финансовые метрики и не придумываешь новые числа.\n"
         "Используй только факты из входного JSON.\n"
         "Если факта не хватает, не додумывай его и помести короткую пометку в warnings.\n"
