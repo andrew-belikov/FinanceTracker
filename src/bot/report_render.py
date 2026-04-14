@@ -18,7 +18,6 @@ from charts import (
     annotate_series_last_point,
     apply_chart_style,
     build_date_ticks,
-    pct_axis_formatter,
     rub_axis_formatter,
     set_value_axis_limits,
     set_chart_header,
@@ -26,6 +25,11 @@ from charts import (
 from common.logging_setup import get_logger
 from report_payload import create_monthly_report_payload
 from runtime import fmt_decimal_rub, fmt_pct
+from services import (
+    REBALANCE_ASSET_CLASSES,
+    REBALANCE_CLASS_LABELS,
+    aggregate_rebalance_values_by_class,
+)
 
 
 REPORT_DEBUG_SAVE_HTML = os.getenv("REPORT_DEBUG_SAVE_HTML", "false").strip().lower() in {"1", "true", "yes", "on"}
@@ -55,6 +59,14 @@ def _display_pct(value: Any, *, precision: int = 2) -> str:
     if value is None:
         return "—"
     return fmt_pct(float(_to_decimal(value)), precision=precision)
+
+
+def _display_pct_compact(value: Any, *, precision: int = 1) -> str:
+    if value is None:
+        return "—"
+    quantizer = Decimal("1") if precision == 0 else Decimal(f"1.{'0' * precision}")
+    decimal_value = _to_decimal(value).quantize(quantizer)
+    return f"{format(decimal_value, f'.{precision}f').replace('.', ',')}%"
 
 
 def _display_date(value: str | None) -> str:
@@ -131,6 +143,114 @@ def _render_asset_cell(ticker: str | None, name: str | None) -> str:
     return "".join(parts)
 
 
+def _render_status_dot(status: str | None) -> str:
+    status_text = (status or "нет данных").strip() or "нет данных"
+    normalized = status_text.lower()
+    if normalized == "в норме":
+        tone = "ok"
+    elif normalized == "вне нормы":
+        tone = "warn"
+    else:
+        tone = "neutral"
+    return (
+        f'<span class="status-dot status-dot--{tone}" '
+        f'title="{escape(status_text)}" aria-label="{escape(status_text)}"></span>'
+    )
+
+
+def _render_fact_card(label: str, value: str) -> str:
+    return (
+        '<div class="fact-card">'
+        f'<div class="fact-label">{escape(label)}</div>'
+        f'<div class="fact-value">{value}</div>'
+        "</div>"
+    )
+
+
+def _render_fact_grid(items: list[tuple[str, str]], *, columns: int = 2) -> str:
+    if not items:
+        return '<p class="empty">Нет данных.</p>'
+    cards = "".join(_render_fact_card(label, value) for label, value in items)
+    return f'<div class="fact-grid fact-grid--{columns}">{cards}</div>'
+
+
+def _share_text(count: int, total: int) -> str:
+    if total <= 0:
+        return f"{count} из {total} (0%)"
+    share_pct = (Decimal(count) * Decimal("100") / Decimal(total)).quantize(Decimal("1"))
+    return f"{count} из {total} ({share_pct}%)"
+
+
+def _classify_day_pnl_rows(rows: list[dict[str, Any]]) -> dict[str, dict[str, int]]:
+    relevant_rows = rows[1:] if len(rows) > 1 else rows
+    counts = {"positive": 0, "negative": 0, "neutral": 0}
+    for row in relevant_rows:
+        value = _to_decimal(row.get("day_pnl"))
+        if value > 0:
+            counts["positive"] += 1
+        elif value < 0:
+            counts["negative"] += 1
+        else:
+            counts["neutral"] += 1
+    total = len(relevant_rows)
+    return {
+        key: {
+            "count": value,
+            "total": total,
+        }
+        for key, value in counts.items()
+    }
+
+
+def _build_weight_transition_map(
+    start_positions: list[dict[str, Any]],
+    current_positions: list[dict[str, Any]],
+) -> dict[str, str]:
+    start_weights = {
+        str(row.get("logical_asset_id") or ""): _to_decimal(row.get("weight_pct"))
+        for row in start_positions
+        if row.get("logical_asset_id")
+    }
+    transitions: dict[str, str] = {}
+    for row in current_positions:
+        logical_asset_id = str(row.get("logical_asset_id") or "")
+        if not logical_asset_id:
+            continue
+        end_weight = _to_decimal(row.get("weight_pct"))
+        start_weight = start_weights.get(logical_asset_id, Decimal("0"))
+        transitions[logical_asset_id] = (
+            f"{_display_pct_compact(start_weight, precision=1)} "
+            f"→ {_display_pct_compact(end_weight, precision=1)}"
+        )
+    return transitions
+
+
+def _build_asset_class_breakdown(positions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    class_values, other_groups = aggregate_rebalance_values_by_class(positions)
+    rows: list[dict[str, Any]] = []
+    for asset_class in REBALANCE_ASSET_CLASSES:
+        value = class_values.get(asset_class, Decimal("0"))
+        if value > 0:
+            rows.append(
+                {
+                    "key": asset_class,
+                    "label": REBALANCE_CLASS_LABELS[asset_class],
+                    "value": value,
+                }
+            )
+
+    other_total = sum(other_groups.values(), Decimal("0"))
+    if other_total > 0:
+        rows.append(
+            {
+                "key": "other",
+                "label": "Другое",
+                "value": other_total,
+            }
+        )
+    return rows
+
+
 def _annotate_point(
     ax,
     x_value,
@@ -178,7 +298,6 @@ def _build_performance_chart(payload: dict[str, Any]) -> str | None:
 
     dates = [date.fromisoformat(row["date"]) for row in rows]
     portfolio_values = [float(_to_decimal(row.get("portfolio_value"))) for row in rows]
-    net_cashflow = [float(_to_decimal(row.get("net_cashflow"))) for row in rows]
     day_pnl = [float(_to_decimal(row.get("day_pnl"))) for row in rows]
 
     fig, (ax_value, ax_flow) = plt.subplots(
@@ -191,7 +310,7 @@ def _build_performance_chart(payload: dict[str, Any]) -> str | None:
     set_chart_header(
         fig,
         "Динамика портфеля за месяц",
-        "Сверху — стоимость на конец дня, снизу — внешний денежный поток и дневной результат.",
+        "Сверху — стоимость на конец дня, снизу — дневной результат по торговым дням.",
     )
     apply_chart_style(ax_value, rub_axis_formatter)
     apply_chart_style(ax_flow, rub_axis_formatter)
@@ -232,21 +351,15 @@ def _build_performance_chart(payload: dict[str, Any]) -> str | None:
             y_offset=16,
         )
 
-    bar_colors = [CHART_COLORS["deposits"] if value >= 0 else CHART_COLORS["negative"] for value in net_cashflow]
-    ax_flow.bar(dates, net_cashflow, width=0.85, color=bar_colors, alpha=0.5, zorder=2)
-    ax_flow.plot(dates, day_pnl, color=CHART_COLORS["twr"], linewidth=2.0, marker="o", markersize=3.2, zorder=3)
+    bar_colors = [
+        CHART_COLORS["positive"] if value > 0 else CHART_COLORS["negative"] if value < 0 else CHART_COLORS["neutral"]
+        for value in day_pnl
+    ]
+    ax_flow.bar(dates, day_pnl, width=0.85, color=bar_colors, alpha=0.72, zorder=2)
     ax_flow.axhline(0, color=CHART_COLORS["spine"], linewidth=1, zorder=1)
-    ax_flow.set_ylabel("Потоки / результат")
+    ax_flow.set_ylabel("Дневной результат")
     ax_flow.margins(x=0.03, y=0.12)
-    set_value_axis_limits(ax_flow, net_cashflow + day_pnl, min_padding_ratio=0.18, flat_padding_ratio=0.08)
-    annotate_series_last_point(
-        ax_flow,
-        dates,
-        day_pnl,
-        f"Дневной результат {_display_rub(rows[-1].get('day_pnl'), precision=0)}",
-        CHART_COLORS["twr"],
-        y_offset=12 if day_pnl[-1] >= 0 else -12,
-    )
+    set_value_axis_limits(ax_flow, day_pnl, min_padding_ratio=0.18, flat_padding_ratio=0.08)
     best_day_index = max(range(len(day_pnl)), key=day_pnl.__getitem__)
     worst_day_index = min(range(len(day_pnl)), key=day_pnl.__getitem__)
     if best_day_index != len(day_pnl) - 1:
@@ -279,50 +392,47 @@ def _build_performance_chart(payload: dict[str, Any]) -> str | None:
 
 
 def _build_allocation_chart(payload: dict[str, Any]) -> str | None:
-    positions = payload.get("positions_current") or []
-    if not positions:
+    breakdown = _build_asset_class_breakdown(payload.get("positions_current") or [])
+    if not breakdown:
         return None
 
-    top_positions = positions[:8]
-    labels = [row.get("ticker") or row.get("name") or "—" for row in top_positions]
-    weights = [float(_to_decimal(row.get("weight_pct"))) for row in top_positions]
-    y_values = list(range(len(top_positions)))
+    labels = [row["label"] for row in breakdown]
+    values = [float(row["value"]) for row in breakdown]
+    colors_by_key = {
+        "stocks": CHART_COLORS["portfolio"],
+        "bonds": CHART_COLORS["deposits"],
+        "etf": CHART_COLORS["twr"],
+        "currency": CHART_COLORS["positive"],
+        "other": CHART_COLORS["neutral"],
+    }
+    colors = [colors_by_key.get(str(row["key"]), CHART_COLORS["neutral"]) for row in breakdown]
 
     fig, ax = plt.subplots(figsize=(10.5, 4.8))
     set_chart_header(
         fig,
-        "Крупнейшие позиции на конец месяца",
-        "Топ-позиции по весу в портфеле.",
+        "Структура портфеля по классам активов",
+        "Распределение текущей стоимости по основным классам активов.",
     )
-    apply_chart_style(ax, pct_axis_formatter)
-
-    colors = [
-        CHART_COLORS["portfolio"],
-        CHART_COLORS["deposits"],
-        CHART_COLORS["twr"],
-        CHART_COLORS["positive"],
-        CHART_COLORS["negative"],
-        CHART_COLORS["neutral"],
-        CHART_COLORS["portfolio"],
-        CHART_COLORS["deposits"],
-    ]
-    ax.barh(y_values, weights, color=colors[: len(top_positions)], edgecolor="none", zorder=3)
-    ax.set_yticks(y_values)
-    ax.set_yticklabels(labels)
-    ax.invert_yaxis()
-    ax.set_xlabel("Вес, %")
-    ax.margins(x=0.08, y=0.12)
-    label_offset = max(max(weights) * 0.03, 0.6)
-    for idx, value in enumerate(weights):
-        ax.text(
-            value + label_offset,
-            idx,
-            _display_pct(value, precision=1).replace("+", ""),
-            va="center",
-            ha="left",
-            fontsize=8,
-            color=CHART_COLORS["muted"],
-        )
+    ax.set_facecolor("white")
+    ax.pie(
+        values,
+        colors=colors,
+        startangle=90,
+        counterclock=False,
+        wedgeprops={"width": 0.42, "edgecolor": "white", "linewidth": 2},
+        autopct=lambda pct: f"{pct:.0f}%" if pct >= 4 else "",
+        pctdistance=0.78,
+        textprops={"fontsize": 8, "color": CHART_COLORS["text"]},
+    )
+    ax.text(0, 0, "Классы\nактивов", ha="center", va="center", fontsize=10, color=CHART_COLORS["muted"])
+    ax.legend(
+        labels,
+        loc="center left",
+        bbox_to_anchor=(1.0, 0.5),
+        frameon=False,
+        fontsize=8,
+    )
+    ax.set_aspect("equal")
     fig.tight_layout(rect=(0, 0, 1, 0.88))
     return _chart_to_data_uri(fig)
 
@@ -396,11 +506,6 @@ def build_deterministic_monthly_narrative(payload: dict[str, Any]) -> dict[str, 
         f"при TWR {_display_pct(summary.get('period_twr_pct'), precision=2)}.",
         f"Чистый внешний поток за месяц: {_display_rub(summary.get('net_external_flow'), precision=0)}.",
     ]
-    if summary.get("top_holding_name"):
-        executive_summary.append(
-            f"Крупнейшая позиция на конец месяца: {summary.get('top_holding_name')} "
-            f"({_display_pct(summary.get('top_holding_weight_pct'), precision=1)} портфеля)."
-        )
 
     performance_commentary = [
         f"Лучший день месяца: {_display_date(summary.get('best_day_date'))} "
@@ -440,7 +545,7 @@ def build_deterministic_monthly_narrative(payload: dict[str, Any]) -> dict[str, 
     cashflow_notes = [
         f"Пополнения: {_display_rub(summary.get('deposits'), precision=0)}, "
         f"выводы: {_display_rub(summary.get('withdrawals'), precision=0)}.",
-        f"Доходный поток за месяц: {_display_rub(summary.get('income_net'), precision=2)}, "
+        f"Доходы за месяц: {_display_rub(summary.get('income_net'), precision=2)}, "
         f"комиссии: {_display_rub(summary.get('commissions'), precision=2)}, "
         f"налоги: {_display_rub(summary.get('taxes'), precision=2)}.",
     ]
@@ -461,7 +566,7 @@ def build_deterministic_monthly_narrative(payload: dict[str, Any]) -> dict[str, 
 
     risk_notes: list[str] = []
     if _to_decimal(summary.get("top_holding_weight_pct")) >= Decimal("25"):
-        risk_notes.append("Крупнейшая позиция заметно концентрирует вес портфеля.")
+        risk_notes.append("Один инструмент заметно концентрирует вес портфеля.")
     if not quality.get("has_full_history_from_zero"):
         risk_notes.append("Отчёт нельзя трактовать как полную историю портфеля с нулевой базы.")
     if not quality.get("has_rebalance_targets"):
@@ -558,15 +663,27 @@ def build_monthly_report_html(
     summary = payload["summary_metrics"]
     report_title = _resolve_report_title(payload, narrative)
     summary_subline = (
-        f"TWR {_display_pct(summary.get('period_twr_pct'), precision=2)} "
-        f"• результат {_display_rub(summary.get('period_pnl_abs'), precision=0)}"
+        f"Результат месяца {_display_rub(summary.get('period_pnl_abs'), precision=0)} "
+        f"• TWR {_display_pct(summary.get('period_twr_pct'), precision=2)} "
+        f"• Пополнения {_display_rub(summary.get('deposits'), precision=0)}"
+    )
+
+    daily_rows = payload.get("timeseries_daily") or []
+    peak_row = max(daily_rows, key=lambda row: _to_decimal(row.get("portfolio_value"))) if daily_rows else None
+    trough_row = min(daily_rows, key=lambda row: _to_decimal(row.get("portfolio_value"))) if daily_rows else None
+    day_stats = _classify_day_pnl_rows(daily_rows)
+    classified_days_total = day_stats["positive"]["total"]
+    weight_transitions = _build_weight_transition_map(
+        payload.get("positions_month_start") or [],
+        payload.get("positions_current") or [],
     )
 
     top_positions_rows = [
         [
             _render_asset_cell(row.get("ticker"), row.get("name")),
             _render_num_cell(_display_rub(row.get("position_value"), precision=0)),
-            _render_num_cell(_display_pct(row.get("weight_pct"), precision=1)),
+            _render_num_cell(_display_pct_compact(row.get("weight_pct"), precision=1)),
+            _render_nowrap(weight_transitions.get(str(row.get("logical_asset_id") or ""), f"0,0% → {_display_pct_compact(row.get('weight_pct'), precision=1)}")),
             _render_num_cell(_display_rub(row.get("expected_yield"), precision=0)),
         ]
         for row in payload["positions_current"][:10]
@@ -574,10 +691,10 @@ def build_monthly_report_html(
     rebalance_rows = [
         [
             escape(row.get("label") or "—"),
-            _render_num_cell(_display_pct(row.get("current_pct"), precision=1)),
-            _render_num_cell(_display_pct(row.get("target_pct"), precision=1)),
+            _render_num_cell(_display_pct_compact(row.get("current_pct"), precision=1)),
+            _render_num_cell(_display_pct_compact(row.get("target_pct"), precision=1)),
             _render_num_cell(_display_rub(row.get("delta_value"), precision=0)),
-            escape(row.get("status") or "—"),
+            _render_status_dot(row.get("status")),
         ]
         for row in payload["rebalance_snapshot"].get("rows", [])
     ]
@@ -675,55 +792,42 @@ def build_monthly_report_html(
         ["Таргеты ребаланса", _render_nowrap("да" if payload["data_quality"].get("has_rebalance_targets") else "нет")],
     ]
 
-    overview_fact_rows = [
-        ["Лучший день", _render_nowrap(f"{_display_date(summary.get('best_day_date'))} • {_display_rub(summary.get('best_day_pnl'), precision=0)}")],
-        ["Худший день", _render_nowrap(f"{_display_date(summary.get('worst_day_date'))} • {_display_rub(summary.get('worst_day_pnl'), precision=0)}")],
-        ["Пик стоимости", _render_nowrap("—")],
+    page_one_facts = [
+        ("Лучший день", _render_nowrap(f"{_display_day(summary.get('best_day_date'))} • {_display_rub(summary.get('best_day_pnl'), precision=0)}")),
+        ("Худший день", _render_nowrap(f"{_display_day(summary.get('worst_day_date'))} • {_display_rub(summary.get('worst_day_pnl'), precision=0)}")),
+        (
+            "Пик месяца",
+            _render_nowrap(
+                f"{_display_day(peak_row.get('date'))} • {_display_rub(peak_row.get('portfolio_value'), precision=0)}"
+            ) if peak_row else _render_muted("—"),
+        ),
+        (
+            "Минимум месяца",
+            _render_nowrap(
+                f"{_display_day(trough_row.get('date'))} • {_display_rub(trough_row.get('portfolio_value'), precision=0)}"
+            ) if trough_row else _render_muted("—"),
+        ),
+        ("Пополнения", _render_num_cell(_display_rub(summary.get("deposits"), precision=0))),
+        ("Доходы за месяц", _render_num_cell(_display_rub(summary.get("income_net"), precision=2))),
     ]
-    daily_rows = payload.get("timeseries_daily") or []
-    if daily_rows:
-        peak_row = max(daily_rows, key=lambda row: _to_decimal(row.get("portfolio_value")))
-        trough_row = min(daily_rows, key=lambda row: _to_decimal(row.get("portfolio_value")))
-        overview_fact_rows[2] = [
-            "Пик стоимости",
-            _render_nowrap(f"{_display_date(peak_row.get('date'))} • {_display_rub(peak_row.get('portfolio_value'), precision=0)}"),
-        ]
-        overview_fact_rows.append(
-            [
-                "Минимум месяца",
-                _render_nowrap(f"{_display_date(trough_row.get('date'))} • {_display_rub(trough_row.get('portfolio_value'), precision=0)}"),
-            ]
-        )
-    else:
-        overview_fact_rows.append(["Минимум месяца", _render_nowrap("—")])
-    overview_fact_rows.extend(
-        [
-            [
-                "Крупнейшая позиция",
-                _render_nowrap(
-                    f"{summary.get('top_holding_name') or '—'} • {_display_pct(summary.get('top_holding_weight_pct'), precision=1)}"
-                ),
-            ],
-            ["Чистый денежный поток", _render_num_cell(_display_rub(summary.get("net_external_flow"), precision=0))],
-            ["Открытый результат", _render_num_cell(_display_rub(summary.get("open_pl_end_total"), precision=0))],
-        ]
-    )
-
-    overview_notes = (
-        narrative.get("cashflow_notes", [])
-        + narrative.get("quality_notes", [])
-        + narrative.get("risk_notes", [])
-        + narrative.get("warnings", [])
-    )
-    performance_fact_rows = [
-        ["Лучший день", _render_nowrap(f"{_display_date(summary.get('best_day_date'))} • {_display_rub(summary.get('best_day_pnl'), precision=0)}")],
-        ["Худший день", _render_nowrap(f"{_display_date(summary.get('worst_day_date'))} • {_display_rub(summary.get('worst_day_pnl'), precision=0)}")],
-        ["Пополнения", _render_num_cell(_display_rub(summary.get("deposits"), precision=0))],
-        ["Выводы", _render_num_cell(_display_rub(summary.get("withdrawals"), precision=0))],
-        [
-            "Крупнейшая позиция",
-            _render_nowrap(f"{summary.get('top_holding_name') or '—'} • {_display_pct(summary.get('top_holding_weight_pct'), precision=1)}"),
-        ],
+    page_two_facts = [
+        ("Лучший день", _render_nowrap(f"{_display_day(summary.get('best_day_date'))} • {_display_rub(summary.get('best_day_pnl'), precision=0)}")),
+        ("Худший день", _render_nowrap(f"{_display_day(summary.get('worst_day_date'))} • {_display_rub(summary.get('worst_day_pnl'), precision=0)}")),
+        (
+            "Пик месяца",
+            _render_nowrap(
+                f"{_display_day(peak_row.get('date'))} • {_display_rub(peak_row.get('portfolio_value'), precision=0)}"
+            ) if peak_row else _render_muted("—"),
+        ),
+        (
+            "Минимум месяца",
+            _render_nowrap(
+                f"{_display_day(trough_row.get('date'))} • {_display_rub(trough_row.get('portfolio_value'), precision=0)}"
+            ) if trough_row else _render_muted("—"),
+        ),
+        ("Положительных дней", _render_nowrap(_share_text(day_stats["positive"]["count"], classified_days_total))),
+        ("Отрицательных дней", _render_nowrap(_share_text(day_stats["negative"]["count"], classified_days_total))),
+        ("Нейтральных дней", _render_nowrap(_share_text(day_stats["neutral"]["count"], classified_days_total))),
     ]
 
     html = f"""<!doctype html>
@@ -770,12 +874,6 @@ def build_monthly_report_html(
       padding: 2mm 0;
     }}
     .page:last-child {{ page-break-after: auto; }}
-    .hero {{
-      display: grid;
-      grid-template-columns: 1.05fr 1fr;
-      gap: 12px;
-      margin-top: 12px;
-    }}
     .hero-card, .panel {{
       background: rgba(255, 255, 255, 0.78);
       border: 1px solid rgba(24, 34, 44, 0.12);
@@ -784,7 +882,7 @@ def build_monthly_report_html(
       page-break-inside: avoid;
     }}
     .hero-value {{
-      font-size: 33px;
+      font-size: 47px;
       line-height: 1;
       margin-top: 8px;
       font-family: "DejaVu Serif", Georgia, serif;
@@ -793,39 +891,41 @@ def build_monthly_report_html(
       color: #56616c;
       font-size: 9.4px;
     }}
-    .hero-facts {{
+    .hero-summary-line {{
+      margin-top: 10px;
+      color: #314252;
+      font-size: 11.1px;
+      line-height: 1.35;
+    }}
+    .fact-grid {{
       display: grid;
+      gap: 8px;
+      margin-top: 4px;
+    }}
+    .fact-grid--2 {{
       grid-template-columns: repeat(2, minmax(0, 1fr));
-      gap: 8px;
-      margin-top: 12px;
     }}
-    .hero-fact {{
-      padding: 8px 9px;
-      border-radius: 10px;
+    .fact-grid--3 {{
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+    }}
+    .fact-card {{
+      padding: 10px 11px;
+      border-radius: 11px;
       background: rgba(31, 111, 139, 0.08);
+      border: 1px solid rgba(31, 111, 139, 0.08);
+      min-height: 58px;
     }}
-    .metric-grid {{
-      display: grid;
-      grid-template-columns: repeat(4, minmax(0, 1fr));
-      gap: 8px;
-      margin-top: 12px;
-    }}
-    .metric {{
-      background: rgba(255, 255, 255, 0.78);
-      border: 1px solid rgba(24, 34, 44, 0.09);
-      border-radius: 12px;
-      padding: 9px 10px;
-    }}
-    .metric-label {{
+    .fact-label {{
       color: #6a737c;
       font-size: 8.5px;
       text-transform: uppercase;
       letter-spacing: 0.05em;
     }}
-    .metric-value {{
+    .fact-value {{
       margin-top: 5px;
-      font-size: 15px;
+      font-size: 12px;
       font-weight: 600;
+      color: #18222c;
     }}
     .two-col {{
       display: grid;
@@ -886,6 +986,11 @@ def build_monthly_report_html(
       text-align: right;
       white-space: nowrap;
     }}
+    .report-table .status-cell {{
+      text-align: center;
+      width: 32px;
+      white-space: nowrap;
+    }}
     .nowrap, .metric-inline, .num {{
       white-space: nowrap;
     }}
@@ -906,6 +1011,22 @@ def build_monthly_report_html(
       color: #65707b;
       font-size: 9.2px;
       line-height: 1.28;
+    }}
+    .status-dot {{
+      display: inline-block;
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      vertical-align: middle;
+    }}
+    .status-dot--ok {{
+      background: #2f7a4a;
+    }}
+    .status-dot--warn {{
+      background: #c47b10;
+    }}
+    .status-dot--neutral {{
+      background: #8a9198;
     }}
     ul {{
       margin: 0;
@@ -934,85 +1055,52 @@ def build_monthly_report_html(
     <div class="subtle">{escape(meta['account_friendly_name'])}</div>
     <h1>{escape(report_title)}</h1>
     <div class="subtle">Период: {_display_date(meta['period_start'])} — {_display_date(meta['period_end'])} • Сформировано: {escape(_display_timestamp(meta['generated_at_utc']))}</div>
-    <div class="hero">
-      <div class="hero-card">
-        <div class="subtle">Стоимость на конец периода</div>
-        <div class="hero-value">{escape(_display_rub(summary.get('current_value'), precision=0))}</div>
-        <div class="subtle">{escape(summary_subline)}</div>
-        <div class="hero-facts">
-          <div class="hero-fact">
-            <div class="subtle">Крупнейшая позиция</div>
-            <div>{_render_nowrap(summary.get('top_holding_name') or '—')}</div>
-          </div>
-          <div class="hero-fact">
-            <div class="subtle">Чистый поток</div>
-            <div>{_render_num_cell(_display_rub(summary.get('net_external_flow'), precision=0))}</div>
-          </div>
-        </div>
-      </div>
-      <div class="hero-card">
-        <h3>Коротко о месяце</h3>
-        {_render_bullet_list(narrative.get("executive_summary", []))}
-      </div>
-    </div>
-    <div class="metric-grid">
-      {_render_metric("Результат, ₽", _display_rub(summary.get('period_pnl_abs'), precision=0))}
-      {_render_metric("Результат, %", _display_pct(summary.get('period_pnl_pct'), precision=2))}
-      {_render_metric("TWR", _display_pct(summary.get('period_twr_pct'), precision=2))}
-      {_render_metric("Чистый поток", _display_rub(summary.get('net_external_flow'), precision=0))}
-      {_render_metric("Доходы", _display_rub(summary.get('income_net'), precision=2))}
-      {_render_metric("Комиссии", _display_rub(summary.get('commissions'), precision=2))}
-      {_render_metric("Налоги", _display_rub(summary.get('taxes'), precision=2))}
-      {_render_metric("Расхождение", _display_rub(summary.get('reconciliation_gap_abs'), precision=0))}
+    <div class="hero-card" style="margin-top: 12px;">
+      <div class="subtle">Стоимость портфеля на конец периода</div>
+      <div class="hero-value">{escape(_display_rub(summary.get('current_value'), precision=0))}</div>
+      <div class="hero-summary-line">{escape(summary_subline)}</div>
     </div>
     <div class="two-col">
       <div class="panel">
-        <h3>Опорные факты месяца</h3>
-        {_render_rows_table(["Показатель", "Значение"], overview_fact_rows)}
+        <h3>Коротко о месяце</h3>
+        {_render_bullet_list(narrative.get("executive_summary", []))}
       </div>
       <div class="panel">
-        <h3>Денежный поток и сигналы</h3>
-        {_render_bullet_list(overview_notes, empty_label="Дополнительных оговорок за месяц нет.")}
+        <h3>Факты месяца</h3>
+        {_render_fact_grid(page_one_facts, columns=2)}
       </div>
     </div>
-    <div class="footer">Детерминированный месячный отчёт. Все расчёты в документе собраны кодом.</div>
   </section>
 
   <section class="page">
     <h2>Динамика за месяц</h2>
-    {_render_image_block("Стоимость портфеля, внешние потоки и дневной результат", charts.get("performance"))}
-    <div class="two-col">
-      <div class="panel">
-        <h3>Что видно на графике</h3>
-        {_render_bullet_list(narrative.get("performance_commentary", []))}
-      </div>
-      <div class="panel">
-        <h3>Опорные точки периода</h3>
-        {_render_rows_table(["Метрика", "Значение"], performance_fact_rows)}
-      </div>
+    {_render_image_block("Стоимость портфеля и дневной результат", charts.get("performance"))}
+    <div class="panel" style="margin-top: 12px;">
+      <h3>Факты в цифрах</h3>
+      {_render_fact_grid(page_two_facts, columns=3)}
     </div>
   </section>
 
   <section class="page">
     <h2>Структура на конец месяца</h2>
     <div class="two-col">
-      {_render_image_block("Крупнейшие позиции по весу", charts.get("allocation"))}
+      {_render_image_block("Классы активов", charts.get("allocation"))}
       <div class="panel">
-        <h3>Текущий срез по таргетам</h3>
+        <h3>Отклонение от таргетов</h3>
         {_render_rows_table(
-          ["Класс", "Факт", "Цель", "Отклонение", "Статус"],
+          ["Класс", "Факт", "Цель", "Δ к цели", "Статус"],
           rebalance_rows,
           empty_label="Таргеты не настроены.",
-          column_classes=["", "numeric", "numeric", "numeric", ""],
+          column_classes=["", "numeric", "numeric", "numeric", "status-cell"],
         )}
       </div>
     </div>
     <div class="panel" style="margin-top: 14px;">
       <h3>Крупнейшие позиции</h3>
       {_render_rows_table(
-        ["Актив", "Стоимость", "Вес", "Открытый результат"],
+        ["Актив", "Стоимость", "Вес", "Изм. доли", "Нереализованный результат"],
         top_positions_rows,
-        column_classes=["", "numeric", "numeric", "numeric"],
+        column_classes=["", "numeric", "numeric", "numeric", "numeric"],
       )}
     </div>
   </section>
