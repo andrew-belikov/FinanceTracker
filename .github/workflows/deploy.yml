@@ -82,4 +82,4 @@ jobs:
         run: |
           cd "$PROJECT_DIR"
           docker compose ps
-          docker compose logs --tail=200 bot tracker
+          docker compose logs --tail=200 bot tracker reporter
