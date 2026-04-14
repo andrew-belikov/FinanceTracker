@@ -1,12 +1,18 @@
+from __future__ import annotations
+
 import random
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 
 from month_templates import MonthContext, render_month_text
+from common.text_utils import has_mojibake
 from queries import (
+    get_asset_alias_rows,
     compute_income_by_asset_net,
     compute_realized_by_asset,
+    get_dataset_operations,
     get_commissions_for_period,
+    get_instrument_eod_rows,
     get_deposits_for_period,
     get_external_cashflows_raw,
     get_income_for_period,
@@ -16,6 +22,7 @@ from queries import (
     get_max_value_before_date,
     get_net_external_flow_for_period,
     get_month_snapshots,
+    get_period_daily_snapshot_rows,
     get_period_snapshots,
     get_portfolio_timeseries_agg_by_date,
     get_positions_diff_rows,
@@ -48,10 +55,12 @@ from runtime import (
     TZ,
     WITHDRAWAL_OPERATION_TYPES,
     db_session,
+    decimal_to_str,
     fmt_decimal_rub,
     fmt_pct,
     fmt_rub,
     normalize_decimal,
+    to_iso_datetime,
     to_local_market_date,
 )
 from today_templates import TodayContext, render_today_text
@@ -817,6 +826,859 @@ def build_month_summary() -> str:
             month_text += "\n\n📦 Изменения позиций за месяц\n" + "\n".join(diff_lines)
 
     return month_text
+
+
+def _resolve_month_report_period(
+    year: int | None = None,
+    month: int | None = None,
+) -> tuple[int, int, date, date, datetime, datetime, str]:
+    today_local = datetime.now(TZ).date()
+    period_year = today_local.year if year is None else int(year)
+    period_month = today_local.month if month is None else int(month)
+
+    period_start_date = date(period_year, period_month, 1)
+    if period_month == 12:
+        calendar_month_end_date = date(period_year + 1, 1, 1) - timedelta(days=1)
+    else:
+        calendar_month_end_date = date(period_year, period_month + 1, 1) - timedelta(days=1)
+
+    if (period_year, period_month) == (today_local.year, today_local.month):
+        period_end_date = min(today_local, calendar_month_end_date)
+    else:
+        period_end_date = calendar_month_end_date
+
+    period_start_dt = datetime.combine(period_start_date, time.min)
+    period_end_exclusive = datetime.combine(period_end_date + timedelta(days=1), time.min)
+    period_label_ru = f"{MONTHS_RU.get(period_month, str(period_month))} {period_year}"
+    return (
+        period_year,
+        period_month,
+        period_start_date,
+        period_end_date,
+        period_start_dt,
+        period_end_exclusive,
+        period_label_ru,
+    )
+
+
+def _resolve_monthly_asset_identity(
+    row: dict,
+    *,
+    alias_by_instrument_uid: dict[str, dict],
+    alias_by_figi: dict[str, dict],
+) -> dict[str, str | None]:
+    instrument_uid = row.get("instrument_uid")
+    figi = row.get("figi")
+    alias_row = None
+    if instrument_uid:
+        alias_row = alias_by_instrument_uid.get(instrument_uid)
+    if alias_row is None and figi:
+        alias_row = alias_by_figi.get(figi)
+
+    asset_uid = row.get("asset_uid") or (alias_row.get("asset_uid") if alias_row is not None else None)
+    ticker = (row.get("ticker") or "").strip()
+    if not ticker and alias_row is not None:
+        ticker = (alias_row.get("ticker") or "").strip()
+    if not ticker and figi:
+        ticker = figi
+
+    name = (row.get("name") or row.get("instrument_name") or "").strip()
+    if not name and alias_row is not None:
+        name = (alias_row.get("name") or "").strip()
+    if not name:
+        name = ticker or (figi or "")
+
+    logical_asset_id = build_logical_asset_id(
+        asset_uid=asset_uid,
+        instrument_uid=instrument_uid,
+        figi=figi,
+    ) or ticker or figi or name
+
+    return {
+        "logical_asset_id": logical_asset_id,
+        "asset_uid": asset_uid,
+        "instrument_uid": instrument_uid,
+        "figi": figi,
+        "ticker": ticker,
+        "name": name,
+    }
+
+
+def _serialize_monthly_position_row(
+    row: dict,
+    *,
+    alias_by_instrument_uid: dict[str, dict],
+    alias_by_figi: dict[str, dict],
+    snapshot_id: int | None = None,
+    snapshot_date: date | None = None,
+) -> dict:
+    identity = _resolve_monthly_asset_identity(
+        row,
+        alias_by_instrument_uid=alias_by_instrument_uid,
+        alias_by_figi=alias_by_figi,
+    )
+
+    payload = {
+        **identity,
+        "instrument_type": row.get("instrument_type") or "",
+        "quantity": decimal_to_str(row.get("quantity")),
+        "currency": row.get("currency") or "",
+        "position_value": decimal_to_str(row.get("position_value")),
+        "expected_yield": decimal_to_str(row.get("expected_yield")),
+        "expected_yield_pct": decimal_to_str(row.get("expected_yield_pct")),
+        "weight_pct": decimal_to_str(row.get("weight_pct")),
+    }
+    if snapshot_id is not None:
+        payload["snapshot_id"] = snapshot_id
+    if snapshot_date is not None:
+        payload["snapshot_date"] = snapshot_date.isoformat()
+    return payload
+
+
+def _build_monthly_position_list(
+    positions_rows: list[dict],
+    *,
+    alias_by_instrument_uid: dict[str, dict],
+    alias_by_figi: dict[str, dict],
+) -> list[dict]:
+    rows = [
+        _serialize_monthly_position_row(
+            row,
+            alias_by_instrument_uid=alias_by_instrument_uid,
+            alias_by_figi=alias_by_figi,
+        )
+        for row in positions_rows
+    ]
+    rows.sort(key=lambda row: normalize_decimal(row.get("position_value")), reverse=True)
+    return rows
+
+
+def _build_monthly_position_flow_groups(
+    start_positions: list[dict],
+    end_positions: list[dict],
+    *,
+    alias_by_instrument_uid: dict[str, dict],
+    alias_by_figi: dict[str, dict],
+) -> dict[str, list[dict]]:
+    def _key(row: dict) -> str:
+        identity = _resolve_monthly_asset_identity(
+            row,
+            alias_by_instrument_uid=alias_by_instrument_uid,
+            alias_by_figi=alias_by_figi,
+        )
+        return str(identity["logical_asset_id"] or identity["ticker"] or identity["figi"] or "")
+
+    def _quantity(row: dict) -> Decimal:
+        return normalize_decimal(row.get("quantity"))
+
+    def _position_value(row: dict) -> Decimal:
+        return normalize_decimal(row.get("position_value"))
+
+    def _record(start_row, end_row):
+        source_row = end_row or start_row or {}
+        identity = _resolve_monthly_asset_identity(
+            source_row,
+            alias_by_instrument_uid=alias_by_instrument_uid,
+            alias_by_figi=alias_by_figi,
+        )
+        start_qty = _quantity(start_row) if start_row is not None else Decimal("0")
+        end_qty = _quantity(end_row) if end_row is not None else Decimal("0")
+        start_value = _position_value(start_row) if start_row is not None else Decimal("0")
+        end_value = _position_value(end_row) if end_row is not None else Decimal("0")
+        return {
+            "logical_asset_id": identity["logical_asset_id"],
+            "ticker": identity["ticker"],
+            "name": identity["name"],
+            "instrument_type": source_row.get("instrument_type") or "",
+            "start_qty": decimal_to_str(start_qty),
+            "end_qty": decimal_to_str(end_qty),
+            "delta_qty": decimal_to_str(end_qty - start_qty),
+            "start_value": decimal_to_str(start_value),
+            "end_value": decimal_to_str(end_value),
+            "delta_value": decimal_to_str(end_value - start_value),
+        }
+
+    start_map: dict[str, dict] = {}
+    end_map: dict[str, dict] = {}
+    for row in start_positions:
+        start_map[_key(row)] = row
+    for row in end_positions:
+        end_map[_key(row)] = row
+
+    grouped = {
+        "new": [],
+        "closed": [],
+        "increased": [],
+        "decreased": [],
+    }
+
+    for key in sorted(set(start_map.keys()) | set(end_map.keys())):
+        start_row = start_map.get(key)
+        end_row = end_map.get(key)
+        start_qty = _quantity(start_row) if start_row is not None else Decimal("0")
+        end_qty = _quantity(end_row) if end_row is not None else Decimal("0")
+
+        if start_qty == 0 and end_qty == 0:
+            continue
+
+        record = _record(start_row, end_row)
+        if start_qty == 0 and end_qty > 0:
+            grouped["new"].append(record)
+        elif start_qty > 0 and end_qty == 0:
+            grouped["closed"].append(record)
+        elif end_qty > start_qty:
+            grouped["increased"].append(record)
+        elif end_qty < start_qty:
+            grouped["decreased"].append(record)
+
+    for bucket in grouped.values():
+        bucket.sort(
+            key=lambda row: (
+                -normalize_decimal(row["delta_value"]).copy_abs(),
+                row["ticker"],
+                row["name"],
+            ),
+        )
+
+    return grouped
+
+
+def _build_monthly_instrument_payload(
+    eod_rows: list[dict],
+    *,
+    alias_by_instrument_uid: dict[str, dict],
+    alias_by_figi: dict[str, dict],
+) -> tuple[list[dict], dict[str, list[dict]]]:
+    grouped: dict[str, dict] = {}
+
+    for row in eod_rows:
+        snapshot_date = row.get("snapshot_date")
+        if snapshot_date is None:
+            continue
+
+        identity = _resolve_monthly_asset_identity(
+            row,
+            alias_by_instrument_uid=alias_by_instrument_uid,
+            alias_by_figi=alias_by_figi,
+        )
+        logical_asset_id = str(identity["logical_asset_id"] or identity["ticker"] or identity["figi"] or "")
+        if not logical_asset_id:
+            continue
+
+        point = {
+            "date": snapshot_date.isoformat(),
+            "snapshot_id": row.get("snapshot_id"),
+            "quantity": decimal_to_str(row.get("quantity")),
+            "position_value": decimal_to_str(row.get("position_value")),
+            "expected_yield": decimal_to_str(row.get("expected_yield")),
+            "expected_yield_pct": decimal_to_str(row.get("expected_yield_pct")),
+            "weight_pct": decimal_to_str(row.get("weight_pct")),
+        }
+
+        entry = grouped.get(logical_asset_id)
+        if entry is None:
+            entry = {
+                "logical_asset_id": logical_asset_id,
+                "asset_uid": identity["asset_uid"],
+                "instrument_uid": identity["instrument_uid"],
+                "figi": identity["figi"],
+                "ticker": identity["ticker"],
+                "name": identity["name"],
+                "instrument_type": row.get("instrument_type") or "",
+                "series": [],
+            }
+            grouped[logical_asset_id] = entry
+
+        entry["series"].append(point)
+
+    payload_rows: list[dict] = []
+    for entry in grouped.values():
+        series = sorted(entry["series"], key=lambda point: point["date"])
+        values = [normalize_decimal(point["position_value"]) for point in series if point.get("position_value") is not None]
+        if not values:
+            continue
+
+        min_index = min(range(len(series)), key=lambda idx: normalize_decimal(series[idx]["position_value"]))
+        max_index = max(range(len(series)), key=lambda idx: normalize_decimal(series[idx]["position_value"]))
+        end_index = len(series) - 1
+        min_yield_index = min(range(len(series)), key=lambda idx: normalize_decimal(series[idx]["expected_yield"]) if series[idx].get("expected_yield") is not None else Decimal("0"))
+        max_yield_index = max(range(len(series)), key=lambda idx: normalize_decimal(series[idx]["expected_yield"]) if series[idx].get("expected_yield") is not None else Decimal("0"))
+
+        min_value = normalize_decimal(series[min_index]["position_value"])
+        max_value = normalize_decimal(series[max_index]["position_value"])
+        end_value = normalize_decimal(series[end_index]["position_value"])
+
+        min_expected_yield = normalize_decimal(series[min_yield_index]["expected_yield"]) if series[min_yield_index].get("expected_yield") is not None else Decimal("0")
+        max_expected_yield = normalize_decimal(series[max_yield_index]["expected_yield"]) if series[max_yield_index].get("expected_yield") is not None else Decimal("0")
+        end_expected_yield = normalize_decimal(series[end_index]["expected_yield"]) if series[end_index].get("expected_yield") is not None else Decimal("0")
+
+        stats = {
+            "eod_min_position_value": decimal_to_str(min_value),
+            "eod_min_position_value_date": series[min_index]["date"],
+            "eod_min_expected_yield": decimal_to_str(min_expected_yield),
+            "eod_min_expected_yield_pct": decimal_to_str(series[min_yield_index]["expected_yield_pct"]) if series[min_yield_index].get("expected_yield_pct") is not None else None,
+            "eod_min_expected_yield_date": series[min_yield_index]["date"],
+            "eod_max_position_value": decimal_to_str(max_value),
+            "eod_max_position_value_date": series[max_index]["date"],
+            "eod_max_expected_yield": decimal_to_str(max_expected_yield),
+            "eod_max_expected_yield_pct": decimal_to_str(series[max_yield_index]["expected_yield_pct"]) if series[max_yield_index].get("expected_yield_pct") is not None else None,
+            "eod_max_expected_yield_date": series[max_yield_index]["date"],
+            "eod_end_position_value": decimal_to_str(end_value),
+            "eod_end_position_value_date": series[end_index]["date"],
+            "eod_end_expected_yield": decimal_to_str(end_expected_yield),
+            "eod_end_expected_yield_pct": decimal_to_str(series[end_index]["expected_yield_pct"]) if series[end_index].get("expected_yield_pct") is not None else None,
+            "eod_end_expected_yield_date": series[end_index]["date"],
+            "max_rise_abs": decimal_to_str(max_value - min_value),
+            "max_drawdown_abs": decimal_to_str(min_value - max_value),
+        }
+
+        payload_rows.append(
+            {
+                "logical_asset_id": entry["logical_asset_id"],
+                "asset_uid": entry["asset_uid"],
+                "instrument_uid": entry["instrument_uid"],
+                "figi": entry["figi"],
+                "ticker": entry["ticker"],
+                "name": entry["name"],
+                "instrument_type": entry["instrument_type"],
+                "series": series,
+                "stats": stats,
+            }
+        )
+
+    payload_rows.sort(
+        key=lambda item: normalize_decimal(item["series"][-1]["position_value"]),
+        reverse=True,
+    )
+
+    top_growth = []
+    top_drawdown = []
+    for item in payload_rows:
+        stats = item["stats"]
+        top_growth.append(
+            {
+                "logical_asset_id": item["logical_asset_id"],
+                "ticker": item["ticker"],
+                "name": item["name"],
+                "metric_kind": "growth",
+                "rise_abs": stats["max_rise_abs"],
+                "start_date": stats["eod_min_position_value_date"],
+                "end_date": stats["eod_max_position_value_date"],
+                "end_expected_yield": stats["eod_max_expected_yield"],
+                "end_expected_yield_pct": stats["eod_max_expected_yield_pct"],
+            }
+        )
+        top_drawdown.append(
+            {
+                "logical_asset_id": item["logical_asset_id"],
+                "ticker": item["ticker"],
+                "name": item["name"],
+                "metric_kind": "drawdown",
+                "drawdown_abs": stats["max_drawdown_abs"],
+                "start_date": stats["eod_max_position_value_date"],
+                "end_date": stats["eod_min_position_value_date"],
+                "end_expected_yield": stats["eod_min_expected_yield"],
+                "end_expected_yield_pct": stats["eod_min_expected_yield_pct"],
+            }
+        )
+
+    top_growth.sort(key=lambda row: normalize_decimal(row["rise_abs"]).copy_abs(), reverse=True)
+    top_drawdown.sort(key=lambda row: normalize_decimal(row["drawdown_abs"]))
+
+    return payload_rows, {"top_growth": top_growth[:10], "top_drawdown": top_drawdown[:10]}
+
+
+def build_monthly_report_payload(
+    session,
+    year: int | None = None,
+    month: int | None = None,
+) -> dict:
+    account_id = resolve_reporting_account_id(session)
+    if account_id is None:
+        raise ValueError(REPORTING_ACCOUNT_UNAVAILABLE_TEXT)
+
+    (
+        period_year,
+        period_month,
+        period_start_date,
+        period_end_date,
+        period_start_dt,
+        period_end_exclusive,
+        period_label_ru,
+    ) = _resolve_month_report_period(year, month)
+
+    alias_rows = list(get_asset_alias_rows(session))
+    alias_by_instrument_uid, alias_by_figi = build_asset_alias_lookup(alias_rows)
+
+    latest_snapshot = get_latest_snapshot_with_id(session, account_id)
+    if latest_snapshot is None:
+        raise ValueError("Пока нет снапшотов для monthly report.")
+
+    start_snap, end_snap = get_period_snapshots(
+        session,
+        account_id,
+        period_start_date,
+        period_end_exclusive.date(),
+    )
+    daily_rows = list(
+        get_period_daily_snapshot_rows(
+            session,
+            account_id,
+            period_start_date,
+            period_end_exclusive.date(),
+        )
+    )
+    if not daily_rows:
+        raise ValueError("Пока нет дневных снапшотов для monthly report.")
+
+    current_positions_raw = list(get_positions_for_snapshot(session, latest_snapshot["id"]))
+    month_start_positions_raw = list(get_positions_for_snapshot(session, start_snap["id"])) if start_snap else []
+    month_end_positions_raw = list(get_positions_for_snapshot(session, end_snap["id"])) if end_snap else []
+
+    current_positions = _build_monthly_position_list(
+        current_positions_raw,
+        alias_by_instrument_uid=alias_by_instrument_uid,
+        alias_by_figi=alias_by_figi,
+    )
+    month_start_positions = _build_monthly_position_list(
+        month_start_positions_raw,
+        alias_by_instrument_uid=alias_by_instrument_uid,
+        alias_by_figi=alias_by_figi,
+    )
+    month_end_positions = _build_monthly_position_list(
+        month_end_positions_raw,
+        alias_by_instrument_uid=alias_by_instrument_uid,
+        alias_by_figi=alias_by_figi,
+    )
+
+    operations_rows = list(
+        get_dataset_operations(
+            session,
+            account_id=account_id,
+            start_dt=period_start_dt,
+            end_dt=period_end_exclusive,
+        )
+    )
+    income_rows = list(
+        get_income_events_for_period(
+            session,
+            account_id,
+            period_start_date,
+            period_end_date,
+        )
+    )
+    eod_rows = list(
+        get_instrument_eod_rows(
+            session,
+            account_id,
+            period_start_date,
+            period_end_exclusive.date(),
+        )
+    )
+
+    operations_by_day: dict[date, dict[str, Decimal]] = {}
+    income_net_by_day: dict[date, Decimal] = {}
+    income_tax_by_day: dict[date, Decimal] = {}
+    unknown_operation_groups = 0
+    mojibake_detected_count = 0
+    operations_top_rows: list[dict] = []
+    income_payload_rows: list[dict] = []
+
+    def _day_bucket(target_date: date) -> dict[str, Decimal]:
+        bucket = operations_by_day.get(target_date)
+        if bucket is None:
+            bucket = {
+                "deposits": Decimal("0"),
+                "withdrawals": Decimal("0"),
+                "commissions": Decimal("0"),
+                "operation_taxes": Decimal("0"),
+            }
+            operations_by_day[target_date] = bucket
+        return bucket
+
+    for row in operations_rows:
+        local_date = to_local_market_date(row.get("date"))
+        operation_group = classify_operation_group(row.get("operation_type"))
+        if operation_group == "other":
+            unknown_operation_groups += 1
+
+        identity = _resolve_monthly_asset_identity(
+            row,
+            alias_by_instrument_uid=alias_by_instrument_uid,
+            alias_by_figi=alias_by_figi,
+        )
+        amount = normalize_decimal(row.get("amount"))
+        quantity = row.get("quantity")
+        description = row.get("description")
+        if local_date is not None:
+            bucket = _day_bucket(local_date)
+            if operation_group == "deposit":
+                bucket["deposits"] += amount
+            elif operation_group == "withdrawal":
+                bucket["withdrawals"] += abs(amount)
+            elif operation_group == "commission":
+                bucket["commissions"] += abs(amount)
+            elif operation_group == "income_tax":
+                bucket["operation_taxes"] += abs(amount)
+
+        if description and has_mojibake(str(description)):
+            mojibake_detected_count += 1
+
+        operations_top_rows.append(
+            {
+                "date_utc": to_iso_datetime(row.get("date")),
+                "local_date": local_date.isoformat() if local_date is not None else None,
+                "operation_type": row.get("operation_type"),
+                "operation_group": operation_group,
+                "logical_asset_id": identity["logical_asset_id"],
+                "ticker": identity["ticker"],
+                "name": identity["name"],
+                "amount": decimal_to_str(amount),
+                "quantity": decimal_to_str(quantity),
+                "description": description,
+            }
+        )
+
+    for row in income_rows:
+        event_date = row.get("event_date")
+        if event_date is None:
+            continue
+
+        identity = _resolve_monthly_asset_identity(
+            row,
+            alias_by_instrument_uid=alias_by_instrument_uid,
+            alias_by_figi=alias_by_figi,
+        )
+        net_amount = normalize_decimal(row.get("net_amount"))
+        tax_amount = normalize_decimal(row.get("tax_amount"))
+        income_net_by_day[event_date] = income_net_by_day.get(event_date, Decimal("0")) + net_amount
+        income_tax_by_day[event_date] = income_tax_by_day.get(event_date, Decimal("0")) + abs(tax_amount)
+        income_payload_rows.append(
+            {
+                "event_date": event_date.isoformat(),
+                "event_type": row.get("event_type"),
+                "logical_asset_id": identity["logical_asset_id"],
+                "figi": row.get("figi"),
+                "ticker": identity["ticker"],
+                "instrument_name": row.get("instrument_name"),
+                "gross_amount": decimal_to_str(row.get("gross_amount")),
+                "tax_amount": decimal_to_str(row.get("tax_amount")),
+                "net_amount": decimal_to_str(net_amount),
+                "net_yield_pct": decimal_to_str(row.get("net_yield_pct")),
+                "notified": row.get("notified"),
+            }
+        )
+
+    daily_rows_payload: list[dict] = []
+    twr_data = compute_twr_timeseries(session, account_id)
+    twr_by_date: dict[date, str] = {}
+    if twr_data is not None:
+        dates, _values, twr_series = twr_data
+        twr_by_date = {
+            dt: decimal_to_str(round(value * 100.0, 6))
+            for dt, value in zip(dates, twr_series)
+        }
+
+    previous_value = normalize_decimal(start_snap["total_value"]) if start_snap and start_snap.get("total_value") is not None else None
+    best_day: tuple[date, Decimal] | None = None
+    worst_day: tuple[date, Decimal] | None = None
+
+    for row in daily_rows:
+        snapshot_date = row["snapshot_date"]
+        portfolio_value = normalize_decimal(row.get("total_value"))
+        bucket = operations_by_day.get(snapshot_date, {})
+        deposits = bucket.get("deposits", Decimal("0"))
+        withdrawals = bucket.get("withdrawals", Decimal("0"))
+        commissions = bucket.get("commissions", Decimal("0"))
+        operation_taxes = bucket.get("operation_taxes", Decimal("0"))
+        income_net = income_net_by_day.get(snapshot_date, Decimal("0"))
+        income_taxes = income_tax_by_day.get(snapshot_date, Decimal("0"))
+        net_cashflow = deposits - withdrawals + income_net - commissions - operation_taxes
+        if previous_value is None:
+            day_pnl = Decimal("0")
+        else:
+            day_pnl = portfolio_value - previous_value - net_cashflow
+        previous_value = portfolio_value
+
+        if best_day is None or day_pnl > best_day[1]:
+            best_day = (snapshot_date, day_pnl)
+        if worst_day is None or day_pnl < worst_day[1]:
+            worst_day = (snapshot_date, day_pnl)
+
+        daily_rows_payload.append(
+            {
+                "date": snapshot_date.isoformat(),
+                "snapshot_id": row["id"],
+                "snapshot_at_utc": to_iso_datetime(row.get("snapshot_at")),
+                "portfolio_value": decimal_to_str(portfolio_value),
+                "expected_yield": decimal_to_str(row.get("expected_yield")),
+                "expected_yield_pct": decimal_to_str(row.get("expected_yield_pct")),
+                "deposits": decimal_to_str(deposits),
+                "withdrawals": decimal_to_str(withdrawals),
+                "income_net": decimal_to_str(income_net),
+                "commissions": decimal_to_str(commissions),
+                "operation_taxes": decimal_to_str(operation_taxes),
+                "income_taxes": decimal_to_str(income_taxes),
+                "net_cashflow": decimal_to_str(net_cashflow),
+                "day_pnl": decimal_to_str(day_pnl),
+                "twr_pct": twr_by_date.get(snapshot_date),
+            }
+        )
+
+    deposits_total = sum((bucket["deposits"] for bucket in operations_by_day.values()), Decimal("0"))
+    withdrawals_total = sum((bucket["withdrawals"] for bucket in operations_by_day.values()), Decimal("0"))
+    commissions_total = sum((bucket["commissions"] for bucket in operations_by_day.values()), Decimal("0"))
+    operation_taxes_total = sum((bucket["operation_taxes"] for bucket in operations_by_day.values()), Decimal("0"))
+    income_net_total = sum(income_net_by_day.values(), Decimal("0"))
+    income_tax_total = sum(income_tax_by_day.values(), Decimal("0"))
+    taxes_total = operation_taxes_total + income_tax_total
+    net_external_flow = deposits_total - withdrawals_total
+    period_net_cashflow = net_external_flow + income_net_total - commissions_total - operation_taxes_total
+
+    start_value = normalize_decimal(start_snap["total_value"]) if start_snap and start_snap.get("total_value") is not None else normalize_decimal(daily_rows_payload[0]["portfolio_value"])
+    end_value = normalize_decimal(end_snap["total_value"]) if end_snap and end_snap.get("total_value") is not None else normalize_decimal(daily_rows_payload[-1]["portfolio_value"])
+    current_value = normalize_decimal(latest_snapshot.get("total_value"))
+    period_pnl_abs = end_value - start_value - period_net_cashflow
+    period_pnl_pct = (period_pnl_abs / start_value * Decimal("100")) if start_value != 0 else None
+
+    twr_period_value = twr_by_date.get(daily_rows[-1]["snapshot_date"])
+    if twr_period_value is None:
+        twr_period_value = twr_by_date.get(period_end_date)
+
+    year_start_dt = datetime(period_year, 1, 1)
+    deposits_ytd = get_deposits_for_period(
+        session,
+        account_id=account_id,
+        start_dt=year_start_dt,
+        end_dt=period_end_exclusive,
+    )
+    plan_annual_contrib = Decimal(str(PLAN_ANNUAL_CONTRIB_RUB))
+    plan_progress_pct = (normalize_decimal(deposits_ytd) / plan_annual_contrib * Decimal("100")) if plan_annual_contrib > 0 else None
+    days_in_year = (date(period_year + 1, 1, 1) - date(period_year, 1, 1)).days
+    days_passed = (period_end_date - date(period_year, 1, 1)).days + 1
+    target_to_date = (plan_annual_contrib * Decimal(days_passed) / Decimal(days_in_year)) if days_in_year > 0 else None
+
+    positions_value_sum = sum((normalize_decimal(row.get("position_value")) for row in current_positions_raw), Decimal("0"))
+    current_positions_sorted = current_positions
+    top_holding = current_positions_sorted[0] if current_positions_sorted else None
+    reconciliation_rows, _positions_value_sum_check, reconciliation_gap_abs = build_reconciliation_by_asset_type(
+        latest_snapshot,
+        current_positions_raw,
+    )
+    realized_by_asset_rows, realized_total = compute_realized_by_asset(
+        session,
+        account_id,
+        period_start_dt,
+        period_end_exclusive,
+    )
+    income_by_asset_rows, income_total_net = compute_income_by_asset_net(
+        session,
+        account_id,
+        period_start_dt,
+        period_end_exclusive,
+    )
+    unrealized_total = get_unrealized_at_period_end(session, account_id, period_end_exclusive)
+
+    def _map_asset_rows(rows: list[dict], amount_key: str) -> list[dict]:
+        payload_rows: list[dict] = []
+        for row in rows:
+            identity = _resolve_monthly_asset_identity(
+                row,
+                alias_by_instrument_uid=alias_by_instrument_uid,
+                alias_by_figi=alias_by_figi,
+            )
+            payload_rows.append(
+                {
+                    "logical_asset_id": identity["logical_asset_id"],
+                    "figi": row.get("figi"),
+                    "ticker": identity["ticker"],
+                    "name": identity["name"],
+                    amount_key: decimal_to_str(row.get("amount")),
+                }
+            )
+        return payload_rows
+
+    realized_payload_rows = _map_asset_rows(realized_by_asset_rows, "amount")
+    income_payload_rows_by_asset = []
+    for row in income_by_asset_rows:
+        identity = _resolve_monthly_asset_identity(
+            row,
+            alias_by_instrument_uid=alias_by_instrument_uid,
+            alias_by_figi=alias_by_figi,
+        )
+        income_payload_rows_by_asset.append(
+            {
+                "logical_asset_id": identity["logical_asset_id"],
+                "figi": row.get("figi"),
+                "ticker": identity["ticker"],
+                "name": identity["name"],
+                "amount": decimal_to_str(row.get("amount")),
+                "income_kind": "income_net",
+            }
+        )
+
+    open_pl_end_rows: list[dict] = []
+    open_pl_total = sum((normalize_decimal(row.get("expected_yield")) for row in month_end_positions_raw), Decimal("0"))
+    for row in month_end_positions:
+        amount = normalize_decimal(row.get("expected_yield"))
+        identity = _resolve_monthly_asset_identity(
+            row,
+            alias_by_instrument_uid=alias_by_instrument_uid,
+            alias_by_figi=alias_by_figi,
+        )
+        amount_pct = (amount / open_pl_total * Decimal("100")) if open_pl_total != 0 else Decimal("0")
+        open_pl_end_rows.append(
+            {
+                "logical_asset_id": identity["logical_asset_id"],
+                "ticker": identity["ticker"],
+                "name": identity["name"],
+                "amount": decimal_to_str(amount),
+                "amount_pct": decimal_to_str(amount_pct),
+            }
+        )
+
+    instrument_eod_rows, instrument_movers = _build_monthly_instrument_payload(
+        eod_rows,
+        alias_by_instrument_uid=alias_by_instrument_uid,
+        alias_by_figi=alias_by_figi,
+    )
+
+    operations_top_rows.sort(
+        key=lambda row: (
+            {
+                "deposit": 0,
+                "withdrawal": 1,
+                "sell": 2,
+                "buy": 3,
+                "commission": 4,
+                "income_tax": 5,
+                "dividend": 6,
+                "coupon": 7,
+                "other": 8,
+            }.get(row["operation_group"], 8),
+            -normalize_decimal(row["amount"]).copy_abs(),
+        ),
+    )
+
+    monthly_targets = get_rebalance_targets(session, account_id)
+    rebalance_snapshot = get_latest_rebalance_snapshot(session, account_id)
+    rebalance_rows = []
+    if monthly_targets:
+        rebalance_plan = compute_rebalance_plan(rebalance_snapshot["class_values"], monthly_targets)
+        rebalance_rows = [
+            {
+                "asset_class": row["asset_class"],
+                "label": row["label"],
+                "current_value": decimal_to_str(row["current_value"]),
+                "current_pct": decimal_to_str(row["current_pct"]),
+                "target_pct": decimal_to_str(row["target_pct"]),
+                "delta_pct": decimal_to_str(row["delta_pct"]),
+                "target_value": decimal_to_str(row["target_value"]),
+                "delta_value": decimal_to_str(row["delta_value"]),
+                "status": row["status"],
+            }
+            for row in rebalance_plan["rows"]
+        ]
+
+    has_full_history_from_zero = start_value == 0
+    positions_missing_labels = sum(1 for row in current_positions_raw if not (row.get("ticker") or row.get("name")))
+
+    payload = {
+        "schema_version": "monthly_report_payload.v1",
+        "meta": {
+            "report_kind": "monthly_review",
+            "account_id": account_id,
+            "account_friendly_name": ACCOUNT_FRIENDLY_NAME,
+            "timezone": TZ.key,
+            "currency": latest_snapshot.get("currency"),
+            "period_year": period_year,
+            "period_month": period_month,
+            "period_label_ru": period_label_ru,
+            "period_start": period_start_date.isoformat(),
+            "period_end": period_end_date.isoformat(),
+            "generated_at_utc": datetime.now(timezone.utc).isoformat(),
+            "has_ai_narrative": False,
+            "data_schema_version": 1,
+            "source_snapshot_start_id": start_snap["id"] if start_snap else None,
+            "source_snapshot_end_id": end_snap["id"] if end_snap else None,
+            "source_snapshot_count": len(daily_rows),
+        },
+        "summary_metrics": {
+            "start_value": decimal_to_str(start_value),
+            "end_value": decimal_to_str(end_value),
+            "current_value": decimal_to_str(current_value),
+            "period_pnl_abs": decimal_to_str(period_pnl_abs),
+            "period_pnl_pct": decimal_to_str(period_pnl_pct) if period_pnl_pct is not None else None,
+            "period_twr_pct": twr_period_value,
+            "net_external_flow": decimal_to_str(net_external_flow),
+            "deposits": decimal_to_str(deposits_total),
+            "withdrawals": decimal_to_str(withdrawals_total),
+            "income_net": decimal_to_str(income_net_total),
+            "coupon_net": decimal_to_str(sum((normalize_decimal(row.get("net_amount")) for row in income_rows if row.get("event_type") == "coupon"), Decimal("0"))),
+            "dividend_net": decimal_to_str(sum((normalize_decimal(row.get("net_amount")) for row in income_rows if row.get("event_type") == "dividend"), Decimal("0"))),
+            "commissions": decimal_to_str(commissions_total),
+            "taxes": decimal_to_str(taxes_total),
+            "deposits_ytd": decimal_to_str(deposits_ytd),
+            "plan_annual_contrib": decimal_to_str(plan_annual_contrib),
+            "plan_progress_pct": decimal_to_str(plan_progress_pct) if plan_progress_pct is not None else None,
+            "target_to_date": decimal_to_str(target_to_date) if target_to_date is not None else None,
+            "reconciliation_gap_abs": decimal_to_str(reconciliation_gap_abs),
+            "positions_value_sum": decimal_to_str(positions_value_sum),
+            "top_holding_name": top_holding["name"] if top_holding else None,
+            "top_holding_value": top_holding["position_value"] if top_holding else None,
+            "top_holding_weight_pct": top_holding["weight_pct"] if top_holding else None,
+            "best_day_date": best_day[0].isoformat() if best_day else None,
+            "best_day_pnl": decimal_to_str(best_day[1]) if best_day else None,
+            "worst_day_date": worst_day[0].isoformat() if worst_day else None,
+            "worst_day_pnl": decimal_to_str(worst_day[1]) if worst_day else None,
+            "income_events_count": len(income_payload_rows),
+            "open_pl_end_total": decimal_to_str(unrealized_total),
+        },
+        "timeseries_daily": daily_rows_payload,
+        "positions_current": current_positions,
+        "positions_month_start": month_start_positions,
+        "positions_month_end": month_end_positions,
+        "position_flow_groups": _build_monthly_position_flow_groups(
+            month_start_positions_raw,
+            month_end_positions_raw,
+            alias_by_instrument_uid=alias_by_instrument_uid,
+            alias_by_figi=alias_by_figi,
+        ),
+        "instrument_eod_timeseries": instrument_eod_rows,
+        "instrument_movers": instrument_movers,
+        "realized_by_asset": realized_payload_rows,
+        "income_by_asset": income_payload_rows_by_asset,
+        "open_pl_end": open_pl_end_rows,
+        "operations_top": operations_top_rows[:20],
+        "income_events": income_payload_rows,
+        "reconciliation_by_asset_type": [
+            {
+                "instrument_type": row["asset_type"],
+                "positions_value_sum": decimal_to_str(row["positions_sum"]),
+                "snapshot_total": decimal_to_str(row["snapshot_total"]),
+                "delta_abs": decimal_to_str(row["gap_abs"]),
+            }
+            for row in reconciliation_rows
+        ],
+        "data_quality": {
+            "unknown_operation_group_count": unknown_operation_groups,
+            "mojibake_detected_count": mojibake_detected_count,
+            "positions_missing_label_count": positions_missing_labels,
+            "has_full_history_from_zero": has_full_history_from_zero,
+            "income_events_available": True,
+            "asset_alias_rows_count": len(alias_rows),
+            "has_rebalance_targets": bool(monthly_targets),
+        },
+        "rebalance_snapshot": {
+            "available": bool(monthly_targets),
+            "snapshot_date": rebalance_snapshot["snapshot_date"].isoformat() if rebalance_snapshot["snapshot_date"] is not None else None,
+            "total_portfolio_value": decimal_to_str(rebalance_snapshot["total_portfolio_value"]),
+            "rebalanceable_base": decimal_to_str(sum(rebalance_snapshot["class_values"].values(), Decimal("0"))),
+            "rows": rebalance_rows,
+        },
+    }
+
+    return payload
 
 
 def _instrument_type_to_group(instr_type: str | None) -> str:
