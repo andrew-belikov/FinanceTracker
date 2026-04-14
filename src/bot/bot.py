@@ -6,6 +6,7 @@ Telegram-бот для проекта iis_tracker.
     /today      — сводка по портфелю "Семейный капитал" на сегодня
     /week       — сводка по текущей неделе
     /month      — отчёт по текущему месяцу
+    /monthpdf   — PDF-отчёт по текущему месяцу
     /year       — отчёт за год (YTD или календарный)
     /dataset    — архив json+csv+md для AI-анализа
     /structure  — текущая структура портфеля
@@ -42,6 +43,7 @@ from handlers import (
     cmd_history,
     cmd_invest,
     cmd_month,
+    cmd_monthpdf,
     cmd_rebalance,
     cmd_start,
     cmd_structure,
@@ -99,6 +101,7 @@ COMMAND_HANDLERS = (
     ("today", cmd_today),
     ("week", cmd_week),
     ("month", cmd_month),
+    ("monthpdf", cmd_monthpdf),
     ("year", cmd_year),
     ("dataset", cmd_dataset),
     ("structure", cmd_structure),
