@@ -226,6 +226,7 @@ OLLAMA_BASE_URL=http://ollama:11434
 - `OLLAMA_KEEP_ALIVE=10m`
 - `OLLAMA_NUM_PARALLEL=1`
 - `OLLAMA_MAX_LOADED_MODELS=1`
+- `OLLAMA_MAX_INPUT_CHARS=60000` как внутренний guard на размер `monthly_ai_input`
 
 А в `api/tags` видна только одна модель:
 
@@ -903,6 +904,7 @@ OLLAMA_BASE_URL=http://ollama:11434
 3. Сократить `mover_facts`.
 4. Убрать вторичные explanatory notes.
 5. Никогда не выкидывать `overview_facts`, `quality_facts`, `risk`-сигналы.
+6. Если после trimming input всё ещё не помещается, переходить на deterministic fallback narrative.
 
 ## 10. Какой ответ нужен от локальной модели
 
@@ -1179,7 +1181,7 @@ OLLAMA_BASE_URL=http://ollama:11434
 - выполнить schema validation;
 - выполнить semantic validation;
 - при неудаче сделать одну repair-attempt;
-- затем либо принять narrative, либо включить fallback.
+- затем либо принять narrative, либо включить hard fallback narrative.
 
 На `homeserver` этот шаг должен использовать сетевой маршрут:
 
@@ -1301,7 +1303,8 @@ PDF обязан собираться, если:
 Главное требование:
 
 - fallback narrative должен быть сухим, но корректным;
-- LLM улучшает читаемость, но не нужен для работоспособности.
+- LLM улучшает читаемость, но не нужен для работоспособности;
+- если AI input не помещается в лимит или ответ модели невалиден, fallback включается автоматически и без ручного вмешательства.
 
 ## 15. Логирование и observability
 

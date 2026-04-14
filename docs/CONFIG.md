@@ -50,6 +50,7 @@
 - `OLLAMA_TIMEOUT_SECONDS` — таймаут обращения к `Ollama`.
 - `OLLAMA_KEEP_ALIVE` — желаемое время удержания модели в памяти.
 - `OLLAMA_NUM_CTX` — желаемый размер context window для prompt.
+- `OLLAMA_MAX_INPUT_CHARS` — жёсткий лимит на размер `monthly_ai_input` перед обрезкой и fallback.
 - `REPORT_PDF_ENGINE` — backend генерации PDF. Для текущего monthly PDF используется `weasyprint`.
 - `REPORT_DEBUG_SAVE_HTML` — сохранять промежуточный HTML в debug-режиме (`true/false`).
 - `REPORT_DEBUG_SAVE_PAYLOAD` — сохранять render payload в debug-режиме (`true/false`).
@@ -76,7 +77,7 @@
 ## Reporter runtime
 
 - `reporter` — отдельный внутренний сервис для monthly PDF pipeline.
-- В PR1 он отдаёт `GET /healthz` и каркас `POST /reports/monthly/pdf`, который пока возвращает `501 Not Implemented`.
+- В текущей реализации `reporter` собирает monthly PDF с AI-narrative поверх детерминированных данных и уходит в жёсткий fallback, если `Ollama` недоступна или ответ невалиден.
 - Сервис слушает только внутри Docker-сети и не публикует host ports.
 - На `homeserver` сервис дополнительно подключается к внешней сети `localllm_localllm`, чтобы позже ходить к локальной `Ollama` по имени `ollama`.
 - В PR1 `reporter` использует тот же Python image и тот же flat `src/bot` layout, что и `bot`, чтобы не раздувать инфраструктуру до появления реальной PDF-логики.
