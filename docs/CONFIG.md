@@ -60,6 +60,24 @@
 - `xray-client` проверяет не только локальный порт, но и outbound-маршрут через `XRAY_HEALTHCHECK_URL`; в compose по умолчанию используется `https://api.ipify.org`.
 - `tracker` и `db` не получают proxy env и продолжают работать напрямую.
 
+## PDF-отчеты / Ollama
+
+Отдельный сервис `reporter` собирает PDF-отчеты и AI-нарратив. Он читает БД напрямую и подключается к локальной Ollama по внешней Docker-сети `localllm_localllm`.
+Изнутри контейнера `reporter` нужно использовать `OLLAMA_BASE_URL=http://ollama:11434`; `localhost` внутри контейнера не указывает на Ollama.
+
+- `OLLAMA_ENABLED` — включает AI-слой в `reporter` (`true/false`). Если `false`, отчет должен собираться на детерминированном fallback-тексте.
+- `OLLAMA_BASE_URL` — базовый URL Ollama. Для `homeserver` и внешней сети по умолчанию: `http://ollama:11434`.
+- `OLLAMA_MODEL` — модель Ollama для narrative-слоя.
+- `OLLAMA_TIMEOUT_SECONDS` — timeout HTTP-запроса к Ollama.
+- `OLLAMA_KEEP_ALIVE` — как долго Ollama держит модель в памяти после запроса.
+- `OLLAMA_NUM_CTX` — размер контекстного окна, если сервис передает его в запросе.
+- `REPORT_PDF_ENGINE` — backend для сборки PDF (`weasyprint` в v1).
+- `REPORT_TMP_DIR` — рабочая директория для промежуточных HTML/PDF-артефактов.
+- `REPORT_DEBUG_SAVE_HTML` — сохранять промежуточный HTML рядом с PDF (`true/false`).
+- `REPORT_DEBUG_SAVE_PAYLOAD` — сохранять JSON payload отчета (`true/false`).
+
+Если `reporter` запускается в той же среде, где живет Ollama compose-проект, внешний network `localllm_localllm` должен быть создан заранее и доступен Docker'у. На `homeserver` он уже используется для доступа к `http://ollama:11434`.
+
 Быстрая проверка:
 
 ```bash

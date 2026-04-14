@@ -1,0 +1,38 @@
+FROM python:3.12-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    DEBIAN_FRONTEND=noninteractive
+
+# Runtime deps for charts + HTML->PDF rendering.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    tzdata \
+    ca-certificates \
+    libfreetype6 \
+    libpng16-16 \
+    libjpeg62-turbo \
+    libcairo2 \
+    libpango-1.0-0 \
+    libgdk-pixbuf-2.0-0 \
+    libharfbuzz0b \
+    libfribidi0 \
+    libxml2 \
+    libxslt1.1 \
+    fontconfig \
+    shared-mime-info \
+    fonts-dejavu-core \
+  && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Python deps for the PDF/reporting stack.
+COPY requirements/reporter.txt ./requirements.txt
+RUN pip install -r requirements.txt
+
+# Shared helpers and app modules stay available for future reporter entrypoints.
+COPY src/common/ ./common/
+COPY src/bot/ ./
+
+# Temporary skeleton command: the runtime gets fleshed out in the next PRs.
+CMD ["sleep", "infinity"]

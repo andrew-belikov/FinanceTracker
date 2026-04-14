@@ -95,7 +95,47 @@ services:
       BOT_PROXY_NO_PROXY: localhost,127.0.0.1,db,tracker,xray-client
     restart: unless-stopped
 
+  reporter:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.reporter
+    image: financetracker-reporter
+    container_name: financetracker-reporter-1
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      APP_ENV: ${APP_ENV:-dev}
+      APP_SERVICE: ${APP_SERVICE_REPORTER:-iis_tracker_reporter}
+      TZ: ${TIMEZONE:-Europe/Moscow}
+      DB_HOST: db
+      DB_PORT: "5432"
+      DB_NAME: ${POSTGRES_DB}
+      DB_USER: ${POSTGRES_USER}
+      DB_PASSWORD: ${POSTGRES_PASSWORD}
+      OLLAMA_ENABLED: ${OLLAMA_ENABLED:-true}
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://ollama:11434}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen2.5:1.5b}
+      OLLAMA_TIMEOUT_SECONDS: ${OLLAMA_TIMEOUT_SECONDS:-120}
+      OLLAMA_KEEP_ALIVE: ${OLLAMA_KEEP_ALIVE:-10m}
+      OLLAMA_NUM_CTX: ${OLLAMA_NUM_CTX:-8192}
+      REPORT_PDF_ENGINE: ${REPORT_PDF_ENGINE:-weasyprint}
+      REPORT_TMP_DIR: ${REPORT_TMP_DIR:-/tmp/finance-report}
+      REPORT_DEBUG_SAVE_HTML: ${REPORT_DEBUG_SAVE_HTML:-false}
+      REPORT_DEBUG_SAVE_PAYLOAD: ${REPORT_DEBUG_SAVE_PAYLOAD:-false}
+    networks:
+      - default
+      - localllm_localllm
+    restart: unless-stopped
+
 volumes:
   fintracker-db:
     external: true
     name: financetracker_fintracker-db
+
+networks:
+  localllm_localllm:
+    external: true
+    name: localllm_localllm
