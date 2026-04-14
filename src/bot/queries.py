@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 
@@ -428,6 +430,38 @@ def get_latest_snapshot_with_id(session, account_id: str):
     return row
 
 
+def get_latest_snapshot_with_totals_before_date(session, account_id: str, to_date: date):
+    row = (
+        session.execute(
+            text(
+                """
+        SELECT
+            id,
+            account_id,
+            snapshot_date,
+            snapshot_at,
+            total_value,
+            currency,
+            total_shares,
+            total_bonds,
+            total_etf,
+            total_currencies,
+            total_futures
+        FROM portfolio_snapshots
+        WHERE account_id = :account_id
+          AND snapshot_date < :to_date
+        ORDER BY snapshot_date DESC, snapshot_at DESC
+        LIMIT 1
+        """
+            ),
+            {"account_id": account_id, "to_date": to_date},
+        )
+        .mappings()
+        .first()
+    )
+    return row
+
+
 def get_dataset_bounds(session, account_id: str):
     row = (
         session.execute(
@@ -482,6 +516,53 @@ def get_daily_snapshot_rows(session, account_id: str):
                 """
             ),
             {"account_id": account_id},
+        )
+        .mappings()
+        .all()
+    )
+    return rows
+
+
+def get_period_daily_snapshot_rows(session, account_id: str, start_date: date, end_date_exclusive: date):
+    rows = (
+        session.execute(
+            text(
+                """
+                SELECT
+                    id,
+                    snapshot_date,
+                    snapshot_at,
+                    currency,
+                    total_value,
+                    expected_yield,
+                    expected_yield_pct
+                FROM (
+                    SELECT
+                        id,
+                        snapshot_date,
+                        snapshot_at,
+                        currency,
+                        total_value,
+                        expected_yield,
+                        expected_yield_pct,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY snapshot_date
+                            ORDER BY snapshot_at DESC, id DESC
+                        ) AS rn
+                    FROM portfolio_snapshots
+                    WHERE account_id = :account_id
+                      AND snapshot_date >= :start_date
+                      AND snapshot_date < :end_date_exclusive
+                ) daily
+                WHERE rn = 1
+                ORDER BY snapshot_date ASC
+                """
+            ),
+            {
+                "account_id": account_id,
+                "start_date": start_date,
+                "end_date_exclusive": end_date_exclusive,
+            },
         )
         .mappings()
         .all()
@@ -547,6 +628,101 @@ def get_positions_for_snapshot(session, snapshot_id: int):
             .mappings()
             .all()
         )
+    return rows
+
+
+def get_instrument_eod_rows(
+    session,
+    account_id: str,
+    start_date: date,
+    end_date_exclusive: date,
+):
+    query = """
+        WITH daily_snapshots AS (
+            SELECT
+                id,
+                snapshot_date,
+                snapshot_at,
+                ROW_NUMBER() OVER (
+                    PARTITION BY snapshot_date
+                    ORDER BY snapshot_at DESC, id DESC
+                ) AS rn
+            FROM portfolio_snapshots
+            WHERE account_id = :account_id
+              AND snapshot_date >= :start_date
+              AND snapshot_date < :end_date_exclusive
+        )
+        SELECT
+            ds.id AS snapshot_id,
+            ds.snapshot_date,
+            ds.snapshot_at,
+            pp.figi,
+            COALESCE(pp.ticker, '') AS ticker,
+            COALESCE(pp.name, '') AS name,
+            pp.instrument_uid,
+            pp.position_uid,
+            pp.asset_uid,
+            pp.instrument_type,
+            pp.quantity,
+            pp.currency,
+            pp.position_value,
+            pp.expected_yield,
+            pp.expected_yield_pct,
+            pp.weight_pct
+        FROM daily_snapshots ds
+        JOIN portfolio_positions pp ON pp.snapshot_id = ds.id
+        WHERE ds.rn = 1
+        ORDER BY ds.snapshot_date ASC, pp.position_value DESC, COALESCE(pp.figi, '') ASC
+    """
+    fallback_query = """
+        WITH daily_snapshots AS (
+            SELECT
+                id,
+                snapshot_date,
+                snapshot_at,
+                ROW_NUMBER() OVER (
+                    PARTITION BY snapshot_date
+                    ORDER BY snapshot_at DESC, id DESC
+                ) AS rn
+            FROM portfolio_snapshots
+            WHERE account_id = :account_id
+              AND snapshot_date >= :start_date
+              AND snapshot_date < :end_date_exclusive
+        )
+        SELECT
+            ds.id AS snapshot_id,
+            ds.snapshot_date,
+            ds.snapshot_at,
+            pp.figi,
+            COALESCE(pp.ticker, '') AS ticker,
+            COALESCE(pp.name, '') AS name,
+            NULL AS instrument_uid,
+            NULL AS position_uid,
+            NULL AS asset_uid,
+            pp.instrument_type,
+            pp.quantity,
+            pp.currency,
+            pp.position_value,
+            pp.expected_yield,
+            pp.expected_yield_pct,
+            pp.weight_pct
+        FROM daily_snapshots ds
+        JOIN portfolio_positions pp ON pp.snapshot_id = ds.id
+        WHERE ds.rn = 1
+        ORDER BY ds.snapshot_date ASC, pp.position_value DESC, COALESCE(pp.figi, '') ASC
+    """
+    params = {
+        "account_id": account_id,
+        "start_date": start_date,
+        "end_date_exclusive": end_date_exclusive,
+    }
+    try:
+        rows = session.execute(text(query), params).mappings().all()
+    except Exception as exc:
+        if not _is_undefined_table_error(exc, "portfolio_positions") and "column" not in str(exc).lower():
+            raise
+        session.rollback()
+        rows = session.execute(text(fallback_query), params).mappings().all()
     return rows
 
 
