@@ -115,16 +115,27 @@ services:
       DB_NAME: ${POSTGRES_DB}
       DB_USER: ${POSTGRES_USER}
       DB_PASSWORD: ${POSTGRES_PASSWORD}
-      OLLAMA_ENABLED: ${OLLAMA_ENABLED:-true}
-      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://ollama:11434}
-      OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen2.5:1.5b}
-      OLLAMA_TIMEOUT_SECONDS: ${OLLAMA_TIMEOUT_SECONDS:-120}
-      OLLAMA_KEEP_ALIVE: ${OLLAMA_KEEP_ALIVE:-10m}
-      OLLAMA_NUM_CTX: ${OLLAMA_NUM_CTX:-8192}
-      REPORT_PDF_ENGINE: ${REPORT_PDF_ENGINE:-weasyprint}
-      REPORT_TMP_DIR: ${REPORT_TMP_DIR:-/tmp/finance-report}
+      REPORTER_HOST: 0.0.0.0
+      REPORTER_PORT: ${REPORTER_PORT:-8088}
+      REPORTER_MAX_BODY_BYTES: ${REPORTER_MAX_BODY_BYTES:-65536}
+      REPORTER_INTERNAL_URL: ${REPORTER_INTERNAL_URL:-http://reporter:8088}
+      REPORT_PDF_ENGINE: ${REPORT_PDF_ENGINE:-placeholder}
       REPORT_DEBUG_SAVE_HTML: ${REPORT_DEBUG_SAVE_HTML:-false}
       REPORT_DEBUG_SAVE_PAYLOAD: ${REPORT_DEBUG_SAVE_PAYLOAD:-false}
+      OLLAMA_ENABLED: ${OLLAMA_ENABLED:-false}
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://ollama:11434}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen2.5:1.5b}
+      OLLAMA_TIMEOUT_SECONDS: ${OLLAMA_TIMEOUT_SECONDS:-60}
+      OLLAMA_KEEP_ALIVE: ${OLLAMA_KEEP_ALIVE:-10m}
+      OLLAMA_NUM_CTX: ${OLLAMA_NUM_CTX:-8192}
+    expose:
+      - "${REPORTER_PORT:-8088}"
+    healthcheck:
+      test: ["CMD", "python", "-u", "report_entrypoint.py", "--healthcheck"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 5s
     networks:
       - default
       - localllm_localllm

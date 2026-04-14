@@ -30,9 +30,7 @@ WORKDIR /app
 COPY requirements/reporter.txt ./requirements.txt
 RUN pip install -r requirements.txt
 
-# Shared helpers and app modules stay available for future reporter entrypoints.
 COPY src/common/ ./common/
 COPY src/bot/ ./
 
-# Temporary skeleton command: the runtime gets fleshed out in the next PRs.
-CMD ["sleep", "infinity"]
+CMD ["python", "-u", "report_entrypoint.py"]

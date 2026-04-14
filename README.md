@@ -41,7 +41,7 @@
 
 - `tracker` — сервис, который опрашивает Invest API и пишет снапшоты в БД.
 - `bot` — Telegram‑бот, который читает данные из БД, хранит таргеты аллокации и отправляет отчёты.
-- `reporter` — отдельный сервис для PDF/AI-отчётов; он читает БД и ходит в Ollama через внешний Docker network.
+- `reporter` — отдельный внутренний HTTP‑сервис для PDF pipeline; в PR1 отдаёт `/healthz` и stub `POST /reports/monthly/pdf`.
 - `db` — Postgres.
 
 ```
@@ -92,7 +92,11 @@ docker compose up -d --build
 docker compose ps
 docker compose logs --tail=200 bot
 docker compose logs --tail=200 tracker
+docker compose logs --tail=200 reporter
 ```
+
+Если вы используете monthly PDF reporter на сервере с отдельным LocalLLM compose-стеком, перед запуском убедитесь, что внешняя сеть `localllm_localllm` существует.
+На `homeserver` её создаёт и использует проект `LocalLLM`.
 
 ### Опциональный outbound proxy только для `bot`
 
@@ -202,7 +206,7 @@ docker compose logs --tail=200 bot
   - `docker compose config > /dev/null`
   - `docker compose up -d --build --force-recreate --remove-orphans`
   - `docker compose ps`
-  - `docker compose logs --tail=200 bot tracker`
+  - `docker compose logs --tail=200 bot tracker reporter`
 - Ручной запуск через `workflow_dispatch` оставлен как fallback:
   - `mode=smoke` — безопасная проверка runner, git checkout и `docker compose ps` без перезапуска контейнеров;
   - `mode=deploy` — ручной повтор обычного deploy-сценария.
