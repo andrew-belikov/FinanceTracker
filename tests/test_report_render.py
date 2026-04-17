@@ -81,9 +81,10 @@ class ReportRenderTests(unittest.TestCase):
         charts = report_render.build_monthly_report_charts(payload)
 
         html = report_render.build_monthly_report_html(payload, charts=charts)
-        pages = html.split('<section class="page">')[1:]
+        page_count = html.count('<section class="page">') + html.count('<section class="page page--cover">')
+        pages = [segment for segment in html.split("<section") if 'class="page' in segment]
 
-        self.assertGreaterEqual(html.count('<section class="page">'), 5)
+        self.assertGreaterEqual(page_count, 5)
         self.assertIn("Динамика за месяц", html)
         self.assertIn("Структура на конец месяца", html)
         self.assertIn("Инструменты за месяц", html)
