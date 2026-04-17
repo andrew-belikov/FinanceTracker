@@ -197,16 +197,29 @@ def annotate_point(
     x_offset: int,
     y_offset: int,
     marker_size: int = 34,
+    marker_edge_color: str = "white",
+    bbox_edge_color: str | None = None,
+    show_arrow: bool = False,
 ):
     ax.scatter(
         [x_value],
         [y_value],
         color=color,
         s=marker_size,
-        edgecolors="white",
+        edgecolors=marker_edge_color,
         linewidths=0.9,
         zorder=5,
     )
+    arrowprops = None
+    if show_arrow:
+        arrowprops = {
+            "arrowstyle": "-",
+            "color": color,
+            "lw": 1.0,
+            "shrinkA": 6,
+            "shrinkB": 6,
+            "alpha": 0.85,
+        }
     ax.annotate(
         label,
         xy=(x_value, y_value),
@@ -219,10 +232,11 @@ def annotate_point(
         bbox={
             "boxstyle": "round,pad=0.3",
             "fc": "white",
-            "ec": color,
-            "lw": 1,
-            "alpha": 0.96,
+            "ec": bbox_edge_color or color,
+            "lw": 0.9,
+            "alpha": 0.97,
         },
+        arrowprops=arrowprops,
         clip_on=False,
         zorder=6,
     )
@@ -395,9 +409,11 @@ def build_history_chart(path: str) -> str | None:
     peak_value = max(values)
     peak_index = max(idx for idx, value in enumerate(values) if value == peak_value)
     peak_date = week_dates[peak_index]
-    peak_x_offset = -14 if peak_index >= len(week_dates) // 2 else 14
+    value_span = peak_value - min(values)
+    peak_x_offset = -16 if peak_index >= len(week_dates) // 2 else 16
+    peak_y_offset = -18 if value_span > 0 and peak_value >= (min(values) + value_span * 0.7) else 18
     peak_label = (
-        f"Максимум {format_day_month_label(peak_date, include_year=True).replace(chr(10), ' ')}\n"
+        f"{format_day_month_label(peak_date, include_year=True).replace(chr(10), ' ')}\n"
         f"{fmt_rub(peak_value)}"
     )
     annotate_point(
@@ -407,8 +423,10 @@ def build_history_chart(path: str) -> str | None:
         peak_label,
         CHART_COLORS["peak"],
         x_offset=peak_x_offset,
-        y_offset=-18,
+        y_offset=peak_y_offset,
         marker_size=42,
+        bbox_edge_color=CHART_COLORS["spine"],
+        show_arrow=True,
     )
 
     portfolio_offset = 12
