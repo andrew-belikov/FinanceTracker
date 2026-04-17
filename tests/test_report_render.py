@@ -34,6 +34,44 @@ class ReportRenderTests(unittest.TestCase):
         self.assertEqual(stats["neutral"]["count"], 1)
         self.assertEqual(stats["positive"]["total"], 3)
 
+    def test_compute_average_day_pnl_by_sign_uses_relevant_rows(self):
+        rows = [
+            {"date": "2026-04-01", "day_pnl": "0"},
+            {"date": "2026-04-02", "day_pnl": "12"},
+            {"date": "2026-04-03", "day_pnl": "6"},
+            {"date": "2026-04-04", "day_pnl": "-9"},
+            {"date": "2026-04-05", "day_pnl": "-3"},
+        ]
+
+        self.assertEqual(report_render._compute_average_day_pnl(rows, positive=True), Decimal("9"))
+        self.assertEqual(report_render._compute_average_day_pnl(rows, positive=False), Decimal("-6"))
+
+    def test_build_plan_pace_fact_prefers_target_to_date(self):
+        primary, secondary = report_render._build_plan_pace_fact(
+            {
+                "deposits_ytd": "120000",
+                "target_to_date": "100000",
+                "plan_progress_pct": "30.0",
+                "plan_annual_contrib": "400000",
+            }
+        )
+
+        self.assertEqual(primary, "120,0%")
+        self.assertEqual(secondary, "цель к дате: 100 000 ₽")
+
+    def test_build_plan_pace_fact_falls_back_to_plan_progress_pct(self):
+        primary, secondary = report_render._build_plan_pace_fact(
+            {
+                "deposits_ytd": "120000",
+                "target_to_date": None,
+                "plan_progress_pct": "30.0",
+                "plan_annual_contrib": "400000",
+            }
+        )
+
+        self.assertEqual(primary, "30,0%")
+        self.assertEqual(secondary, "из плана 400 000 ₽")
+
     def test_build_weight_transition_map_formats_start_to_end(self):
         transitions = report_render._build_weight_transition_map(
             [
@@ -99,9 +137,21 @@ class ReportRenderTests(unittest.TestCase):
         self.assertIn("Диапазон стоимости", pages[0])
         self.assertIn("Денежный поток", pages[0])
         self.assertIn("&nbsp;₽", pages[0])
-        self.assertIn("Факты в цифрах", pages[1])
-        self.assertNotIn("Что видно на графике", pages[1])
-        self.assertNotIn("Опорные точки периода", pages[1])
+        self.assertIn("Ритм месяца", pages[1])
+        self.assertIn("Баланс дней", pages[1])
+        self.assertIn("Сила движения", pages[1])
+        self.assertIn("Годовой план", pages[1])
+        self.assertIn("Ростовых дней", pages[1])
+        self.assertIn("Снижающихся дней", pages[1])
+        self.assertIn("Средний плюс-день", pages[1])
+        self.assertIn("Средний минус-день", pages[1])
+        self.assertIn("Внесено с начала года", pages[1])
+        self.assertIn("Темп к дате", pages[1])
+        self.assertNotIn("Лучший день", pages[1])
+        self.assertNotIn("Худший день", pages[1])
+        self.assertNotIn("Пик месяца", pages[1])
+        self.assertNotIn("Минимум месяца", pages[1])
+        self.assertNotIn("Нейтральных дней", pages[1])
         self.assertIn("Классы активов", pages[2])
         self.assertIn("Изм. доли", pages[2])
         self.assertIn("Нереализованный результат", pages[2])
