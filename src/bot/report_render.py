@@ -1024,12 +1024,13 @@ def build_monthly_report_html(
       width: 100%;
     }}
     .fact-pair-title {{
-      color: #66717b;
-      font-size: 11px;
+      color: #4d5b68;
+      font-size: 14px;
       font-weight: 700;
-      text-transform: uppercase;
-      letter-spacing: 0.06em;
-      margin-bottom: 8px;
+      text-transform: none;
+      letter-spacing: 0.01em;
+      line-height: 1.2;
+      margin-bottom: 9px;
     }}
     .fact-grid {{
       display: grid;
@@ -1054,12 +1055,12 @@ def build_monthly_report_html(
       min-width: 0;
     }}
     .fact-label {{
-      color: #6a737c;
-      font-size: 12px;
-      text-transform: uppercase;
-      letter-spacing: 0.05em;
-      line-height: 1.24;
-      font-weight: 600;
+      color: #546270;
+      font-size: 15px;
+      text-transform: none;
+      letter-spacing: 0.01em;
+      line-height: 1.18;
+      font-weight: 700;
     }}
     .fact-value {{
       margin-top: 8px;
