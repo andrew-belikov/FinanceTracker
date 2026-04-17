@@ -25,6 +25,7 @@ from runtime import (
     db_session,
     fmt_compact_pct,
     fmt_compact_rub,
+    fmt_rub,
 )
 
 
@@ -38,6 +39,7 @@ CHART_COLORS = {
     "positive_fill": "#dcefe3",
     "negative": "#c46b4f",
     "negative_fill": "#f5dfd7",
+    "peak": "#d64545",
     "neutral": "#8f97a6",
     "grid": "#d8dfe7",
     "spine": "#d6dce3",
@@ -170,6 +172,47 @@ def annotate_series_last_point(
         xytext=(10, y_offset),
         textcoords="offset points",
         ha="left",
+        va="center",
+        fontsize=9,
+        color=CHART_COLORS["text"],
+        bbox={
+            "boxstyle": "round,pad=0.3",
+            "fc": "white",
+            "ec": color,
+            "lw": 1,
+            "alpha": 0.96,
+        },
+        clip_on=False,
+        zorder=6,
+    )
+
+
+def annotate_point(
+    ax,
+    x_value,
+    y_value: float,
+    label: str,
+    color: str,
+    *,
+    x_offset: int,
+    y_offset: int,
+    marker_size: int = 34,
+):
+    ax.scatter(
+        [x_value],
+        [y_value],
+        color=color,
+        s=marker_size,
+        edgecolors="white",
+        linewidths=0.9,
+        zorder=5,
+    )
+    ax.annotate(
+        label,
+        xy=(x_value, y_value),
+        xytext=(x_offset, y_offset),
+        textcoords="offset points",
+        ha="left" if x_offset >= 0 else "right",
         va="center",
         fontsize=9,
         color=CHART_COLORS["text"],
@@ -348,6 +391,25 @@ def build_history_chart(path: str) -> str | None:
     ax.set_xticklabels(tick_labels)
     ax.set_ylabel("Стоимость")
     ax.margins(x=0.03, y=0.14)
+
+    peak_value = max(values)
+    peak_index = max(idx for idx, value in enumerate(values) if value == peak_value)
+    peak_date = week_dates[peak_index]
+    peak_x_offset = -14 if peak_index >= len(week_dates) // 2 else 14
+    peak_label = (
+        f"Максимум {format_day_month_label(peak_date, include_year=True).replace(chr(10), ' ')}\n"
+        f"{fmt_rub(peak_value)}"
+    )
+    annotate_point(
+        ax,
+        peak_date,
+        peak_value,
+        peak_label,
+        CHART_COLORS["peak"],
+        x_offset=peak_x_offset,
+        y_offset=-18,
+        marker_size=42,
+    )
 
     portfolio_offset = 12
     deposits_offset = -14 if values[-1] >= cum_deps[-1] else 12
