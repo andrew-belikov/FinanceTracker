@@ -881,10 +881,14 @@ def build_monthly_report_html(
       padding: 12px 14px;
       page-break-inside: avoid;
     }}
+    .hero-card--cover {{
+      padding: 18px 20px 20px;
+      text-align: center;
+    }}
     .hero-value {{
-      font-size: 47px;
+      font-size: 62px;
       line-height: 1;
-      margin-top: 8px;
+      margin-top: 12px;
       font-family: "DejaVu Serif", Georgia, serif;
     }}
     .subtle {{
@@ -892,10 +896,11 @@ def build_monthly_report_html(
       font-size: 9.4px;
     }}
     .hero-summary-line {{
-      margin-top: 10px;
+      margin-top: 14px;
       color: #314252;
-      font-size: 11.1px;
+      font-size: 11.6px;
       line-height: 1.35;
+      text-align: center;
     }}
     .fact-grid {{
       display: grid;
@@ -932,6 +937,9 @@ def build_monthly_report_html(
       grid-template-columns: 1.16fr 0.84fr;
       gap: 12px;
       margin-top: 12px;
+    }}
+    .cover-grid {{
+      align-items: start;
     }}
     .equal-col {{
       display: grid;
@@ -1055,19 +1063,19 @@ def build_monthly_report_html(
     <div class="subtle">{escape(meta['account_friendly_name'])}</div>
     <h1>{escape(report_title)}</h1>
     <div class="subtle">Период: {_display_date(meta['period_start'])} — {_display_date(meta['period_end'])} • Сформировано: {escape(_display_timestamp(meta['generated_at_utc']))}</div>
-    <div class="hero-card" style="margin-top: 12px;">
+    <div class="hero-card hero-card--cover" style="margin-top: 12px;">
       <div class="subtle">Стоимость портфеля на конец периода</div>
       <div class="hero-value">{escape(_display_rub(summary.get('current_value'), precision=0))}</div>
       <div class="hero-summary-line">{escape(summary_subline)}</div>
     </div>
-    <div class="two-col">
+    <div class="two-col cover-grid">
       <div class="panel">
         <h3>Коротко о месяце</h3>
         {_render_bullet_list(narrative.get("executive_summary", []))}
       </div>
       <div class="panel">
         <h3>Факты месяца</h3>
-        {_render_fact_grid(page_one_facts, columns=2)}
+        {_render_fact_grid(page_one_facts, columns=3)}
       </div>
     </div>
   </section>
