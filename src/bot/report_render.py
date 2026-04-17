@@ -893,7 +893,7 @@ def build_monthly_report_html(
       margin: 0;
       color: #18222c;
       font-family: "DejaVu Sans", "Liberation Sans", sans-serif;
-      background: #f7f2e8;
+      background: #ffffff;
     }}
     h1, h2, h3 {{
       margin: 0;
@@ -922,8 +922,12 @@ def build_monthly_report_html(
       padding: 2mm 0;
     }}
     .page:last-child {{ page-break-after: auto; }}
+    .page--cover {{
+      display: block;
+      padding-top: 0;
+    }}
     .hero-card, .panel {{
-      background: rgba(255, 255, 255, 0.78);
+      background: #fbfaf7;
       border: 1px solid rgba(24, 34, 44, 0.12);
       border-radius: 15px;
       padding: 12px 14px;
@@ -933,8 +937,28 @@ def build_monthly_report_html(
       padding: 18px 20px 20px;
       text-align: center;
     }}
+    .cover-header {{
+      background: #f7f0e2;
+      border-radius: 18px;
+      padding: 9px 14px 10px;
+      border: 1px solid rgba(24, 34, 44, 0.08);
+    }}
+    .cover-header .subtle {{
+      font-size: 9.4px;
+    }}
+    .cover-hero {{
+      text-align: center;
+      padding: 14mm 10mm 0;
+    }}
+    .cover-eyebrow {{
+      color: #63707c;
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      font-weight: 600;
+    }}
     .hero-value {{
-      font-size: 62px;
+      font-size: 108px;
       line-height: 1;
       margin-top: 12px;
       font-family: "DejaVu Serif", Georgia, serif;
@@ -944,16 +968,31 @@ def build_monthly_report_html(
       font-size: 9.4px;
     }}
     .hero-summary-line {{
-      margin-top: 14px;
+      margin-top: 16px;
       color: #314252;
-      font-size: 11.6px;
-      line-height: 1.35;
+      font-size: 16px;
+      line-height: 1.32;
       text-align: center;
+    }}
+    .cover-facts {{
+      margin-top: 14mm;
+      padding-top: 12px;
+      border-top: 1px solid rgba(24, 34, 44, 0.08);
+      width: 100%;
+      overflow: hidden;
+    }}
+    .cover-title {{
+      color: #18222c;
+      font-size: 20px;
+      font-weight: 700;
+      margin-bottom: 16px;
     }}
     .fact-grid {{
       display: grid;
-      gap: 8px;
+      gap: 12px;
       margin-top: 4px;
+      width: 100%;
+      min-width: 0;
     }}
     .fact-grid--2 {{
       grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -962,41 +1001,64 @@ def build_monthly_report_html(
       grid-template-columns: repeat(3, minmax(0, 1fr));
     }}
     .fact-card {{
-      padding: 10px 12px;
-      border-radius: 11px;
-      background: rgba(31, 111, 139, 0.08);
-      border: 1px solid rgba(31, 111, 139, 0.08);
-      min-height: 68px;
+      padding: 18px 20px;
+      border-radius: 14px;
+      background: #f2f7f8;
+      border: 1px solid rgba(31, 111, 139, 0.12);
+      min-height: 132px;
       overflow: hidden;
+      min-width: 0;
     }}
     .fact-label {{
       color: #6a737c;
-      font-size: 8.5px;
+      font-size: 12px;
       text-transform: uppercase;
       letter-spacing: 0.05em;
-      line-height: 1.2;
+      line-height: 1.24;
+      font-weight: 600;
     }}
     .fact-value {{
-      margin-top: 6px;
+      margin-top: 8px;
       min-width: 0;
     }}
     .fact-meta {{
       color: #6a737c;
-      font-size: 9px;
-      line-height: 1.2;
-      margin-bottom: 4px;
+      font-size: 13px;
+      line-height: 1.24;
+      margin-bottom: 10px;
     }}
     .fact-amount {{
       display: block;
-      font-size: 11.6px;
+      font-size: 28px;
       font-weight: 700;
-      line-height: 1.15;
+      line-height: 1.12;
       letter-spacing: -0.01em;
       color: #18222c;
       white-space: nowrap;
     }}
     .fact-amount--muted {{
       color: #7b8490;
+    }}
+    .cover-facts .fact-grid {{
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+    }}
+    .cover-facts .fact-card,
+    .cover-facts .fact-label,
+    .cover-facts .fact-meta,
+    .cover-facts .fact-amount {{
+      text-align: center;
+    }}
+    .cover-facts .fact-value {{
+      display: flex;
+      min-height: 100%;
+      flex-direction: column;
+      justify-content: center;
+      align-items: center;
+    }}
+    .cover-facts .fact-amount {{
+      max-width: 100%;
+      white-space: normal;
+      overflow-wrap: anywhere;
     }}
     .two-col {{
       display: grid;
@@ -1129,24 +1191,20 @@ def build_monthly_report_html(
   </style>
 </head>
 <body>
-  <section class="page">
-    <div class="subtle">{escape(meta['account_friendly_name'])}</div>
-    <h1>{escape(report_title)}</h1>
-    <div class="subtle">Период: {_display_date(meta['period_start'])} — {_display_date(meta['period_end'])} • Сформировано: {escape(_display_timestamp(meta['generated_at_utc']))}</div>
-    <div class="hero-card hero-card--cover" style="margin-top: 12px;">
-      <div class="subtle">Стоимость портфеля на конец периода</div>
+  <section class="page page--cover">
+    <div class="cover-header">
+      <div class="subtle">{escape(meta['account_friendly_name'])}</div>
+      <h1>{escape(report_title)}</h1>
+      <div class="subtle">Период: {_display_date(meta['period_start'])} — {_display_date(meta['period_end'])} • Сформировано: {escape(_display_timestamp(meta['generated_at_utc']))}</div>
+    </div>
+    <div class="cover-hero">
+      <div class="cover-eyebrow">Стоимость портфеля на конец периода</div>
       <div class="hero-value">{escape(_display_rub(summary.get('current_value'), precision=0))}</div>
       <div class="hero-summary-line">{escape(summary_subline)}</div>
     </div>
-    <div class="two-col cover-grid">
-      <div class="panel">
-        <h3>Коротко о месяце</h3>
-        {_render_bullet_list(narrative.get("executive_summary", []))}
-      </div>
-      <div class="panel">
-        <h3>Факты месяца</h3>
-        {_render_fact_grid(page_one_facts, columns=3)}
-      </div>
+    <div class="cover-facts">
+      <div class="cover-title">Факты месяца</div>
+      {_render_fact_grid(page_one_facts, columns=3)}
     </div>
   </section>
 
