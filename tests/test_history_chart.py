@@ -48,10 +48,8 @@ class HistoryChartTests(unittest.TestCase):
         figure = captured["fig"]
         ax = figure.axes[0]
 
-        peak_annotations = [text for text in ax.texts if text.get_text().startswith("Максимум ")]
+        peak_annotations = [text for text in ax.texts if text.get_text() == "15 янв 2026\n150 000 ₽"]
         self.assertEqual(len(peak_annotations), 1)
-        self.assertIn("15 янв 2026", peak_annotations[0].get_text())
-        self.assertIn("150 000 ₽", peak_annotations[0].get_text())
 
         peak_x = mdates.date2num(date(2026, 1, 15))
         peak_markers = []
