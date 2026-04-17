@@ -174,6 +174,17 @@ def _render_fact_grid(items: list[tuple[str, str]], *, columns: int = 2) -> str:
     return f'<div class="fact-grid fact-grid--{columns}">{cards}</div>'
 
 
+def _render_fact_group(title: str, items: list[tuple[str, str]]) -> str:
+    if not items:
+        return ""
+    return (
+        '<div class="fact-pair-group">'
+        f'<div class="fact-pair-title">{escape(title)}</div>'
+        f'{_render_fact_grid(items, columns=2)}'
+        "</div>"
+    )
+
+
 def _render_fact_stack(
     primary: str | None,
     *,
@@ -191,7 +202,8 @@ def _render_fact_stack(
     if muted:
         primary_class = f"{primary_class} fact-amount--muted"
 
-    return secondary_html + f'<div class="{primary_class}">{escape(primary)}</div>'
+    primary_html = escape(primary).replace(" ₽", "&nbsp;₽")
+    return secondary_html + f'<div class="{primary_class}">{primary_html}</div>'
 
 
 def _share_text(count: int, total: int) -> str:
@@ -812,37 +824,52 @@ def build_monthly_report_html(
         ["Таргеты ребаланса", _render_nowrap("да" if payload["data_quality"].get("has_rebalance_targets") else "нет")],
     ]
 
-    page_one_facts = [
+    page_one_fact_groups = [
         (
-            "Лучший день",
-            _render_fact_stack(
-                _display_rub(summary.get("best_day_pnl"), precision=0),
-                secondary=_display_day(summary.get("best_day_date")),
-            ),
+            "Дни месяца",
+            [
+                (
+                    "Лучший день",
+                    _render_fact_stack(
+                        _display_rub(summary.get("best_day_pnl"), precision=0),
+                        secondary=_display_day(summary.get("best_day_date")),
+                    ),
+                ),
+                (
+                    "Худший день",
+                    _render_fact_stack(
+                        _display_rub(summary.get("worst_day_pnl"), precision=0),
+                        secondary=_display_day(summary.get("worst_day_date")),
+                    ),
+                ),
+            ],
         ),
         (
-            "Худший день",
-            _render_fact_stack(
-                _display_rub(summary.get("worst_day_pnl"), precision=0),
-                secondary=_display_day(summary.get("worst_day_date")),
-            ),
+            "Диапазон стоимости",
+            [
+                (
+                    "Пик месяца",
+                    _render_fact_stack(
+                        _display_rub(peak_row.get("portfolio_value"), precision=0),
+                        secondary=_display_day(peak_row.get("date")),
+                    ) if peak_row else _render_fact_stack("—", muted=True),
+                ),
+                (
+                    "Минимум месяца",
+                    _render_fact_stack(
+                        _display_rub(trough_row.get("portfolio_value"), precision=0),
+                        secondary=_display_day(trough_row.get("date")),
+                    ) if trough_row else _render_fact_stack("—", muted=True),
+                ),
+            ],
         ),
         (
-            "Пик месяца",
-            _render_fact_stack(
-                _display_rub(peak_row.get("portfolio_value"), precision=0),
-                secondary=_display_day(peak_row.get("date")),
-            ) if peak_row else _render_fact_stack("—", muted=True),
+            "Денежный поток",
+            [
+                ("Пополнения", _render_fact_stack(_display_rub(summary.get("deposits"), precision=0))),
+                ("Доходы за месяц", _render_fact_stack(_display_rub(summary.get("income_net"), precision=2))),
+            ],
         ),
-        (
-            "Минимум месяца",
-            _render_fact_stack(
-                _display_rub(trough_row.get("portfolio_value"), precision=0),
-                secondary=_display_day(trough_row.get("date")),
-            ) if trough_row else _render_fact_stack("—", muted=True),
-        ),
-        ("Пополнения", _render_fact_stack(_display_rub(summary.get("deposits"), precision=0))),
-        ("Доходы за месяц", _render_fact_stack(_display_rub(summary.get("income_net"), precision=2))),
     ]
     page_two_facts = [
         (
@@ -962,6 +989,7 @@ def build_monthly_report_html(
       line-height: 1;
       margin-top: 12px;
       font-family: "DejaVu Serif", Georgia, serif;
+      white-space: nowrap;
     }}
     .subtle {{
       color: #56616c;
@@ -986,6 +1014,22 @@ def build_monthly_report_html(
       font-size: 20px;
       font-weight: 700;
       margin-bottom: 16px;
+    }}
+    .cover-fact-groups {{
+      display: grid;
+      gap: 14px;
+      width: 100%;
+    }}
+    .fact-pair-group {{
+      width: 100%;
+    }}
+    .fact-pair-title {{
+      color: #66717b;
+      font-size: 11px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      margin-bottom: 8px;
     }}
     .fact-grid {{
       display: grid;
@@ -1040,8 +1084,9 @@ def build_monthly_report_html(
       color: #7b8490;
     }}
     .cover-facts .fact-grid {{
-      grid-template-columns: repeat(3, minmax(0, 1fr));
+      grid-template-columns: repeat(2, minmax(0, 1fr));
     }}
+    .cover-facts .fact-pair-title,
     .cover-facts .fact-card,
     .cover-facts .fact-label,
     .cover-facts .fact-meta,
@@ -1057,8 +1102,8 @@ def build_monthly_report_html(
     }}
     .cover-facts .fact-amount {{
       max-width: 100%;
-      white-space: normal;
-      overflow-wrap: anywhere;
+      white-space: nowrap;
+      overflow-wrap: normal;
     }}
     .two-col {{
       display: grid;
@@ -1204,7 +1249,9 @@ def build_monthly_report_html(
     </div>
     <div class="cover-facts">
       <div class="cover-title">Факты месяца</div>
-      {_render_fact_grid(page_one_facts, columns=3)}
+      <div class="cover-fact-groups">
+        {''.join(_render_fact_group(title, items) for title, items in page_one_fact_groups)}
+      </div>
     </div>
   </section>
 
