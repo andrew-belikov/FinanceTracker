@@ -373,9 +373,9 @@ def _build_performance_chart(payload: dict[str, Any]) -> str | None:
     fig, (ax_value, ax_flow) = plt.subplots(
         2,
         1,
-        figsize=(10.9, 7.0),
+        figsize=(10.8, 6.35),
         sharex=True,
-        gridspec_kw={"height_ratios": [2.35, 1.55]},
+        gridspec_kw={"height_ratios": [2.2, 1.38]},
     )
     apply_chart_style(ax_value, rub_axis_formatter)
     apply_chart_style(ax_flow, rub_axis_formatter)
@@ -452,7 +452,7 @@ def _build_performance_chart(payload: dict[str, Any]) -> str | None:
     ax_flow.set_xticks(tick_dates)
     ax_flow.set_xticklabels(tick_labels)
 
-    fig.tight_layout(rect=(0, 0.01, 1, 0.995), h_pad=1.2)
+    fig.tight_layout(rect=(0, 0.01, 1, 0.992), h_pad=1.0)
     return _chart_to_data_uri(fig)
 
 
@@ -1227,31 +1227,38 @@ def build_monthly_report_html(
     }}
     .chart-stage-title {{
       color: #5e6975;
-      font-size: 10.2px;
-      margin-bottom: 6px;
+      font-size: 9.6px;
+      margin-bottom: 4px;
     }}
     .chart--stage {{
       margin-top: 0;
       border-radius: 14px;
     }}
     .chart-caption {{
-      margin-top: 7px;
+      margin-top: 5px;
       color: #6a737c;
-      font-size: 9.2px;
+      font-size: 8.8px;
       line-height: 1.34;
     }}
     .page-two-facts {{
-      margin-top: 12px;
-      padding-top: 10px;
+      margin-top: 8px;
+      padding-top: 8px;
       border-top: 1px solid rgba(24, 34, 44, 0.08);
       width: 100%;
     }}
     .page-two-facts .cover-title {{
-      margin-bottom: 14px;
-      font-size: 17px;
+      margin-bottom: 10px;
+      font-size: 15px;
     }}
     .page-two-facts .cover-fact-groups {{
-      gap: 12px;
+      gap: 8px;
+    }}
+    .page-two-facts .fact-pair-title {{
+      font-size: 11.5px;
+      margin-bottom: 5px;
+    }}
+    .page-two-facts .fact-grid {{
+      gap: 8px;
     }}
     .page-two-facts .fact-pair-title,
     .page-two-facts .fact-card,
@@ -1266,6 +1273,23 @@ def build_monthly_report_html(
       flex-direction: column;
       justify-content: center;
       align-items: center;
+    }}
+    .page-two-facts .fact-card {{
+      min-height: 94px;
+      padding: 12px 14px;
+      border-radius: 12px;
+    }}
+    .page-two-facts .fact-label {{
+      font-size: 13px;
+      line-height: 1.14;
+    }}
+    .page-two-facts .fact-meta {{
+      font-size: 11px;
+      margin-bottom: 6px;
+    }}
+    .page-two-facts .fact-amount {{
+      font-size: 24px;
+      line-height: 1.08;
     }}
     .report-table {{
       width: 100%;
