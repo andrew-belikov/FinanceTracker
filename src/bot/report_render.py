@@ -321,6 +321,45 @@ def _build_asset_class_breakdown(positions: list[dict[str, Any]]) -> list[dict[s
     return rows
 
 
+def _build_asset_class_summary_rows(positions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    breakdown = _build_asset_class_breakdown(positions)
+    total_value = sum((row["value"] for row in breakdown), Decimal("0"))
+    if total_value <= 0:
+        return []
+
+    rows: list[dict[str, Any]] = []
+    for row in breakdown:
+        share_pct = (row["value"] * Decimal("100") / total_value) if total_value else Decimal("0")
+        rows.append(
+            {
+                "key": row["key"],
+                "label": row["label"],
+                "value": row["value"],
+                "share_pct": share_pct,
+            }
+        )
+    return rows
+
+
+def _display_delta_pp(value: Any, *, precision: int = 1) -> str:
+    decimal_value = _to_decimal(value)
+    sign = "+" if decimal_value > 0 else ""
+    quantizer = Decimal("1") if precision == 0 else Decimal(f"1.{'0' * precision}")
+    formatted = format(decimal_value.quantize(quantizer), f".{precision}f").replace(".", ",")
+    return f"{sign}{formatted} п.п."
+
+
+def _structure_color_modifier(asset_key: str) -> str:
+    mapping = {
+        "stocks": "stocks",
+        "bonds": "bonds",
+        "etf": "etf",
+        "currency": "currency",
+        "other": "other",
+    }
+    return mapping.get(asset_key, "other")
+
+
 def _annotate_point(
     ax,
     x_value,
@@ -461,7 +500,6 @@ def _build_allocation_chart(payload: dict[str, Any]) -> str | None:
     if not breakdown:
         return None
 
-    labels = [row["label"] for row in breakdown]
     values = [float(row["value"]) for row in breakdown]
     colors_by_key = {
         "stocks": CHART_COLORS["portfolio"],
@@ -472,12 +510,7 @@ def _build_allocation_chart(payload: dict[str, Any]) -> str | None:
     }
     colors = [colors_by_key.get(str(row["key"]), CHART_COLORS["neutral"]) for row in breakdown]
 
-    fig, ax = plt.subplots(figsize=(10.5, 4.8))
-    set_chart_header(
-        fig,
-        "Структура портфеля по классам активов",
-        "Распределение текущей стоимости по основным классам активов.",
-    )
+    fig, ax = plt.subplots(figsize=(4.8, 4.8))
     ax.set_facecolor("white")
     ax.pie(
         values,
@@ -485,20 +518,13 @@ def _build_allocation_chart(payload: dict[str, Any]) -> str | None:
         startangle=90,
         counterclock=False,
         wedgeprops={"width": 0.42, "edgecolor": "white", "linewidth": 2},
-        autopct=lambda pct: f"{pct:.0f}%" if pct >= 4 else "",
+        autopct=lambda pct: f"{pct:.0f}%" if pct >= 6 else "",
         pctdistance=0.78,
-        textprops={"fontsize": 8, "color": CHART_COLORS["text"]},
+        textprops={"fontsize": 8.6, "color": CHART_COLORS["text"]},
     )
-    ax.text(0, 0, "Классы\nактивов", ha="center", va="center", fontsize=10, color=CHART_COLORS["muted"])
-    ax.legend(
-        labels,
-        loc="center left",
-        bbox_to_anchor=(1.0, 0.5),
-        frameon=False,
-        fontsize=8,
-    )
+    ax.text(0, 0, "Структура", ha="center", va="center", fontsize=11, color=CHART_COLORS["muted"])
     ax.set_aspect("equal")
-    fig.tight_layout(rect=(0, 0, 1, 0.88))
+    fig.tight_layout(pad=0.3)
     return _chart_to_data_uri(fig)
 
 
@@ -700,6 +726,74 @@ def _render_rows_table(
     )
 
 
+def _render_visual_chart(data_uri: str | None, *, alt: str, empty_label: str) -> str:
+    if not data_uri:
+        return f'<p class="empty">{escape(empty_label)}</p>'
+    return f'<img class="chart structure-chart" src="{data_uri}" alt="{escape(alt)}">'
+
+
+def _render_structure_summary(rows: list[dict[str, Any]]) -> str:
+    if not rows:
+        return '<p class="empty">Нет данных по структуре.</p>'
+
+    rendered_rows = []
+    for row in rows:
+        tone = _structure_color_modifier(str(row.get("key") or "other"))
+        rendered_rows.append(
+            '<div class="structure-line">'
+            '<div class="structure-line-main">'
+            f'<span class="structure-swatch structure-swatch--{tone}"></span>'
+            f'<span class="structure-line-label">{escape(str(row.get("label") or "—"))}</span>'
+            "</div>"
+            f'<div class="structure-line-amount">{_render_num_cell(_display_rub(row.get("value"), precision=0))}</div>'
+            f'<div class="structure-line-share">{_render_num_cell(_display_pct_compact(row.get("share_pct"), precision=1))}</div>'
+            "</div>"
+        )
+    return '<div class="structure-ledger">' + "".join(rendered_rows) + "</div>"
+
+
+def _render_target_drift(rows: list[dict[str, Any]]) -> str:
+    if not rows:
+        return '<p class="empty">Таргеты не настроены.</p>'
+
+    rendered_rows: list[str] = []
+    for row in rows:
+        asset_class = str(row.get("asset_class") or "other")
+        tone = _structure_color_modifier(asset_class)
+        current_pct = _to_decimal(row.get("current_pct"))
+        target_pct = _to_decimal(row.get("target_pct"))
+        delta_pct = current_pct - target_pct
+        current_clamped = max(Decimal("0"), min(Decimal("100"), current_pct))
+        target_clamped = max(Decimal("0"), min(Decimal("100"), target_pct))
+        status = str(row.get("status") or "").strip().lower()
+        delta_class = "structure-delta--neutral"
+        if status == "вне нормы":
+            delta_class = "structure-delta--warn"
+        elif delta_pct > 0:
+            delta_class = "structure-delta--positive"
+        elif delta_pct < 0:
+            delta_class = "structure-delta--negative"
+
+        rendered_rows.append(
+            '<div class="target-row">'
+            '<div class="target-row-top">'
+            '<div class="target-row-label">'
+            f'<span class="structure-swatch structure-swatch--{tone}"></span>'
+            f'{escape(str(row.get("label") or "—"))}'
+            "</div>"
+            f'<div class="target-row-current">{_render_num_cell(_display_pct_compact(current_pct, precision=1))}</div>'
+            f'<div class="target-row-target">цель {_display_pct_compact(target_pct, precision=1)}</div>'
+            f'<div class="target-row-delta {delta_class}">{escape(_display_delta_pp(delta_pct, precision=1))}</div>'
+            "</div>"
+            '<div class="target-track">'
+            f'<span class="target-fill target-fill--{tone}" style="width: {current_clamped:.2f}%"></span>'
+            f'<span class="target-marker" style="left: {target_clamped:.2f}%"></span>'
+            "</div>"
+            "</div>"
+        )
+    return '<div class="target-drift-grid">' + "".join(rendered_rows) + "</div>"
+
+
 def _render_image_block(title: str, data_uri: str | None) -> str:
     if not data_uri:
         return (
@@ -769,6 +863,7 @@ def build_monthly_report_html(
         payload.get("positions_month_start") or [],
         payload.get("positions_current") or [],
     )
+    asset_class_summary_rows = _build_asset_class_summary_rows(payload.get("positions_current") or [])
 
     top_positions_rows = [
         [
@@ -780,14 +875,14 @@ def build_monthly_report_html(
         ]
         for row in payload["positions_current"][:10]
     ]
-    rebalance_rows = [
-        [
-            escape(row.get("label") or "—"),
-            _render_num_cell(_display_pct_compact(row.get("current_pct"), precision=1)),
-            _render_num_cell(_display_pct_compact(row.get("target_pct"), precision=1)),
-            _render_num_cell(_display_rub(row.get("delta_value"), precision=0)),
-            _render_status_dot(row.get("status")),
-        ]
+    target_drift_rows = [
+        {
+            "asset_class": row.get("asset_class"),
+            "label": row.get("label"),
+            "current_pct": row.get("current_pct"),
+            "target_pct": row.get("target_pct"),
+            "status": row.get("status"),
+        }
         for row in payload["rebalance_snapshot"].get("rows", [])
     ]
 
@@ -1183,6 +1278,12 @@ def build_monthly_report_html(
       gap: 12px;
       margin-top: 12px;
     }}
+    .page-subtitle {{
+      margin: 2px 0 0;
+      color: #6a737c;
+      font-size: 10px;
+      line-height: 1.35;
+    }}
     .cover-grid {{
       align-items: start;
       grid-template-columns: 0.92fr 1.08fr;
@@ -1290,6 +1391,191 @@ def build_monthly_report_html(
     .page-two-facts .fact-amount {{
       font-size: 24px;
       line-height: 1.08;
+    }}
+    .page--structure .page-subtitle {{
+      margin-bottom: 10px;
+    }}
+    .structure-top {{
+      display: grid;
+      grid-template-columns: 0.92fr 1.08fr;
+      gap: 18px;
+      align-items: center;
+      margin-top: 8px;
+    }}
+    .structure-visual {{
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      min-height: 250px;
+    }}
+    .structure-chart {{
+      margin: 0;
+      max-width: 300px;
+      width: 100%;
+    }}
+    .structure-summary h3,
+    .structure-section h3 {{
+      margin: 0 0 10px;
+      font-size: 16px;
+      line-height: 1.15;
+    }}
+    .structure-ledger {{
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+    }}
+    .structure-line {{
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto auto;
+      gap: 10px;
+      align-items: center;
+      padding: 7px 0;
+      border-bottom: 1px solid rgba(24, 34, 44, 0.08);
+    }}
+    .structure-line:last-child {{
+      border-bottom: 0;
+    }}
+    .structure-line-main,
+    .target-row-label {{
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      min-width: 0;
+    }}
+    .structure-line-label {{
+      font-size: 11.2px;
+      line-height: 1.24;
+      color: #18222c;
+      font-weight: 600;
+    }}
+    .structure-line-amount,
+    .structure-line-share {{
+      font-variant-numeric: tabular-nums;
+      white-space: nowrap;
+    }}
+    .structure-line-amount {{
+      font-size: 11.2px;
+      font-weight: 600;
+      color: #18222c;
+    }}
+    .structure-line-share {{
+      font-size: 10.4px;
+      color: #65707b;
+      text-align: right;
+    }}
+    .structure-swatch {{
+      width: 10px;
+      height: 10px;
+      border-radius: 999px;
+      flex: 0 0 auto;
+    }}
+    .structure-swatch--stocks {{
+      background: #0e7c95;
+    }}
+    .structure-swatch--bonds {{
+      background: #c79a4a;
+    }}
+    .structure-swatch--etf {{
+      background: #5b67c8;
+    }}
+    .structure-swatch--currency {{
+      background: #2f7a4a;
+    }}
+    .structure-swatch--other {{
+      background: #8a9198;
+    }}
+    .structure-section {{
+      margin-top: 14px;
+      padding-top: 12px;
+      border-top: 1px solid rgba(24, 34, 44, 0.08);
+    }}
+    .target-drift-grid {{
+      display: flex;
+      flex-direction: column;
+      gap: 11px;
+    }}
+    .target-row-top {{
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto auto auto;
+      gap: 10px;
+      align-items: center;
+    }}
+    .target-row-label {{
+      font-size: 11px;
+      font-weight: 600;
+      color: #18222c;
+    }}
+    .target-row-current,
+    .target-row-target,
+    .target-row-delta {{
+      white-space: nowrap;
+      font-variant-numeric: tabular-nums;
+    }}
+    .target-row-current {{
+      font-size: 10.8px;
+      color: #18222c;
+      font-weight: 600;
+    }}
+    .target-row-target {{
+      font-size: 9.7px;
+      color: #65707b;
+    }}
+    .target-row-delta {{
+      font-size: 10.2px;
+      text-align: right;
+      font-weight: 700;
+      color: #4d5a68;
+    }}
+    .structure-delta--positive {{
+      color: #1c6a82;
+    }}
+    .structure-delta--negative {{
+      color: #8d4a34;
+    }}
+    .structure-delta--warn {{
+      color: #c47b10;
+    }}
+    .structure-delta--neutral {{
+      color: #4d5a68;
+    }}
+    .target-track {{
+      position: relative;
+      margin-top: 6px;
+      height: 10px;
+      border-radius: 999px;
+      background: #edf1f3;
+      overflow: hidden;
+    }}
+    .target-fill {{
+      position: absolute;
+      inset: 0 auto 0 0;
+      border-radius: 999px;
+      opacity: 0.3;
+    }}
+    .target-fill--stocks {{
+      background: #0e7c95;
+    }}
+    .target-fill--bonds {{
+      background: #c79a4a;
+    }}
+    .target-fill--etf {{
+      background: #5b67c8;
+    }}
+    .target-fill--currency {{
+      background: #2f7a4a;
+    }}
+    .target-fill--other {{
+      background: #8a9198;
+    }}
+    .target-marker {{
+      position: absolute;
+      top: -1px;
+      bottom: -1px;
+      width: 2px;
+      margin-left: -1px;
+      border-radius: 999px;
+      background: #18222c;
+      opacity: 0.9;
     }}
     .report-table {{
       width: 100%;
@@ -1419,21 +1705,27 @@ def build_monthly_report_html(
     </div>
   </section>
 
-  <section class="page">
-    <h2>Структура на конец месяца</h2>
-    <div class="two-col">
-      {_render_image_block("Классы активов", charts.get("allocation"))}
-      <div class="panel">
-        <h3>Отклонение от таргетов</h3>
-        {_render_rows_table(
-          ["Класс", "Факт", "Цель", "Δ к цели", "Статус"],
-          rebalance_rows,
-          empty_label="Таргеты не настроены.",
-          column_classes=["", "numeric", "numeric", "numeric", "status-cell"],
+  <section class="page page--structure">
+    <h2>Структура портфеля</h2>
+    <p class="page-subtitle">Срез на конец месяца</p>
+    <div class="structure-top">
+      <div class="structure-visual">
+        {_render_visual_chart(
+          charts.get("allocation"),
+          alt="Структура портфеля по классам активов",
+          empty_label="Недостаточно данных для графика структуры.",
         )}
       </div>
+      <div class="structure-summary">
+        <h3>Классы активов</h3>
+        {_render_structure_summary(asset_class_summary_rows)}
+      </div>
     </div>
-    <div class="panel" style="margin-top: 14px;">
+    <div class="structure-section">
+      <h3>Отклонение от цели</h3>
+      {_render_target_drift(target_drift_rows)}
+    </div>
+    <div class="structure-section">
       <h3>Крупнейшие позиции</h3>
       {_render_rows_table(
         ["Актив", "Стоимость", "Вес", "Изм. доли", "Нереализованный результат"],

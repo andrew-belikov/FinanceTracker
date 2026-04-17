@@ -104,6 +104,23 @@ class ReportRenderTests(unittest.TestCase):
             ],
         )
 
+    def test_build_asset_class_summary_rows_computes_shares(self):
+        summary_rows = report_render._build_asset_class_summary_rows(
+            [
+                {"instrument_type": "share", "position_value": Decimal("100")},
+                {"instrument_type": "bond", "position_value": Decimal("50")},
+            ]
+        )
+
+        self.assertEqual(summary_rows[0]["label"], "Акции")
+        self.assertEqual(summary_rows[0]["share_pct"], Decimal("66.66666666666666666666666667"))
+        self.assertEqual(summary_rows[1]["label"], "Облигации")
+        self.assertEqual(summary_rows[1]["share_pct"], Decimal("33.33333333333333333333333333"))
+
+    def test_display_delta_pp_formats_with_sign_and_suffix(self):
+        self.assertEqual(report_render._display_delta_pp("6.168", precision=1), "+6,2 п.п.")
+        self.assertEqual(report_render._display_delta_pp("-2.17", precision=1), "-2,2 п.п.")
+
     def test_build_deterministic_monthly_narrative_returns_expected_sections(self):
         payload = build_sample_payload()
 
@@ -119,12 +136,12 @@ class ReportRenderTests(unittest.TestCase):
         charts = report_render.build_monthly_report_charts(payload)
 
         html = report_render.build_monthly_report_html(payload, charts=charts)
-        page_count = html.count('<section class="page">') + html.count('<section class="page page--cover">')
+        page_count = html.count('<section class="page')
         pages = [segment for segment in html.split("<section") if 'class="page' in segment]
 
         self.assertGreaterEqual(page_count, 5)
         self.assertIn("Динамика за месяц", html)
-        self.assertIn("Структура на конец месяца", html)
+        self.assertIn("Структура портфеля", html)
         self.assertIn("Инструменты за месяц", html)
         self.assertIn("Операции, доходы и качество", html)
         self.assertNotIn("Executive Summary", html)
@@ -152,10 +169,14 @@ class ReportRenderTests(unittest.TestCase):
         self.assertNotIn("Пик месяца", pages[1])
         self.assertNotIn("Минимум месяца", pages[1])
         self.assertNotIn("Нейтральных дней", pages[1])
+        self.assertIn("Срез на конец месяца", pages[2])
         self.assertIn("Классы активов", pages[2])
+        self.assertIn("Отклонение от цели", pages[2])
         self.assertIn("Изм. доли", pages[2])
         self.assertIn("Нереализованный результат", pages[2])
-        self.assertIn("status-dot", pages[2])
+        self.assertIn("target-drift-grid", pages[2])
+        self.assertIn("target-track", pages[2])
+        self.assertNotIn("status-dot", pages[2])
 
     def test_build_monthly_report_pdf_bytes_uses_injected_renderer(self):
         payload = build_sample_payload()
