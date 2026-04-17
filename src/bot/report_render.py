@@ -213,8 +213,12 @@ def _share_text(count: int, total: int) -> str:
     return f"{count} из {total} ({share_pct}%)"
 
 
+def _relevant_day_pnl_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return rows[1:] if len(rows) > 1 else rows
+
+
 def _classify_day_pnl_rows(rows: list[dict[str, Any]]) -> dict[str, dict[str, int]]:
-    relevant_rows = rows[1:] if len(rows) > 1 else rows
+    relevant_rows = _relevant_day_pnl_rows(rows)
     counts = {"positive": 0, "negative": 0, "neutral": 0}
     for row in relevant_rows:
         value = _to_decimal(row.get("day_pnl"))
@@ -232,6 +236,40 @@ def _classify_day_pnl_rows(rows: list[dict[str, Any]]) -> dict[str, dict[str, in
         }
         for key, value in counts.items()
     }
+
+
+def _build_day_count_fact(count: int, total: int) -> tuple[str, str]:
+    if total <= 0:
+        return "0 из 0", "0% дней"
+    share_pct = (Decimal(count) * Decimal("100") / Decimal(total)).quantize(Decimal("1"))
+    return f"{count} из {total}", f"{str(share_pct).replace('.', ',')}% дней"
+
+
+def _compute_average_day_pnl(rows: list[dict[str, Any]], *, positive: bool) -> Decimal | None:
+    relevant_rows = _relevant_day_pnl_rows(rows)
+    values = [
+        _to_decimal(row.get("day_pnl"))
+        for row in relevant_rows
+        if (_to_decimal(row.get("day_pnl")) > 0 if positive else _to_decimal(row.get("day_pnl")) < 0)
+    ]
+    if not values:
+        return None
+    return sum(values, Decimal("0")) / Decimal(len(values))
+
+
+def _build_plan_pace_fact(summary: dict[str, Any]) -> tuple[str, str]:
+    deposits_ytd = _to_decimal(summary.get("deposits_ytd"))
+    target_to_date = _to_decimal(summary.get("target_to_date"))
+    if target_to_date > 0:
+        pace_pct = deposits_ytd * Decimal("100") / target_to_date
+        return _display_pct_compact(pace_pct, precision=1), f"цель к дате: {_display_rub(target_to_date, precision=0)}"
+
+    plan_progress_pct = summary.get("plan_progress_pct")
+    plan_total = _display_rub(summary.get("plan_annual_contrib"), precision=0)
+    if plan_progress_pct not in (None, ""):
+        return _display_pct_compact(plan_progress_pct, precision=1), f"из плана {plan_total}"
+
+    return "—", f"из плана {plan_total}"
 
 
 def _build_weight_transition_map(
@@ -335,14 +373,9 @@ def _build_performance_chart(payload: dict[str, Any]) -> str | None:
     fig, (ax_value, ax_flow) = plt.subplots(
         2,
         1,
-        figsize=(10.5, 6.0),
+        figsize=(10.9, 7.0),
         sharex=True,
-        gridspec_kw={"height_ratios": [2.1, 1.4]},
-    )
-    set_chart_header(
-        fig,
-        "Динамика портфеля за месяц",
-        "Сверху — стоимость на конец дня, снизу — дневной результат по торговым дням.",
+        gridspec_kw={"height_ratios": [2.35, 1.55]},
     )
     apply_chart_style(ax_value, rub_axis_formatter)
     apply_chart_style(ax_flow, rub_axis_formatter)
@@ -419,7 +452,7 @@ def _build_performance_chart(payload: dict[str, Any]) -> str | None:
     ax_flow.set_xticks(tick_dates)
     ax_flow.set_xticklabels(tick_labels)
 
-    fig.tight_layout(rect=(0, 0, 1, 0.9), h_pad=1.1)
+    fig.tight_layout(rect=(0, 0.01, 1, 0.995), h_pad=1.2)
     return _chart_to_data_uri(fig)
 
 
@@ -683,6 +716,28 @@ def _render_image_block(title: str, data_uri: str | None) -> str:
     )
 
 
+def _render_chart_stage(title: str, data_uri: str | None, *, caption: str | None = None) -> str:
+    if not data_uri:
+        return (
+            '<div class="chart-stage chart-stage--empty">'
+            f'<div class="chart-stage-title">{escape(title)}</div>'
+            '<p class="empty">Недостаточно данных для графика.</p>'
+            "</div>"
+        )
+
+    caption_html = ""
+    if caption:
+        caption_html = f'<div class="chart-caption">{escape(caption)}</div>'
+
+    return (
+        '<div class="chart-stage">'
+        f'<div class="chart-stage-title">{escape(title)}</div>'
+        f'<img class="chart chart--stage" src="{data_uri}" alt="{escape(title)}">'
+        f"{caption_html}"
+        "</div>"
+    )
+
+
 def build_monthly_report_html(
     payload: dict[str, Any],
     *,
@@ -705,6 +760,11 @@ def build_monthly_report_html(
     trough_row = min(daily_rows, key=lambda row: _to_decimal(row.get("portfolio_value"))) if daily_rows else None
     day_stats = _classify_day_pnl_rows(daily_rows)
     classified_days_total = day_stats["positive"]["total"]
+    positive_day_fact = _build_day_count_fact(day_stats["positive"]["count"], classified_days_total)
+    negative_day_fact = _build_day_count_fact(day_stats["negative"]["count"], classified_days_total)
+    avg_positive_day = _compute_average_day_pnl(daily_rows, positive=True)
+    avg_negative_day = _compute_average_day_pnl(daily_rows, positive=False)
+    plan_pace_primary, plan_pace_secondary = _build_plan_pace_fact(summary)
     weight_transitions = _build_weight_transition_map(
         payload.get("positions_month_start") or [],
         payload.get("positions_current") or [],
@@ -871,38 +931,49 @@ def build_monthly_report_html(
             ],
         ),
     ]
-    page_two_facts = [
+    page_two_fact_groups = [
         (
-            "Лучший день",
-            _render_fact_stack(
-                _display_rub(summary.get("best_day_pnl"), precision=0),
-                secondary=_display_day(summary.get("best_day_date")),
-            ),
+            "Баланс дней",
+            [
+                (
+                    "Ростовых дней",
+                    _render_fact_stack(positive_day_fact[0], secondary=positive_day_fact[1]),
+                ),
+                (
+                    "Снижающихся дней",
+                    _render_fact_stack(negative_day_fact[0], secondary=negative_day_fact[1]),
+                ),
+            ],
         ),
         (
-            "Худший день",
-            _render_fact_stack(
-                _display_rub(summary.get("worst_day_pnl"), precision=0),
-                secondary=_display_day(summary.get("worst_day_date")),
-            ),
+            "Сила движения",
+            [
+                (
+                    "Средний плюс-день",
+                    _render_fact_stack(_display_rub(avg_positive_day, precision=0)) if avg_positive_day is not None else _render_fact_stack("—", muted=True),
+                ),
+                (
+                    "Средний минус-день",
+                    _render_fact_stack(_display_rub(avg_negative_day, precision=0)) if avg_negative_day is not None else _render_fact_stack("—", muted=True),
+                ),
+            ],
         ),
         (
-            "Пик месяца",
-            _render_fact_stack(
-                _display_rub(peak_row.get("portfolio_value"), precision=0),
-                secondary=_display_day(peak_row.get("date")),
-            ) if peak_row else _render_fact_stack("—", muted=True),
+            "Годовой план",
+            [
+                (
+                    "Внесено с начала года",
+                    _render_fact_stack(
+                        _display_rub(summary.get("deposits_ytd"), precision=0),
+                        secondary="с начала года",
+                    ),
+                ),
+                (
+                    "Темп к дате",
+                    _render_fact_stack(plan_pace_primary, secondary=plan_pace_secondary),
+                ),
+            ],
         ),
-        (
-            "Минимум месяца",
-            _render_fact_stack(
-                _display_rub(trough_row.get("portfolio_value"), precision=0),
-                secondary=_display_day(trough_row.get("date")),
-            ) if trough_row else _render_fact_stack("—", muted=True),
-        ),
-        ("Положительных дней", _render_fact_stack(_share_text(day_stats["positive"]["count"], classified_days_total))),
-        ("Отрицательных дней", _render_fact_stack(_share_text(day_stats["negative"]["count"], classified_days_total))),
-        ("Нейтральных дней", _render_fact_stack(_share_text(day_stats["neutral"]["count"], classified_days_total))),
     ]
 
     html = f"""<!doctype html>
@@ -1143,6 +1214,59 @@ def build_monthly_report_html(
       display: block;
       margin-top: 4px;
     }}
+    .chart-stage {{
+      margin-top: 4px;
+      width: 100%;
+      page-break-inside: avoid;
+    }}
+    .chart-stage--empty {{
+      padding: 14px 16px;
+      border: 1px solid rgba(24, 34, 44, 0.08);
+      border-radius: 14px;
+      background: #fbfaf7;
+    }}
+    .chart-stage-title {{
+      color: #5e6975;
+      font-size: 10.2px;
+      margin-bottom: 6px;
+    }}
+    .chart--stage {{
+      margin-top: 0;
+      border-radius: 14px;
+    }}
+    .chart-caption {{
+      margin-top: 7px;
+      color: #6a737c;
+      font-size: 9.2px;
+      line-height: 1.34;
+    }}
+    .page-two-facts {{
+      margin-top: 12px;
+      padding-top: 10px;
+      border-top: 1px solid rgba(24, 34, 44, 0.08);
+      width: 100%;
+    }}
+    .page-two-facts .cover-title {{
+      margin-bottom: 14px;
+      font-size: 17px;
+    }}
+    .page-two-facts .cover-fact-groups {{
+      gap: 12px;
+    }}
+    .page-two-facts .fact-pair-title,
+    .page-two-facts .fact-card,
+    .page-two-facts .fact-label,
+    .page-two-facts .fact-meta,
+    .page-two-facts .fact-amount {{
+      text-align: center;
+    }}
+    .page-two-facts .fact-value {{
+      display: flex;
+      min-height: 100%;
+      flex-direction: column;
+      justify-content: center;
+      align-items: center;
+    }}
     .report-table {{
       width: 100%;
       border-collapse: collapse;
@@ -1258,10 +1382,16 @@ def build_monthly_report_html(
 
   <section class="page">
     <h2>Динамика за месяц</h2>
-    {_render_image_block("Стоимость портфеля и дневной результат", charts.get("performance"))}
-    <div class="panel" style="margin-top: 12px;">
-      <h3>Факты в цифрах</h3>
-      {_render_fact_grid(page_two_facts, columns=3)}
+    {_render_chart_stage(
+        "Стоимость портфеля и дневной результат",
+        charts.get("performance"),
+        caption="Сверху — стоимость на конец дня, снизу — дневной результат по торговым дням.",
+    )}
+    <div class="page-two-facts">
+      <div class="cover-title">Ритм месяца</div>
+      <div class="cover-fact-groups">
+        {''.join(_render_fact_group(title, items) for title, items in page_two_fact_groups)}
+      </div>
     </div>
   </section>
 
