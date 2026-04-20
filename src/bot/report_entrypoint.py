@@ -7,8 +7,6 @@ from urllib.request import urlopen
 
 from common.logging_setup import configure_logging
 
-from report_server import main as run_reporter_server
-
 
 configure_logging()
 
@@ -31,6 +29,9 @@ def main() -> int:
 
     if args.healthcheck:
         return _run_healthcheck()
+
+    from report_server import main as run_reporter_server
+
     return run_reporter_server()
 
 
