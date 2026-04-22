@@ -32,16 +32,19 @@ def load_selected_symbols(file_path: Path, wanted_functions: set[str], namespace
 
 SYMBOLS = load_selected_symbols(
     JOBS_FILE,
-    {"is_daily_job_catchup_due", "should_release_daily_job_run"},
+    {"is_daily_job_catchup_due", "is_yesterday_peak_alert_catchup_due", "should_release_daily_job_run"},
     namespace={
         "datetime": datetime,
         "TZ": ZoneInfo("Europe/Moscow"),
         "DAILY_JOB_HOUR": 18,
         "DAILY_JOB_MINUTE": 0,
+        "YESTERDAY_PEAK_ALERT_HOUR": 8,
+        "YESTERDAY_PEAK_ALERT_MINUTE": 0,
     },
 )
 
 is_daily_job_catchup_due = SYMBOLS["is_daily_job_catchup_due"]
+is_yesterday_peak_alert_catchup_due = SYMBOLS["is_yesterday_peak_alert_catchup_due"]
 should_release_daily_job_run = SYMBOLS["should_release_daily_job_run"]
 
 
@@ -60,6 +63,13 @@ class DailyJobCatchupTests(unittest.TestCase):
         now_local = datetime(2026, 4, 4, 21, 37, 0, tzinfo=ZoneInfo("Europe/Moscow"))
 
         self.assertTrue(is_daily_job_catchup_due(now_local))
+
+    def test_yesterday_peak_alert_catchup_uses_morning_schedule(self):
+        before_alert = datetime(2026, 4, 4, 7, 59, 59, tzinfo=ZoneInfo("Europe/Moscow"))
+        at_alert = datetime(2026, 4, 4, 8, 0, 0, tzinfo=ZoneInfo("Europe/Moscow"))
+
+        self.assertFalse(is_yesterday_peak_alert_catchup_due(before_alert))
+        self.assertTrue(is_yesterday_peak_alert_catchup_due(at_alert))
 
     def test_release_claim_only_when_every_send_failed(self):
         self.assertTrue(should_release_daily_job_run(sent_total=0, failed_total=2))

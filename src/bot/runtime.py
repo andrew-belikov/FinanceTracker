@@ -34,6 +34,8 @@ TZ = ZoneInfo(TZ_NAME)
 
 DAILY_JOB_HOUR = int(os.getenv("DAILY_SUMMARY_HOUR", "18"))
 DAILY_JOB_MINUTE = int(os.getenv("DAILY_SUMMARY_MINUTE", "0"))
+YESTERDAY_PEAK_ALERT_HOUR = int(os.getenv("YESTERDAY_PEAK_ALERT_HOUR", "8"))
+YESTERDAY_PEAK_ALERT_MINUTE = int(os.getenv("YESTERDAY_PEAK_ALERT_MINUTE", "0"))
 
 
 def build_daily_job_time() -> time:
@@ -49,6 +51,21 @@ def format_daily_job_schedule() -> str:
 
 
 DAILY_JOB_SCHEDULE_LABEL = format_daily_job_schedule()
+
+
+def build_yesterday_peak_alert_time() -> time:
+    return time(
+        hour=YESTERDAY_PEAK_ALERT_HOUR,
+        minute=YESTERDAY_PEAK_ALERT_MINUTE,
+        tzinfo=TZ,
+    )
+
+
+def format_yesterday_peak_alert_schedule() -> str:
+    return f"{YESTERDAY_PEAK_ALERT_HOUR:02d}:{YESTERDAY_PEAK_ALERT_MINUTE:02d} ({TZ_NAME})"
+
+
+YESTERDAY_PEAK_ALERT_SCHEDULE_LABEL = format_yesterday_peak_alert_schedule()
 
 # Таймзона хоста остаётся только для служебной диагностики.
 HOST_TZ = datetime.now().astimezone().tzinfo

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from telegram.ext import ContextTypes
 
@@ -27,6 +27,9 @@ from runtime import (
     POLLING_SELF_HEAL_EXIT_CODE,
     TARGET_CHAT_IDS,
     TZ,
+    YESTERDAY_PEAK_ALERT_HOUR,
+    YESTERDAY_PEAK_ALERT_MINUTE,
+    YESTERDAY_PEAK_ALERT_SCHEDULE_LABEL,
     db_session,
     decimal_to_str,
     fmt_decimal_rub,
@@ -49,6 +52,7 @@ from services import (
     build_month_summary,
     build_triggers_messages,
     build_week_summary,
+    build_yesterday_peak_alert_message,
 )
 
 
@@ -58,7 +62,9 @@ POLLING_SELF_HEAL_REQUESTED = False
 BOT_EXIT_CODE = 0
 DAILY_JOB_NAME = "daily_summary"
 MONTHLY_PDF_JOB_NAME = "monthly_pdf_delivery"
+YESTERDAY_PEAK_ALERT_JOB_NAME = "yesterday_peak_alert"
 DAILY_JOB_STARTUP_CATCHUP_DELAY_SECONDS = 5
+YESTERDAY_PEAK_ALERT_STARTUP_CATCHUP_DELAY_SECONDS = 7
 
 
 def reset_polling_watchdog_state() -> None:
@@ -81,6 +87,16 @@ def is_daily_job_catchup_due(now_local: datetime) -> bool:
     scheduled_at = now_local.replace(
         hour=DAILY_JOB_HOUR,
         minute=DAILY_JOB_MINUTE,
+        second=0,
+        microsecond=0,
+    )
+    return now_local >= scheduled_at
+
+
+def is_yesterday_peak_alert_catchup_due(now_local: datetime) -> bool:
+    scheduled_at = now_local.replace(
+        hour=YESTERDAY_PEAK_ALERT_HOUR,
+        minute=YESTERDAY_PEAK_ALERT_MINUTE,
         second=0,
         microsecond=0,
     )
@@ -305,6 +321,115 @@ async def daily_job_startup_catchup(context: ContextTypes.DEFAULT_TYPE):
     await _run_daily_job(context, trigger_source="startup_catchup", now_local=now_local)
 
 
+async def yesterday_peak_alert_job(context: ContextTypes.DEFAULT_TYPE):
+    await _run_yesterday_peak_alert_job(context, trigger_source="scheduled")
+
+
+async def yesterday_peak_alert_startup_catchup(context: ContextTypes.DEFAULT_TYPE):
+    now_local = datetime.now(TZ)
+    if not is_yesterday_peak_alert_catchup_due(now_local):
+        logger.info(
+            "yesterday_peak_alert_catchup_not_due",
+            "Skipping startup catch-up because yesterday peak alert time has not been reached yet.",
+            {
+                "today": now_local.date().isoformat(),
+                "scheduled_for": YESTERDAY_PEAK_ALERT_SCHEDULE_LABEL,
+                "started_at": now_local.isoformat(),
+            },
+        )
+        return
+
+    await _run_yesterday_peak_alert_job(context, trigger_source="startup_catchup", now_local=now_local)
+
+
+async def _run_yesterday_peak_alert_job(
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    trigger_source: str,
+    now_local: datetime | None = None,
+):
+    now_local = now_local or datetime.now(TZ)
+    target_date = now_local.date() - timedelta(days=1)
+    started_at = datetime.now(TZ)
+    started_monotonic = datetime.now(timezone.utc)
+    should_run, tracking_available = _claim_scheduled_job_run(
+        job_name=YESTERDAY_PEAK_ALERT_JOB_NAME,
+        run_date=target_date,
+        trigger_source=trigger_source,
+        scheduled_for=YESTERDAY_PEAK_ALERT_SCHEDULE_LABEL,
+    )
+    if not should_run:
+        return
+
+    logger.info(
+        "yesterday_peak_alert_started",
+        "Yesterday peak alert started.",
+        {
+            "today": now_local.date().isoformat(),
+            "target_date": target_date.isoformat(),
+            "scheduled_for": YESTERDAY_PEAK_ALERT_SCHEDULE_LABEL,
+            "started_at": started_at.isoformat(),
+            "trigger_source": trigger_source,
+            "tracking_available": tracking_available,
+        },
+    )
+
+    sent_total = 0
+    failed_total = 0
+    message: str | None = None
+    try:
+        message = build_yesterday_peak_alert_message(now_local=now_local)
+    except Exception:
+        failed_total = len(TARGET_CHAT_IDS) or 1
+        logger.exception(
+            "yesterday_peak_alert_build_failed",
+            "Failed to build yesterday peak alert.",
+            {"target_date": target_date.isoformat(), "trigger_source": trigger_source},
+        )
+
+    if message:
+        for chat_id in TARGET_CHAT_IDS:
+            try:
+                await safe_send_message(context.bot, chat_id, message, parse_mode="Markdown")
+                sent_total += 1
+                logger.info(
+                    "yesterday_peak_alert_sent",
+                    "Yesterday peak alert sent.",
+                    {"chat_id": chat_id, "target_date": target_date.isoformat()},
+                )
+            except Exception:
+                failed_total += 1
+                logger.exception(
+                    "yesterday_peak_alert_send_failed",
+                    "Failed to send yesterday peak alert.",
+                    {"chat_id": chat_id, "target_date": target_date.isoformat()},
+                )
+
+    _finalize_scheduled_job_run(
+        tracking_available=tracking_available,
+        job_name=YESTERDAY_PEAK_ALERT_JOB_NAME,
+        run_date=target_date,
+        trigger_source=trigger_source,
+        sent_total=sent_total,
+        failed_total=failed_total,
+    )
+
+    duration_ms = int((datetime.now(timezone.utc) - started_monotonic).total_seconds() * 1000)
+    logger.info(
+        "yesterday_peak_alert_completed",
+        "Yesterday peak alert completed.",
+        {
+            "target_date": target_date.isoformat(),
+            "duration_ms": duration_ms,
+            "sent_total": sent_total,
+            "failed_total": failed_total,
+            "message_ready": bool(message),
+            "trigger_source": trigger_source,
+            "tracking_available": tracking_available,
+        },
+    )
+
+
 async def _run_daily_job(
     context: ContextTypes.DEFAULT_TYPE,
     *,
@@ -313,7 +438,7 @@ async def _run_daily_job(
 ):
     """
     Авто-рассылки по расписанию (по TIMEZONE):
-    - каждый день в заданное время: проверка триггеров (новый максимум / годовой план)
+    - каждый день в заданное время: проверка годового плана
     - каждую пятницу в заданное время: недельный отчёт (/week)
     - в последний день месяца в заданное время: месячный отчёт (/month)
 
