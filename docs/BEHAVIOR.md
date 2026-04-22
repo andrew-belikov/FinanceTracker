@@ -236,7 +236,7 @@ Fallback:
 
 Он может отправить:
 
-- monthly PDF, если сегодня последний день месяца;
+- текстовый месячный отчёт и monthly PDF, если сегодня последний день месяца;
 - недельный отчёт, если сегодня пятница;
 - trigger-сообщение о выполнении годового плана.
 
@@ -245,8 +245,9 @@ Fallback:
 
 Month-end delivery policy:
 
-- primary monthly artifact для auto-send — PDF через внутренний `reporter`;
-- если `reporter` недоступен, PDF не собрался или `Ollama` не прошла валидацию narrative, бот отправляет текстовый `month-end fallback`;
+- auto-send в последний день месяца отправляет текстовый `/month` и PDF-версию через внутренний `reporter`;
+- если `reporter` недоступен или PDF не собрался, текстовый отчёт всё равно отправляется;
+- если PDF не доставлен ни в один целевой чат, claim `monthly_pdf_delivery` освобождается для повторного добора в тот же день;
 - monthly PDF auto-send использует отдельный `job_name=monthly_pdf_delivery`, поэтому может ретраиться независимо от `daily_summary`;
 - startup catch-up может добрать `monthly_pdf_delivery`, даже если `daily_summary` за ту же дату уже был закрыт ранее.
 

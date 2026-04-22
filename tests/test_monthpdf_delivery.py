@@ -25,7 +25,7 @@ class MonthPdfDeliveryTests(unittest.TestCase):
     def _build_context(self):
         return SimpleNamespace(bot=object())
 
-    def test_month_end_daily_job_prefers_pdf_delivery(self):
+    def test_month_end_daily_job_sends_text_and_pdf(self):
         context = self._build_context()
         temp_file = tempfile.NamedTemporaryFile(prefix="daily_monthpdf_", suffix=".pdf", delete=False)
         temp_file.write(b"%PDF-test")
@@ -52,7 +52,7 @@ class MonthPdfDeliveryTests(unittest.TestCase):
 
             request_pdf.assert_called_once_with(year=2026, month=4)
             send_document.assert_awaited_once()
-            send_message.assert_not_awaited()
+            send_message.assert_awaited_once_with(context.bot, 123, "fallback month", parse_mode="Markdown")
             build_week_summary.assert_not_called()
             release_run.assert_not_called()
             self.assertFalse(Path(temp_file.name).exists())
@@ -63,7 +63,7 @@ class MonthPdfDeliveryTests(unittest.TestCase):
                     {
                         "job_name": jobs.DAILY_JOB_NAME,
                         "run_date": today.date(),
-                        "sent_total": 0,
+                        "sent_total": 1,
                         "failed_total": 0,
                     },
                     {
@@ -77,7 +77,7 @@ class MonthPdfDeliveryTests(unittest.TestCase):
         finally:
             Path(temp_file.name).unlink(missing_ok=True)
 
-    def test_month_end_daily_job_falls_back_to_text_when_reporter_fails(self):
+    def test_month_end_daily_job_sends_text_and_releases_pdf_retry_when_reporter_fails(self):
         context = self._build_context()
         today = jobs.datetime(2026, 4, 30, 18, 0, 0, tzinfo=jobs.TZ)
 
@@ -99,11 +99,23 @@ class MonthPdfDeliveryTests(unittest.TestCase):
 
         send_document.assert_not_awaited()
         send_message.assert_awaited_once_with(context.bot, 123, "fallback month", parse_mode="Markdown")
-        release_run.assert_not_called()
+        release_run.assert_called_once_with(
+            ANY,
+            job_name=jobs.MONTHLY_PDF_JOB_NAME,
+            run_date=today.date(),
+        )
         complete_calls = [call.kwargs for call in complete_run.call_args_list]
-        self.assertEqual(complete_calls[-1]["job_name"], jobs.MONTHLY_PDF_JOB_NAME)
-        self.assertEqual(complete_calls[-1]["sent_total"], 1)
-        self.assertEqual(complete_calls[-1]["failed_total"], 0)
+        self.assertEqual(
+            complete_calls,
+            [
+                {
+                    "job_name": jobs.DAILY_JOB_NAME,
+                    "run_date": today.date(),
+                    "sent_total": 1,
+                    "failed_total": 0,
+                },
+            ],
+        )
 
     def test_monthly_pdf_delivery_runs_even_if_daily_summary_already_processed(self):
         context = self._build_context()

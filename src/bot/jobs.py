@@ -440,7 +440,7 @@ async def _run_daily_job(
     Авто-рассылки по расписанию (по TIMEZONE):
     - каждый день в заданное время: проверка годового плана
     - каждую пятницу в заданное время: недельный отчёт (/week)
-    - в последний день месяца в заданное время: месячный отчёт (/month)
+    - в последний день месяца в заданное время: месячный отчёт (/month) и PDF-версия
 
     Важно: если Markdown сломается из-за динамических данных — отправляем тем же текстом без разметки.
     """
@@ -493,7 +493,7 @@ async def _run_daily_job(
     triggers: list[str] = []
 
     try:
-        if month_pdf_should_run:
+        if daily_should_run and is_month_end:
             month_text = build_month_summary()
     except Exception:
         logger.exception("daily_job_month_summary_failed", "Failed to build month summary.")
@@ -550,7 +550,7 @@ async def _run_daily_job(
     )
 
     # Нечего отправлять — выходим тихо.
-    if not month_pdf_should_run and not week_text and not triggers:
+    if not month_pdf_should_run and not month_text and not week_text and not triggers:
         _finalize_scheduled_job_run(
             tracking_available=daily_tracking_available,
             job_name=DAILY_JOB_NAME,
@@ -576,6 +576,38 @@ async def _run_daily_job(
     try:
         for chat_id in TARGET_CHAT_IDS:
             # Отдельные try/except на каждое сообщение: чтобы одно падение не глушило всё.
+            if daily_should_run and is_month_end:
+                if month_text:
+                    try:
+                        await safe_send_message(context.bot, chat_id, month_text, parse_mode="Markdown")
+                        daily_sent_total += 1
+                        sent_total += 1
+                        logger.info(
+                            "daily_job_message_sent",
+                            "Daily job message sent.",
+                            {"chat_id": chat_id, "message_type": "month_report"},
+                        )
+                    except Exception:
+                        daily_failed_total += 1
+                        failed_total += 1
+                        logger.exception(
+                            "daily_job_message_send_failed",
+                            "Failed to send daily job month report.",
+                            {"chat_id": chat_id, "message_type": "month_report"},
+                        )
+                else:
+                    daily_failed_total += 1
+                    failed_total += 1
+                    logger.warning(
+                        "daily_job_month_report_unavailable",
+                        "Monthly text report is unavailable for daily job delivery.",
+                        {
+                            "chat_id": chat_id,
+                            "trigger_source": trigger_source,
+                            "today": today.isoformat(),
+                        },
+                    )
+
             if month_pdf_should_run:
                 if month_pdf_path and month_pdf_filename:
                     try:
@@ -584,7 +616,7 @@ async def _run_daily_job(
                             chat_id,
                             file_path=month_pdf_path,
                             filename=month_pdf_filename,
-                            caption="Monthly review в PDF.",
+                            caption="PDF-версия месячного отчёта.",
                         )
                         month_sent_total += 1
                         sent_total += 1
@@ -601,30 +633,12 @@ async def _run_daily_job(
                             "Failed to send daily job monthly PDF report.",
                             {"chat_id": chat_id, "message_type": "month_pdf"},
                         )
-                elif month_text:
-                    try:
-                        await safe_send_message(context.bot, chat_id, month_text, parse_mode="Markdown")
-                        month_sent_total += 1
-                        sent_total += 1
-                        logger.info(
-                            "daily_job_message_sent",
-                            "Daily job message sent.",
-                            {"chat_id": chat_id, "message_type": "month_report_fallback"},
-                        )
-                    except Exception:
-                        month_failed_total += 1
-                        failed_total += 1
-                        logger.exception(
-                            "daily_job_message_send_failed",
-                            "Failed to send daily job month report fallback.",
-                            {"chat_id": chat_id, "message_type": "month_report_fallback"},
-                        )
                 else:
                     month_failed_total += 1
                     failed_total += 1
                     logger.warning(
                         "daily_job_month_delivery_unavailable",
-                        "Monthly delivery is unavailable because both PDF and fallback text are missing.",
+                        "Monthly PDF delivery is unavailable.",
                         {
                             "chat_id": chat_id,
                             "trigger_source": trigger_source,
