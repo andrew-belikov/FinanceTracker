@@ -17,8 +17,11 @@
 - `TIMEZONE` — таймзона для отображения дат в текстах и для расписания JobQueue (например, `Europe/Moscow`).
 - `DAILY_SUMMARY_HOUR` — час ежедневного запуска JobQueue в таймзоне `TIMEZONE` (по умолчанию `18`).
 - `DAILY_SUMMARY_MINUTE` — минута ежедневного запуска JobQueue в таймзоне `TIMEZONE` (по умолчанию `0`).
+- `YESTERDAY_PEAK_ALERT_HOUR` — час утренней проверки максимума за вчера в таймзоне `TIMEZONE` (по умолчанию `8`).
+- `YESTERDAY_PEAK_ALERT_MINUTE` — минута утренней проверки максимума за вчера в таймзоне `TIMEZONE` (по умолчанию `0`).
 
-Рассылка JobQueue запускается по таймзоне `TIMEZONE`; по умолчанию это `18:00`.
+Основная рассылка JobQueue запускается по таймзоне `TIMEZONE`; по умолчанию это `18:00`.
+Утренний trigger нового максимума запускается отдельно; по умолчанию это `08:00`.
 - `JOBQUEUE_SMOKE_TEST_ON_START` — одноразовый тест отправки через JobQueue при старте бота (`true/false`).
 - `JOBQUEUE_SMOKE_TEST_DELAY_SECONDS` — задержка перед smoke-test после старта (секунды).
 

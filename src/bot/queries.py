@@ -1410,6 +1410,53 @@ def get_max_value_before_date(session, account_id: str, d: date | None):
     return float(row) if row is not None else None
 
 
+def get_snapshot_for_date(session, account_id: str, d: date | None):
+    if d is None:
+        return None
+    row = (
+        session.execute(
+            text(
+                """
+        SELECT id, snapshot_date, snapshot_at, total_value
+        FROM portfolio_snapshots
+        WHERE account_id = :account_id
+          AND snapshot_date = :d
+        ORDER BY snapshot_at DESC, id DESC
+        LIMIT 1
+        """
+            ),
+            {"account_id": account_id, "d": d},
+        )
+        .mappings()
+        .first()
+    )
+    return row
+
+
+def get_max_snapshot_before_date(session, account_id: str, d: date | None):
+    if d is None:
+        return None
+    row = (
+        session.execute(
+            text(
+                """
+        SELECT id, snapshot_date, snapshot_at, total_value
+        FROM portfolio_snapshots
+        WHERE account_id = :account_id
+          AND snapshot_date < :d
+          AND total_value IS NOT NULL
+        ORDER BY total_value DESC, snapshot_date DESC, snapshot_at DESC, id DESC
+        LIMIT 1
+        """
+            ),
+            {"account_id": account_id, "d": d},
+        )
+        .mappings()
+        .first()
+    )
+    return row
+
+
 def get_max_value_to_date(session, account_id: str, d: date | None):
     if d is None:
         return None

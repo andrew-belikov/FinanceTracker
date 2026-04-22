@@ -18,9 +18,10 @@ Telegram-бот для проекта iis_tracker.
     * по пятницам — недельный отчёт (/week)
     * в последний день месяца — отчёт за месяц (/month)
     * триггеры:
-        - новый максимум портфеля
         - годовой план по пополнениям выполнен (400k за год)
     * (ежедневная сводка /today автоматически НЕ отправляется)
+- Утренняя задача:
+    * новый максимум портфеля по итогам вчерашнего дня
 
 Безопасность:
 - ALLOWED_USER_IDS — белый список Telegram user_id.
@@ -64,6 +65,9 @@ from jobs import (
     jobqueue_smoke_test_job,
     polling_watchdog_job,
     reset_polling_watchdog_state,
+    yesterday_peak_alert_job,
+    yesterday_peak_alert_startup_catchup,
+    YESTERDAY_PEAK_ALERT_STARTUP_CATCHUP_DELAY_SECONDS,
 )
 from runtime import (
     BOT_PROXY_ENABLED,
@@ -87,7 +91,9 @@ from runtime import (
     TELEGRAM_REQUEST_READ_TIMEOUT_SECONDS,
     TELEGRAM_REQUEST_WRITE_TIMEOUT_SECONDS,
     TZ_NAME,
+    YESTERDAY_PEAK_ALERT_SCHEDULE_LABEL,
     build_daily_job_time,
+    build_yesterday_peak_alert_time,
     build_telegram_request_kwargs,
     logger,
     reset_update_tracking_state,
@@ -130,11 +136,18 @@ def configure_jobs(app: Application) -> None:
         )
 
     job_time = build_daily_job_time()
+    peak_alert_time = build_yesterday_peak_alert_time()
     job_queue.run_daily(daily_job, time=job_time, name="daily_summary")
+    job_queue.run_daily(yesterday_peak_alert_job, time=peak_alert_time, name="yesterday_peak_alert")
     job_queue.run_once(
         daily_job_startup_catchup,
         when=DAILY_JOB_STARTUP_CATCHUP_DELAY_SECONDS,
         name="daily_summary_startup_catchup",
+    )
+    job_queue.run_once(
+        yesterday_peak_alert_startup_catchup,
+        when=YESTERDAY_PEAK_ALERT_STARTUP_CATCHUP_DELAY_SECONDS,
+        name="yesterday_peak_alert_startup_catchup",
     )
     job_queue.run_repeating(check_income_events, interval=60, first=10, name="income_events_notifier")
     job_queue.run_repeating(check_invest_notifications, interval=60, first=15, name="invest_notifier")
@@ -149,9 +162,11 @@ def configure_jobs(app: Application) -> None:
         "JobQueue jobs registered.",
         {
             "daily_job_schedule": DAILY_JOB_SCHEDULE_LABEL,
+            "yesterday_peak_alert_schedule": YESTERDAY_PEAK_ALERT_SCHEDULE_LABEL,
             "schedule_timezone": TZ_NAME,
             "target_chat_ids": sorted(TARGET_CHAT_IDS),
             "daily_job_startup_catchup_delay_seconds": DAILY_JOB_STARTUP_CATCHUP_DELAY_SECONDS,
+            "yesterday_peak_alert_startup_catchup_delay_seconds": YESTERDAY_PEAK_ALERT_STARTUP_CATCHUP_DELAY_SECONDS,
             "income_events_interval_seconds": 60,
             "invest_interval_seconds": 60,
             "polling_watchdog_interval_seconds": POLLING_WATCHDOG_INTERVAL_SECONDS,

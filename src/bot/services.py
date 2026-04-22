@@ -19,7 +19,7 @@ from queries import (
     get_last_snapshot_before_date,
     get_latest_snapshot_with_id,
     get_latest_snapshots,
-    get_max_value_before_date,
+    get_max_snapshot_before_date,
     get_net_external_flow_for_period,
     get_month_snapshots,
     get_period_daily_snapshot_rows,
@@ -29,6 +29,7 @@ from queries import (
     get_positions_diff_snapshot_bounds,
     get_positions_for_snapshot,
     get_rebalance_targets as query_get_rebalance_targets,
+    get_snapshot_for_date,
     get_taxes_for_period,
     get_total_deposits,
     get_unrealized_at_period_end,
@@ -54,6 +55,7 @@ from runtime import (
     TARGETS_USAGE_TEXT,
     TZ,
     WITHDRAWAL_OPERATION_TYPES,
+    YESTERDAY_PEAK_ALERT_SCHEDULE_LABEL,
     db_session,
     decimal_to_str,
     fmt_decimal_rub,
@@ -161,6 +163,7 @@ def build_logical_asset_id(
 
 def build_help_text() -> str:
     schedule_label = globals().get("DAILY_JOB_SCHEDULE_LABEL", "18:00")
+    peak_schedule_label = globals().get("YESTERDAY_PEAK_ALERT_SCHEDULE_LABEL", "08:00")
     return (
         "Доступные команды:\n\n"
         "/today — сводка по портфелю на сегодня\n"
@@ -178,7 +181,8 @@ def build_help_text() -> str:
         "/invest <sum> — подсказать, как распределить новое пополнение\n"
         "/help — эта подсказка\n\n"
         "Автоматически:\n"
-        f"• каждый день в {schedule_label} — проверка триггеров (максимум, годовой план)\n"
+        f"• каждый день в {peak_schedule_label} — проверка максимума по итогам вчерашнего дня\n"
+        f"• каждый день в {schedule_label} — проверка годового плана\n"
         f"• по пятницам в {schedule_label} — недельный отчёт\n"
         f"• в последний день месяца в {schedule_label} — дополнительный отчёт за месяц\n"
         "• каждое новое пополнение счёта — подсказка, как распределить пополнение по таргетам."
@@ -2435,15 +2439,9 @@ def build_triggers_messages() -> list[str]:
         if account_id is None:
             return messages
 
-        snaps = get_latest_snapshots(session, account_id, limit=2)
+        snaps = get_latest_snapshots(session, account_id, limit=1)
         if not snaps:
             return messages
-
-        last = snaps[0]
-        last_value = float(last["total_value"])
-        last_date = last["snapshot_date"]
-
-        max_before_last = get_max_value_before_date(session, account_id, last_date)
 
         year_start = datetime(year, 1, 1)
         today_start = datetime(year, today.month, today.day)
@@ -2451,13 +2449,6 @@ def build_triggers_messages() -> list[str]:
 
         dep_prev = get_deposits_for_period(session, account_id, year_start, today_start)
         dep_now = get_deposits_for_period(session, account_id, year_start, tomorrow_start)
-
-    if max_before_last is not None and last_value > max_before_last:
-        messages.append(
-            "🎉 Новый максимум стоимости портфеля!\n\n"
-            f"Текущая оценка: *{fmt_rub(last_value)}*\n"
-            f"Предыдущий максимум: {fmt_rub(max_before_last)}."
-        )
 
     if PLAN_ANNUAL_CONTRIB_RUB > 0:
         plan = PLAN_ANNUAL_CONTRIB_RUB
@@ -2468,3 +2459,40 @@ def build_triggers_messages() -> list[str]:
             )
 
     return messages
+
+
+def _format_alert_date(value: date | None) -> str:
+    if value is None:
+        return "—"
+    return value.strftime("%d.%m.%y")
+
+
+def build_yesterday_peak_alert_message(*, now_local: datetime | None = None) -> str | None:
+    now_local = now_local or datetime.now(TZ)
+    target_date = now_local.date() - timedelta(days=1)
+
+    with db_session() as session:
+        account_id = resolve_reporting_account_id(session)
+        if account_id is None:
+            return None
+
+        yesterday_snapshot = get_snapshot_for_date(session, account_id, target_date)
+        previous_peak = get_max_snapshot_before_date(session, account_id, target_date)
+
+    if yesterday_snapshot is None or previous_peak is None:
+        return None
+    if yesterday_snapshot["total_value"] is None or previous_peak["total_value"] is None:
+        return None
+
+    yesterday_value = float(yesterday_snapshot["total_value"])
+    previous_peak_value = float(previous_peak["total_value"])
+    if yesterday_value <= previous_peak_value:
+        return None
+
+    previous_peak_date = previous_peak["snapshot_date"]
+    return (
+        "🎉 Вчера был достигнут новый максимум стоимости портфеля!\n\n"
+        f"Итоговая оценка за {_format_alert_date(target_date)}: *{fmt_rub(yesterday_value)}*\n"
+        f"Предыдущий максимум: {fmt_rub(previous_peak_value)}.\n"
+        f"Дата предыдущего максимума: {_format_alert_date(previous_peak_date)}."
+    )
