@@ -42,7 +42,7 @@
 - `tracker` — сервис, который опрашивает Invest API и пишет снапшоты в БД.
 - `bot` — Telegram‑бот, который читает данные из БД, хранит таргеты аллокации и отправляет отчёты.
 - `reporter` — отдельный внутренний HTTP‑сервис для PDF pipeline; отдаёт `/healthz`, собирает `POST /reports/monthly/pdf` и добавляет Ollama narrative поверх детерминированных данных с жёстким fallback.
-- `db` — Postgres.
+- `db` — Postgres, доступный только внутри Docker-сети проекта по адресу `db:5432`.
 
 ```
 Postgres  <--- tracker (snapshots)
@@ -75,6 +75,7 @@ ${EDITOR:-vi} .env
 3) (Опционально) создайте внешний volume для Postgres.
 
 Проект по умолчанию использует внешний volume `financetracker_fintracker-db`, чтобы данные переживали пересборки.
+Порт Postgres не публикуется на host; для ручных запросов используйте `docker compose exec db psql ...` или SSH tunnel до Docker-хоста.
 
 ```bash
 docker volume create financetracker_fintracker-db

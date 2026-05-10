@@ -43,6 +43,7 @@
 ## Сеть
 
 - `VERIFY_SSL` — проверка SSL сертификата при запросах к API (`true/false`). Рекомендуемое значение: `true`.
+- Postgres не публикует host port и доступен только сервисам внутри compose-сети по `db:5432`. Для администрирования используйте `docker compose exec db psql ...` или SSH tunnel до Docker-хоста.
 - `REPORTER_PORT` — внутренний HTTP-порт сервиса `reporter` для `/healthz` и `POST /reports/monthly/pdf` (по умолчанию `8088`).
 - `REPORTER_MAX_BODY_BYTES` — максимальный размер тела запроса для `POST /reports/monthly/pdf` (по умолчанию `65536`).
 - `REPORTER_INTERNAL_URL` — внутренний compose-URL для вызовов `bot -> reporter`. Рекомендуемое значение: `http://reporter:8088`.
