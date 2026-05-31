@@ -68,13 +68,15 @@
 ### Proxy только для `bot`
 
 - При `BOT_PROXY_ENABLED=false` контейнер `bot` запускается без `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY` и работает по старой схеме.
-- При `BOT_PROXY_ENABLED=true` рядом поднимается сервис `xray-client`, а `bot` направляет Telegram-трафик через локальный SOCKS endpoint `socks5h://xray-client:1080`.
+- Сервис `xray-client` поднимается вместе со стеком. При `BOT_PROXY_ENABLED=false` он остаётся в idle-режиме с `healthy` status, пишет `xray_proxy_disabled`, но не запускает процесс `xray` и не открывает proxy route.
+- При `BOT_PROXY_ENABLED=true` `bot` направляет Telegram-трафик через локальный SOCKS endpoint `socks5h://xray-client:1080`.
 - `xray-client` принимает до двух кандидатных ссылок: основную `BOT_VLESS_URL` и fallback `BOT_VLESS_FALLBACK_URL`. Кандидаты проверяются по очереди, активной остаётся первая ссылка, которая успешно прошла startup smoke; дальше сервис продолжает runtime-проверки и при повторяющихся сбоях переключается на следующий кандидат.
 - Основной и fallback URL могут использовать разные transport/security-настройки. Текущий парсер поддерживает Reality/TCP и VLESS с `security=none`, включая `type=kcp`.
 - Внутренние адреса (`localhost`, `127.0.0.1`, `db`, `tracker`, `reporter`, `xray-client`) добавляются в `NO_PROXY`, поэтому внутренние обращения не уходят в proxy.
 - Long polling (`getUpdates`) и обычные Bot API запросы используют один и тот же явный proxy endpoint из `BOT_PROXY_ENDPOINT`; это снижает риск зависшего polling при переезде между хостами.
 - Если `bot.py` не может инициализироваться из-за транспортного `TimedOut` / `NetworkError`, `entrypoint.py` не завершает весь контейнер сразу, а перезапускает сам процесс бота с паузой `BOT_STARTUP_RETRY_DELAY_SECONDS`.
 - Если watchdog два раза подряд видит backlog Telegram updates при превышении порога стагнации, `bot` завершает процесс и рассчитывает на автоматический рестарт контейнера через `restart: unless-stopped`.
+- `xray-client` тоже использует `restart: unless-stopped`, поэтому после ребута хоста или Docker daemon он поднимается снова; idle-режим при `BOT_PROXY_ENABLED=false` предотвращает restart-loop.
 - `xray-client` проверяет не только локальный порт, но и outbound-маршрут через `XRAY_HEALTHCHECK_URL`; в compose по умолчанию используется `https://api.ipify.org`.
 - `tracker` и `db` не получают proxy env и продолжают работать напрямую.
 
@@ -108,7 +110,7 @@ docker compose exec bot python proxy_smoke.py
 
 Ожидаемо:
 - при `BOT_PROXY_ENABLED=true` `xray-client` в `healthy`;
-- при `BOT_PROXY_ENABLED=false` `xray-client` не виден в обычном `docker compose ps`, а `docker compose ps -a xray-client` показывает `Exited (0)`;
+- при `BOT_PROXY_ENABLED=false` `xray-client` тоже в `healthy`, но работает в idle-режиме без процесса `xray`;
 - все runtime-процессы проекта пишут JSON Lines в `stdout`, включая `xray-client`, startup smoke, healthcheck и maintenance scripts;
 - в логах `xray-client` есть события `xray_proxy_ready`, `xray_proxy_smoke_completed`, `xray_runtime_smoke_failed`, `xray_runtime_failover_scheduled` и `xray_process_output`;
 - при наличии fallback-ссылки в логах и status file появляется `active_link_role` со значением `primary` или `fallback`;

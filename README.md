@@ -137,7 +137,7 @@ docker compose exec bot python proxy_smoke.py
 
 Сценарий проверки:
 - при `BOT_PROXY_ENABLED=true` `docker compose ps` показывает `xray-client` в состоянии `healthy`;
-- при `BOT_PROXY_ENABLED=false` `xray-client` не попадает в обычный `docker compose ps`, потому что proxy не активен; при необходимости детальный статус виден в `docker compose ps -a xray-client` как `Exited (0)`;
+- при `BOT_PROXY_ENABLED=false` `xray-client` остаётся запущенным в idle-режиме с `healthy`, пишет `xray_proxy_disabled`, но не стартует процесс `xray` и не открывает proxy route;
 - все runtime-логи `bot`, `tracker`, `xray-client`, startup smoke и healthcheck идут как JSON Lines в `stdout`; удобнее всего смотреть их через `docker compose logs ...`;
 - при `BOT_PROXY_ENABLED=true` `bot` подключается к локальному SOCKS endpoint `socks5h://xray-client:1080`, а `xray-client` сам проверяет внешний маршрут через `https://api.ipify.org`;
 - если задан `BOT_VLESS_FALLBACK_URL`, контейнер `xray-client` автоматически пробует fallback-ссылку не только при неуспешном старте основного маршрута, но и при повторяющихся runtime-сбоях активного канала;
@@ -147,7 +147,7 @@ docker compose exec bot python proxy_smoke.py
 - long polling бота и обычные Bot API вызовы используют один и тот же явный proxy endpoint `BOT_PROXY_ENDPOINT`, чтобы `getUpdates` не зависел от неявного env-resolve внутри клиента;
 - если Telegram API временно недоступен через proxy, `bot.py` возвращает специальный код supervision, а `entrypoint.py` перезапускает процесс бота внутри контейнера с паузой `BOT_STARTUP_RETRY_DELAY_SECONDS` вместо жёсткого crash-loop всего контейнера;
 - watchdog long polling подтверждает backlog двумя подряд проверками и при подтверждённом зависании завершает процесс бота, чтобы `restart: unless-stopped` автоматически поднял контейнер заново;
-- при `BOT_PROXY_ENABLED=false` `xray-client` пишет событие `xray_proxy_disabled`, а `tracker` продолжает работать как раньше.
+- `xray-client` тоже использует `restart: unless-stopped`, поэтому после ребута хоста или Docker daemon он поднимается вместе со стеком; idle-режим при `BOT_PROXY_ENABLED=false` нужен, чтобы это не превращалось в restart-loop.
 
 ### Правила structured logging
 

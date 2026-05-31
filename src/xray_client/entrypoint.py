@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 import json
 import os
@@ -35,6 +36,11 @@ class ActiveProxySession:
     candidate_index: int
     candidate_role: str
     link_summary: str
+
+
+@dataclass
+class ShutdownState:
+    requested: bool = False
 
 
 def is_enabled(value: str | None) -> bool:
@@ -160,6 +166,32 @@ def start_relay_threads(proc: subprocess.Popen[str]) -> list:
 def join_relay_threads(relay_threads: list) -> None:
     for thread in relay_threads:
         thread.join(timeout=1.0)
+
+
+def install_shutdown_handlers(
+    shutdown_state: ShutdownState,
+    on_shutdown: Callable[[], None] | None = None,
+) -> None:
+    def handle_shutdown(signum: int, _frame) -> None:
+        shutdown_state.requested = True
+        logger.info(
+            "xray_signal_received",
+            "Xray client entrypoint received a shutdown signal.",
+            {"signal": signum},
+        )
+        if on_shutdown is not None:
+            on_shutdown()
+
+    signal.signal(signal.SIGTERM, handle_shutdown)
+    signal.signal(signal.SIGINT, handle_shutdown)
+
+
+def wait_for_shutdown(
+    shutdown_state: ShutdownState,
+    poll_interval_seconds: float = DEFAULT_PROCESS_POLL_INTERVAL_SECONDS,
+) -> None:
+    while not shutdown_state.requested:
+        time.sleep(poll_interval_seconds)
 
 
 def build_enabled_status(
@@ -473,6 +505,7 @@ def main() -> int:
     proxy_enabled = is_enabled(os.getenv("BOT_PROXY_ENABLED"))
     listen_port = int(os.getenv("XRAY_LOCAL_PROXY_PORT", "1080"))
     healthcheck_url = os.getenv("XRAY_HEALTHCHECK_URL", DEFAULT_HEALTHCHECK_URL).strip() or DEFAULT_HEALTHCHECK_URL
+    shutdown_state = ShutdownState()
 
     if not proxy_enabled:
         write_status({"mode": "disabled"})
@@ -481,6 +514,8 @@ def main() -> int:
             "Xray proxy mode is disabled.",
             {"listen_port": listen_port},
         )
+        install_shutdown_handlers(shutdown_state)
+        wait_for_shutdown(shutdown_state)
         return 0
 
     vless_url = os.getenv("BOT_VLESS_URL", "")
@@ -495,20 +530,11 @@ def main() -> int:
         return 1
     log_level = os.getenv("XRAY_LOG_LEVEL", "warning").strip() or "warning"
     active_session: ActiveProxySession | None = None
-    shutdown_requested = False
 
-    def stop_child(signum: int, _frame) -> None:
-        nonlocal shutdown_requested
-        shutdown_requested = True
-        logger.info(
-            "xray_signal_received",
-            "Xray client entrypoint received a shutdown signal.",
-            {"signal": signum},
-        )
+    def stop_child() -> None:
         stop_active_session(active_session)
 
-    signal.signal(signal.SIGTERM, stop_child)
-    signal.signal(signal.SIGINT, stop_child)
+    install_shutdown_handlers(shutdown_state, stop_child)
     active_session = activate_candidate(
         candidates=candidates,
         start_index=0,
@@ -533,7 +559,7 @@ def main() -> int:
             healthcheck_url=healthcheck_url,
         )
 
-        if shutdown_requested and outcome != "process_exit":
+        if shutdown_state.requested and outcome != "process_exit":
             stop_active_session(active_session)
             return 0
 
@@ -549,7 +575,7 @@ def main() -> int:
             else:
                 logger.error("xray_process_exited", "Xray process exited with a non-zero code.", exit_ctx)
 
-            if shutdown_requested:
+            if shutdown_state.requested:
                 return return_code or 0
 
             active_session = activate_candidate(
