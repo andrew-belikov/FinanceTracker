@@ -7,7 +7,16 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
-from xray_client.entrypoint import ActiveProxySession, iter_candidate_indexes, iter_vless_candidates, monitor_active_candidate
+import xray_client.entrypoint as xray_entrypoint
+from xray_client.entrypoint import (
+    ActiveProxySession,
+    ShutdownState,
+    install_shutdown_handlers,
+    iter_candidate_indexes,
+    iter_vless_candidates,
+    monitor_active_candidate,
+    wait_for_shutdown,
+)
 from xray_client.healthcheck import build_proxy_check_command
 from xray_client.render_config import build_config
 
@@ -192,6 +201,48 @@ class XrayProxyConfigTests(unittest.TestCase):
 
         self.assertEqual((outcome, return_code), ("process_exit", 17))
         smoke_mock.assert_not_called()
+
+    def test_shutdown_handler_marks_state_and_runs_callback(self):
+        shutdown_state = ShutdownState()
+        on_shutdown = mock.Mock()
+        handlers = {}
+
+        def capture_handler(signum, handler):
+            handlers[signum] = handler
+
+        with mock.patch("xray_client.entrypoint.signal.signal", side_effect=capture_handler):
+            install_shutdown_handlers(shutdown_state, on_shutdown)
+
+        handlers[xray_entrypoint.signal.SIGTERM](xray_entrypoint.signal.SIGTERM, None)
+
+        self.assertTrue(shutdown_state.requested)
+        on_shutdown.assert_called_once_with()
+        self.assertIn(xray_entrypoint.signal.SIGINT, handlers)
+
+    def test_wait_for_shutdown_returns_after_state_is_requested(self):
+        shutdown_state = ShutdownState()
+
+        def request_shutdown(_seconds):
+            shutdown_state.requested = True
+
+        with mock.patch("xray_client.entrypoint.time.sleep", side_effect=request_shutdown) as sleep_mock:
+            wait_for_shutdown(shutdown_state, poll_interval_seconds=0.25)
+
+        sleep_mock.assert_called_once_with(0.25)
+
+    def test_main_keeps_disabled_proxy_container_alive_until_shutdown(self):
+        with (
+            mock.patch.dict("os.environ", {"BOT_PROXY_ENABLED": "false", "XRAY_LOCAL_PROXY_PORT": "1080"}),
+            mock.patch("xray_client.entrypoint.write_status") as write_status_mock,
+            mock.patch("xray_client.entrypoint.install_shutdown_handlers") as install_handlers_mock,
+            mock.patch("xray_client.entrypoint.wait_for_shutdown") as wait_for_shutdown_mock,
+        ):
+            return_code = xray_entrypoint.main()
+
+        self.assertEqual(return_code, 0)
+        write_status_mock.assert_called_once_with({"mode": "disabled"})
+        install_handlers_mock.assert_called_once()
+        wait_for_shutdown_mock.assert_called_once()
 
 
 if __name__ == "__main__":
