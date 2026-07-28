@@ -11,27 +11,11 @@
 
 ## Как Проект Читает Данные
 
-### Raw operations без dedup и без `state`-фильтра
-
-Следующие сценарии читают `operations` в сыром виде:
-
-- `/today`
-- `/week`
-- `/month`
-- `/history`
-- `/twr`
-- триггер выполнения годового плана
-
-Это означает:
-
-- суммы пополнений и часть расходов здесь не фильтруются по `state = OPERATION_STATE_EXECUTED`;
-- dedup по `operation_id` в этих ветках не выполняется.
-
 ### Dedup + только `OPERATION_STATE_EXECUTED`
 
-Команда `/year` использует отдельный `OPERATIONS_DEDUP_CTE` и фильтр `state = OPERATION_STATE_EXECUTED`.
+Финансовые запросы к `operations` используют общий `OPERATIONS_DEDUP_CTE`: последняя строка выбирается по ключу `account_id + COALESCE(operation_id, id)` и затем фильтруется по `state = OPERATION_STATE_EXECUTED`.
 
-Практическое следствие: цифры `/year` могут отличаться от `/month`, `/week` и `/history`, если в `operations` есть дубликаты, промежуточные состояния или неисполненные записи.
+Этот слой применяется в расчётах `/today`, `/week`, `/month`, `/year`, `/history`, `/twr`, dataset и trigger выполнения годового плана. Отменённые/исполняющиеся операции и повторные строки одного `operation_id` не входят в суммы.
 
 ### Зависимость от `income_events`
 
@@ -57,7 +41,7 @@
 ### `/help`
 
 - Показывает список команд и фоновых задач.
-- Текст подсказки человекочитаемый, но фактическое расписание ежедневного JobQueue определяется локальным временем контейнера.
+- Показывает время ежедневного JobQueue вместе с таймзоной `TIMEZONE`.
 
 ### `/today`
 
@@ -230,7 +214,7 @@ Fallback:
 
 ### Ежедневный JobQueue
 
-`daily_job(...)` выполняется каждый день в `18:00` по локальному времени контейнера.
+`daily_job(...)` выполняется каждый день в `DAILY_SUMMARY_HOUR:DAILY_SUMMARY_MINUTE` по таймзоне `TIMEZONE` (по умолчанию `18:00 Europe/Moscow`).
 
 Если бот стартовал позже этого времени, одноразовый startup catch-up добирает пропущенный daily job за текущую дату.
 
@@ -282,7 +266,8 @@ Month-end delivery policy:
 
 Источник данных:
 
-- raw `operations` по типу `OPERATION_TYPE_INPUT`, без dedup и без `state`-фильтра.
+- dedup-слой `operations_dedup` по типу `OPERATION_TYPE_INPUT`;
+- только `state = OPERATION_STATE_EXECUTED`.
 
 ### Уведомления О Купонах И Дивидендах
 
@@ -311,9 +296,11 @@ Month-end delivery policy:
 ### Операции
 
 - Синхронизация использует `GetOperationsByCursor` с `withoutTrades=true`.
-- Запрос постраничный, курсорный.
+- Запрос постраничный, курсорный; граница `to` фиксируется один раз на весь проход.
 - `OPERATIONS_MAX_PAGES` защищает от бесконечной пагинации.
-- Если курсор API повторился, `tracker` завершает синк с предупреждением.
+- Повторный cursor, `hasNext=true` без `nextCursor`, некорректный ответ или достижение лимита до конца выдачи завершают синк ошибкой. Частично загруженные операции откатываются, а не фиксируются как успешный инкрементальный синк.
+- Все read-only запросы T-Invest используют одну keep-alive HTTP-сессию. Transport-ошибки, `408`, `429` и `5xx` повторяются с ограниченным backoff; `Retry-After` и `x-ratelimit-reset` имеют приоритет.
+- Динамические портфель и операции не кешируются. Успешные метаданные `GetInstrumentBy` хранятся в ограниченном process-local TTL/LRU-кеше.
 
 ### Backfill Полей `OperationItem`
 
@@ -322,14 +309,18 @@ Month-end delivery policy:
 ### Формирование `income_events`
 
 - `OPERATION_TYPE_COUPON` и `OPERATION_TYPE_DIVIDEND` считаются gross.
-- `OPERATION_TYPE_COUPON_TAX` и `OPERATION_TYPE_DIVIDEND_TAX` считаются tax.
+- Купонными налогами считаются актуальные типы T-Invest `OPERATION_TYPE_BOND_TAX`, `OPERATION_TYPE_BOND_TAX_PROGRESSIVE` и legacy-тип `OPERATION_TYPE_COUPON_TAX`.
+- Дивидендными налогами считаются `OPERATION_TYPE_DIVIDEND_TAX` и `OPERATION_TYPE_DIVIDEND_TAX_PROGRESSIVE`.
+- В агрегацию входят только `OPERATION_STATE_EXECUTED`.
 - `net_amount = gross + tax`.
-- `net_yield_pct = net_amount / latest_cost_basis * 100`, если cost basis положительный.
-- Если `net_amount <= 0`, событие не создаётся.
+- При создании события или коррекции его денежных сумм `net_yield_pct = net_amount / latest_cost_basis * 100`, если cost basis положительный; неизменённые исторические события не пересчитываются из-за последующего движения cost basis.
+- После каждого успешного синка затронутые доходные события пересчитываются по полной локальной истории ключа, поэтому поздний налог обновляет существующую строку, даже если исходная выплата не входила в текущее API-окно.
+- Уже отправленное уведомление при коррекции суммы повторно не отправляется.
+- Отсутствие ключа среди локальных исполненных операций не удаляет исторический `income_event`: неполная локальная история не считается доказательством отмены события.
 
 ## Известные Нюансы
 
-- `/today`, `/week`, `/month` и `/history` могут не совпадать с `/year` из-за разных правил по dedup и `state`.
-- `TIMEZONE` не сдвигает ежедневную отправку JobQueue.
+- T-Invest допускает изменение `operation_id` со временем; текущий dedup не связывает такие версии через `parent_operation_id`, поэтому логические дубли остаются отдельным риском качества данных.
+- `TIMEZONE` задаёт civil time ежедневного и утреннего JobQueue через timezone-aware `datetime.time`.
 - На чистой БД без SQL-миграции `deposits` остаётся таблицей, хотя новый код уже работает через `operations`.
 - Формулировки `/today`, `/week` и `/month` недетерминированы из-за случайного выбора шаблона; числовая часть при этом берётся из одних и тех же расчётов.

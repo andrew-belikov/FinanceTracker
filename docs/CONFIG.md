@@ -38,11 +38,20 @@
 - `TINVEST_PORTFOLIO_CURRENCY` — валюта портфеля (обычно `RUB`).
 - `TINVEST_ACCOUNT_STATUS` — фильтр статуса счёта (`ACCOUNT_STATUS_ALL` и т.п.).
 - `TINKOFF_ACCOUNT_ID` — фиксированный account_id (если пусто/`auto`, выбирается первый доступный).
-- `OPERATIONS_MAX_PAGES` — лимит страниц для синка операций.
+- `OPERATIONS_MAX_PAGES` — жёсткий лимит страниц для одного синка операций (по умолчанию `10000`). Если API сообщает о следующей странице после достижения лимита, синк завершается ошибкой и частичная транзакция откатывается.
+- `TINVEST_HTTP_TIMEOUT_SECONDS` — таймаут одного HTTP-запроса к T-Invest (по умолчанию `20` секунд).
+- `TINVEST_HTTP_RETRY_TOTAL` — число повторов после первой попытки для transport-ошибок, `408`, `429` и `5xx` (по умолчанию `3`). Повторы применяются только к используемым проектом read-only методам `Get*`.
+- `TINVEST_HTTP_BACKOFF_SECONDS` — начальная задержка экспоненциального backoff (по умолчанию `1` секунда).
+- `TINVEST_HTTP_MAX_BACKOFF_SECONDS` — верхняя граница задержки, в том числе для `Retry-After` и `x-ratelimit-reset` (по умолчанию `60` секунд).
+- `TINVEST_HTTP_POOL_CONNECTIONS` — число пулов в общей HTTP-сессии tracker (по умолчанию `8`).
+- `TINVEST_HTTP_POOL_MAXSIZE` — максимальное число keep-alive соединений, сохраняемых в одном пуле (по умолчанию `8`).
+- `TINVEST_INSTRUMENT_CACHE_TTL_SECONDS` — TTL положительного in-memory кеша метаданных `GetInstrumentBy` (по умолчанию `86400` секунд).
+- `TINVEST_INSTRUMENT_CACHE_MAX_ENTRIES` — максимальный размер LRU-кеша метаданных инструментов (по умолчанию `1024`; `0` отключает кеш).
 
 ## Сеть
 
 - `VERIFY_SSL` — проверка SSL сертификата при запросах к API (`true/false`). Рекомендуемое значение: `true`.
+- `tracker` повторно использует одну HTTP-сессию с keep-alive. Актуальные ответы `GetPortfolio` и `GetOperationsByCursor` не кешируются; кеш ограничен стабильными метаданными инструмента.
 - Postgres не публикует host port и доступен только сервисам внутри compose-сети по `db:5432`. Для администрирования используйте `docker compose exec db psql ...` или SSH tunnel до Docker-хоста.
 - `REPORTER_PORT` — внутренний HTTP-порт сервиса `reporter` для `/healthz` и `POST /reports/monthly/pdf` (по умолчанию `8088`).
 - `REPORTER_MAX_BODY_BYTES` — максимальный размер тела запроса для `POST /reports/monthly/pdf` (по умолчанию `65536`).

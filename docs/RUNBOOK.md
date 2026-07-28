@@ -215,9 +215,9 @@ docker compose logs --tail=200 bot
 
 Что учитывать:
 
-- JobQueue у бота живёт в локальном времени контейнера;
-- `TIMEZONE` не переводит ежедневный запуск на новое civil time;
-- если контейнер живёт в UTC, событие `18:00` тоже будет UTC.
+- ежедневный и утренний JobQueue используют timezone-aware время из `TIMEZONE`;
+- в startup-логе проверьте `daily_job_schedule` и `yesterday_peak_alert_schedule`;
+- системная таймзона контейнера не сдвигает эти два слота.
 
 ### Нет уведомлений о купонах или дивидендах
 
@@ -235,17 +235,14 @@ docker compose logs --tail=200 bot
 - `bot` помечает строку как `notified=true` только после успешной отправки во все целевые чаты;
 - если таблицы `income_events` нет, этот механизм не работает.
 
-### `/year` не совпадает с `/month` или `/history`
+### Отчёты расходятся с ручной суммой `operations`
 
-Это не обязательно ошибка. Команды читают данные по-разному:
+Команды `/year`, `/month`, `/week`, `/today`, `/history`, `/twr` и trigger-ветки используют общий dedup-слой и только `OPERATION_STATE_EXECUTED`. Ручная сумма по сырой таблице может отличаться из-за отменённых/исполняющихся строк или дублей.
 
-- `/year` использует dedup и только `OPERATION_STATE_EXECUTED`;
-- `/month`, `/week`, `/today`, `/history` и trigger-ветки используют raw `operations`.
-
-Сначала проверьте, нет ли дубликатов или неисполненных строк:
+Для диагностики проверьте состояния и ключи:
 
 ```bash
-docker compose exec -T db psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "SELECT operation_id, COUNT(*) FROM operations GROUP BY operation_id HAVING COUNT(*) > 1 ORDER BY COUNT(*) DESC LIMIT 20;"
+docker compose exec -T db psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "SELECT account_id, operation_id, COUNT(*) FROM operations GROUP BY account_id, operation_id HAVING COUNT(*) > 1 ORDER BY COUNT(*) DESC LIMIT 20;"
 docker compose exec -T db psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "SELECT state, COUNT(*) FROM operations GROUP BY state ORDER BY state;"
 ```
 

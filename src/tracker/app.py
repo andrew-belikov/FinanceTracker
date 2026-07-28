@@ -13,13 +13,19 @@ iis_tracker: ежедневные снапшоты портфеля + синхр
 
 import os
 import json
+import copy
 import textwrap
+import time
 import traceback
+from collections import OrderedDict
 from datetime import datetime, timezone, date, timedelta
+from email.utils import parsedate_to_datetime
+from threading import Lock
 from typing import Optional
 from zoneinfo import ZoneInfo
 import requests
 import urllib3
+from requests.adapters import HTTPAdapter
 from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 from apscheduler.triggers.cron import CronTrigger
@@ -65,6 +71,24 @@ BASE_URL = os.getenv(
 
 ACCOUNT_STATUS = os.getenv("TINVEST_ACCOUNT_STATUS", "ACCOUNT_STATUS_ALL")
 PORTFOLIO_CURRENCY = os.getenv("TINVEST_PORTFOLIO_CURRENCY", "RUB")
+HTTP_TIMEOUT_SECONDS = float(os.getenv("TINVEST_HTTP_TIMEOUT_SECONDS", "20"))
+HTTP_RETRY_TOTAL = max(0, int(os.getenv("TINVEST_HTTP_RETRY_TOTAL", "3")))
+HTTP_BACKOFF_SECONDS = max(0.0, float(os.getenv("TINVEST_HTTP_BACKOFF_SECONDS", "1")))
+HTTP_MAX_BACKOFF_SECONDS = max(
+    0.0,
+    float(os.getenv("TINVEST_HTTP_MAX_BACKOFF_SECONDS", "60")),
+)
+HTTP_POOL_CONNECTIONS = max(1, int(os.getenv("TINVEST_HTTP_POOL_CONNECTIONS", "8")))
+HTTP_POOL_MAXSIZE = max(1, int(os.getenv("TINVEST_HTTP_POOL_MAXSIZE", "8")))
+INSTRUMENT_CACHE_TTL_SECONDS = max(
+    0.0,
+    float(os.getenv("TINVEST_INSTRUMENT_CACHE_TTL_SECONDS", "86400")),
+)
+INSTRUMENT_CACHE_MAX_ENTRIES = max(
+    0,
+    int(os.getenv("TINVEST_INSTRUMENT_CACHE_MAX_ENTRIES", "1024")),
+)
+OPERATIONS_MAX_PAGES = max(1, int(os.getenv("OPERATIONS_MAX_PAGES", "10000")))
 
 # Можно зафиксировать конкретный account_id, если надо
 TINKOFF_ACCOUNT_ID = os.getenv("TINKOFF_ACCOUNT_ID", "")
@@ -483,6 +507,91 @@ def _build_response_body_ctx(resp, base_ctx: Optional[dict] = None) -> dict:
         return ctx
 
 
+def _build_api_session() -> requests.Session:
+    session = requests.Session()
+    adapter = HTTPAdapter(
+        pool_connections=HTTP_POOL_CONNECTIONS,
+        pool_maxsize=HTTP_POOL_MAXSIZE,
+        max_retries=0,
+    )
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    return session
+
+
+API_SESSION = _build_api_session()
+RETRYABLE_HTTP_STATUSES = frozenset({408, 429, *range(500, 600)})
+RETRYABLE_REQUEST_EXCEPTIONS = (
+    requests.exceptions.Timeout,
+    requests.exceptions.ConnectionError,
+    requests.exceptions.ChunkedEncodingError,
+)
+
+
+def _parse_retry_delay(value: Optional[str], *, now: Optional[datetime] = None) -> Optional[float]:
+    if value is None:
+        return None
+
+    raw_value = value.strip()
+    if not raw_value:
+        return None
+
+    try:
+        delay = float(raw_value)
+    except ValueError:
+        try:
+            retry_at = parsedate_to_datetime(raw_value)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if retry_at.tzinfo is None:
+            retry_at = retry_at.replace(tzinfo=timezone.utc)
+        current_time = now or datetime.now(timezone.utc)
+        delay = (retry_at - current_time).total_seconds()
+
+    if delay < 0:
+        return None
+    return min(delay, HTTP_MAX_BACKOFF_SECONDS)
+
+
+def _retry_delay_seconds(resp, attempt: int) -> float:
+    delay = _parse_retry_delay(resp.headers.get("Retry-After"))
+    if delay is None and resp.status_code == 429:
+        delay = _parse_retry_delay(resp.headers.get("x-ratelimit-reset"))
+    if delay is None:
+        delay = HTTP_BACKOFF_SECONDS * (2 ** (attempt - 1))
+    return min(max(0.0, delay), HTTP_MAX_BACKOFF_SECONDS)
+
+
+def _retry_log_ctx(
+    method_path: str,
+    *,
+    attempt: int,
+    delay_seconds: float,
+    resp=None,
+    exception_type: Optional[str] = None,
+) -> dict:
+    ctx = {
+        "method_path": method_path,
+        "attempt": attempt,
+        "max_attempts": HTTP_RETRY_TOTAL + 1,
+        "delay_seconds": delay_seconds,
+    }
+    if exception_type:
+        ctx["exception_type"] = exception_type
+    if resp is not None:
+        ctx["status_code"] = resp.status_code
+        for header_name in (
+            "x-tracking-id",
+            "x-ratelimit-limit",
+            "x-ratelimit-remaining",
+            "x-ratelimit-reset",
+        ):
+            value = resp.headers.get(header_name)
+            if value is not None:
+                ctx[header_name.replace("-", "_")] = value
+    return ctx
+
+
 def post_api(method_path: str, payload: dict) -> dict:
     url = f"{BASE_URL}/{method_path}"
 
@@ -491,28 +600,81 @@ def post_api(method_path: str, payload: dict) -> dict:
         "Content-Type": "application/json",
     }
 
-    try:
-        resp = requests.post(
-            url,
-            headers=headers,
-            json=payload,
-            timeout=20,
-            verify=VERIFY_SSL,
-        )
-    except requests.exceptions.SSLError as e:
-        logger.exception(
-            "api_request_ssl_error",
-            "SSL error while calling T-Invest API.",
-            {"method_path": method_path, "url_host": _url_host(url)},
-        )
-        raise
-    except requests.exceptions.RequestException as e:
-        logger.exception(
-            "api_request_failed",
-            "HTTP request to T-Invest API failed.",
-            {"method_path": method_path, "url_host": _url_host(url)},
-        )
-        raise
+    # Все текущие wrapper-ы вызывают read-only Get* методы. Если здесь появится
+    # мутационный RPC (например, выставление заявки), автоматические повторы
+    # должны быть отключены для него отдельно.
+    max_attempts = HTTP_RETRY_TOTAL + 1
+    for attempt in range(1, max_attempts + 1):
+        try:
+            resp = API_SESSION.post(
+                url,
+                headers=headers,
+                json=payload,
+                timeout=HTTP_TIMEOUT_SECONDS,
+                verify=VERIFY_SSL,
+            )
+        except requests.exceptions.SSLError:
+            logger.exception(
+                "api_request_ssl_error",
+                "SSL error while calling T-Invest API.",
+                {"method_path": method_path, "url_host": _url_host(url)},
+            )
+            raise
+        except RETRYABLE_REQUEST_EXCEPTIONS as exc:
+            if attempt >= max_attempts:
+                logger.exception(
+                    "api_request_failed",
+                    "HTTP request to T-Invest API failed after retries.",
+                    {
+                        "method_path": method_path,
+                        "url_host": _url_host(url),
+                        "attempts": attempt,
+                    },
+                )
+                raise
+
+            delay_seconds = min(
+                HTTP_BACKOFF_SECONDS * (2 ** (attempt - 1)),
+                HTTP_MAX_BACKOFF_SECONDS,
+            )
+            logger.warning(
+                "api_retry_scheduled",
+                "Retrying a failed T-Invest API request.",
+                _retry_log_ctx(
+                    method_path,
+                    attempt=attempt,
+                    delay_seconds=delay_seconds,
+                    exception_type=type(exc).__name__,
+                ),
+            )
+            time.sleep(delay_seconds)
+            continue
+        except requests.exceptions.RequestException:
+            logger.exception(
+                "api_request_failed",
+                "HTTP request to T-Invest API failed.",
+                {"method_path": method_path, "url_host": _url_host(url)},
+            )
+            raise
+
+        if resp.status_code == 200:
+            break
+
+        if resp.status_code in RETRYABLE_HTTP_STATUSES and attempt < max_attempts:
+            delay_seconds = _retry_delay_seconds(resp, attempt)
+            logger.warning(
+                "api_retry_scheduled",
+                "Retrying a retryable T-Invest API response.",
+                _retry_log_ctx(
+                    method_path,
+                    attempt=attempt,
+                    delay_seconds=delay_seconds,
+                    resp=resp,
+                ),
+            )
+            time.sleep(delay_seconds)
+            continue
+        break
 
     if resp.status_code != 200:
         error_ctx = {
@@ -574,7 +736,48 @@ def api_get_portfolio(account_id: str) -> dict:
     )
 
 
+_INSTRUMENT_CACHE: OrderedDict[str, tuple[float, dict]] = OrderedDict()
+_INSTRUMENT_CACHE_LOCK = Lock()
+
+
+def _get_cached_instrument(figi: str) -> Optional[dict]:
+    if INSTRUMENT_CACHE_TTL_SECONDS <= 0 or INSTRUMENT_CACHE_MAX_ENTRIES <= 0:
+        return None
+
+    now = time.monotonic()
+    with _INSTRUMENT_CACHE_LOCK:
+        cached = _INSTRUMENT_CACHE.get(figi)
+        if cached is None:
+            return None
+        expires_at, instrument = cached
+        if expires_at <= now:
+            del _INSTRUMENT_CACHE[figi]
+            return None
+        _INSTRUMENT_CACHE.move_to_end(figi)
+        return copy.deepcopy(instrument)
+
+
+def _cache_instrument(figi: str, instrument: Optional[dict]) -> None:
+    if (
+        not instrument
+        or INSTRUMENT_CACHE_TTL_SECONDS <= 0
+        or INSTRUMENT_CACHE_MAX_ENTRIES <= 0
+    ):
+        return
+
+    expires_at = time.monotonic() + INSTRUMENT_CACHE_TTL_SECONDS
+    with _INSTRUMENT_CACHE_LOCK:
+        _INSTRUMENT_CACHE[figi] = (expires_at, copy.deepcopy(instrument))
+        _INSTRUMENT_CACHE.move_to_end(figi)
+        while len(_INSTRUMENT_CACHE) > INSTRUMENT_CACHE_MAX_ENTRIES:
+            _INSTRUMENT_CACHE.popitem(last=False)
+
+
 def api_get_instrument_by_figi(figi: str) -> Optional[dict]:
+    cached = _get_cached_instrument(figi)
+    if cached is not None:
+        return cached
+
     data = post_api(
         "tinkoff.public.invest.api.contract.v1.InstrumentsService/GetInstrumentBy",
         {
@@ -582,38 +785,34 @@ def api_get_instrument_by_figi(figi: str) -> Optional[dict]:
             "id": figi,
         },
     )
-    return data.get("instrument")
+    instrument = data.get("instrument")
+    _cache_instrument(figi, instrument)
+    return instrument
 
 
-def api_get_operations_by_cursor(account_id: str, opened_iso: Optional[str]):
-    """
-    Генератор по всем операциям счёта.
-    """
-    if opened_iso:
-        from_dt = opened_iso
-    else:
-        from_dt = "2000-01-01T00:00:00Z"
+class OperationsPaginationError(RuntimeError):
+    """Pagination contract violation that must roll back a partial operation sync."""
 
-    now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+def _iter_operation_pages(
+    account_id: str,
+    from_date: Optional[str],
+    *,
+    to_iso: Optional[str] = None,
+    max_pages: Optional[int] = None,
+):
+    """Yield complete operation pages while enforcing cursor and page limits."""
+    from_iso = from_date or "2000-01-01T00:00:00Z"
+    fixed_to_iso = to_iso or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    page_limit = OPERATIONS_MAX_PAGES if max_pages is None else max(1, max_pages)
     cursor = ""
-    # Защита от бесконечного цикла: иногда API может вернуть повторяющийся cursor/nextCursor.
-    seen_cursors: set[str] = set()
-    max_pages = int(os.getenv("OPERATIONS_MAX_PAGES", "10000"))
-    page_i = 0
-    while True:
-        if cursor and cursor in seen_cursors:
-            logger.warning(
-                "operations_cursor_repeated",
-                "Operations cursor повторился — прерываю цикл, чтобы не зависнуть.",
-            )
-            break
-        if cursor:
-            seen_cursors.add(cursor)
+    seen_cursors = {cursor}
 
+    for page_number in range(1, page_limit + 1):
         payload = {
             "accountId": account_id,
-            "from": from_dt,
-            "to": now_iso,
+            "from": from_iso,
+            "to": fixed_to_iso,
             "cursor": cursor,
             "limit": 1000,
             "withoutTrades": True,
@@ -622,36 +821,67 @@ def api_get_operations_by_cursor(account_id: str, opened_iso: Optional[str]):
             "tinkoff.public.invest.api.contract.v1.OperationsService/GetOperationsByCursor",
             payload,
         )
-        operations = data.get("items") or data.get("operations") or []
-        for op in operations:
-            yield op
+        operations = data.get("items")
+        if operations is None:
+            operations = data.get("operations", [])
+        if not isinstance(operations, list):
+            raise OperationsPaginationError("T-Invest API returned malformed operations items")
 
         has_next = data.get("hasNext", False)
-        next_cursor = data.get("nextCursor") or ""
+        if not isinstance(has_next, bool):
+            raise OperationsPaginationError("T-Invest API returned non-boolean hasNext")
         logger.info(
             "operations_page_loaded",
             "Loaded operations page from T-Invest API.",
             {
                 "account_id": account_id,
+                "page_number": page_number,
                 "page_items_count": len(operations),
-                "next_cursor": next_cursor or None,
-                "has_next": bool(has_next),
+                "has_next": has_next,
             },
         )
+        yield operations
 
-        # Следующая страница
-        if not has_next or not next_cursor:
-            break
+        if not has_next:
+            return
 
-        page_i += 1
-        if page_i >= max_pages:
-            logger.warning(
-                "operations_max_pages_reached",
-                "OPERATIONS_MAX_PAGES достигнут — прерываю синхронизацию операций.",
+        next_cursor = data.get("nextCursor")
+        if not isinstance(next_cursor, str) or not next_cursor:
+            logger.error(
+                "operations_next_cursor_missing",
+                "T-Invest API reported another page without a next cursor.",
+                {"account_id": account_id, "page_number": page_number},
             )
-            break
+            raise OperationsPaginationError("hasNext=true without nextCursor")
 
+        if next_cursor in seen_cursors:
+            logger.error(
+                "operations_cursor_repeated",
+                "T-Invest API repeated an operations cursor.",
+                {"account_id": account_id, "page_number": page_number},
+            )
+            raise OperationsPaginationError("operations cursor repeated")
+
+        if page_number >= page_limit:
+            logger.error(
+                "operations_max_pages_reached",
+                "Operations page limit reached before pagination completed.",
+                {
+                    "account_id": account_id,
+                    "page_number": page_number,
+                    "max_pages": page_limit,
+                },
+            )
+            raise OperationsPaginationError("operations page limit reached")
+
+        seen_cursors.add(next_cursor)
         cursor = next_cursor
+
+
+def api_get_operations_by_cursor(account_id: str, opened_iso: Optional[str]):
+    """Compatibility iterator over operations backed by guarded page traversal."""
+    for operations in _iter_operation_pages(account_id, opened_iso):
+        yield from operations
 
 
 # ============ ЛОГИКА СЕРВИСА ============
@@ -992,28 +1222,19 @@ def _upsert_operation(db, acc_id: str, op: dict) -> tuple[Optional[Operation], b
     return existing, False
 
 
-def _sync_operations(db, account_id: str, from_date: Optional[str]) -> dict:
+def _sync_operations(
+    db,
+    account_id: str,
+    from_date: Optional[str],
+    *,
+    affected_income_keys: Optional[set[tuple[str, date, str]]] = None,
+) -> dict:
     """Синхронизирует операции счёта через GetOperationsByCursor и upsert в БД."""
-    cursor = ""
     count_new = 0
     count_updated = 0
     loaded_total = 0
 
-    while True:
-        payload = {
-            "accountId": account_id,
-            "from": from_date or "2000-01-01T00:00:00Z",
-            "to": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "limit": 1000,
-            "withoutTrades": True,
-            "cursor": cursor,
-        }
-        data = post_api(
-            "tinkoff.public.invest.api.contract.v1.OperationsService/GetOperationsByCursor",
-            payload,
-        )
-
-        operations = data.get("items") or data.get("operations") or []
+    for operations in _iter_operation_pages(account_id, from_date):
         loaded_total += len(operations)
 
         for op in operations:
@@ -1024,24 +1245,25 @@ def _sync_operations(db, account_id: str, from_date: Optional[str]) -> dict:
                 count_new += 1
             else:
                 count_updated += 1
+            if (
+                affected_income_keys is not None
+                and operation.figi
+                and operation.operation_type in INCOME_OPERATION_TYPE_MAP
+            ):
+                event_type, _ = INCOME_OPERATION_TYPE_MAP[operation.operation_type]
+                affected_income_keys.add(
+                    (operation.figi, operation.date.date(), event_type)
+                )
 
-        next_cursor = data.get("nextCursor") or ""
         logger.info(
-            "operations_page_loaded",
-            "Loaded operations page for sync.",
+            "operations_page_persisted",
+            "Persisted operations page in the current transaction.",
             {
                 "account_id": account_id,
                 "page_items_count": len(operations),
                 "loaded_total": loaded_total,
-                "next_cursor": next_cursor or None,
-                "has_next": bool(data.get("hasNext")),
             },
         )
-
-        has_next = bool(data.get("hasNext"))
-        if not has_next or not next_cursor:
-            break
-        cursor = next_cursor
 
     return {"loaded": loaded_total, "new": count_new, "updated": count_updated}
 
@@ -1052,6 +1274,129 @@ def sync_operations(account_id: str, from_date: Optional[str]) -> dict:
         stats = _sync_operations(db, account_id, from_date)
         db.commit()
         return stats
+
+
+INCOME_OPERATION_TYPE_MAP = {
+    "OPERATION_TYPE_COUPON": ("coupon", "gross"),
+    # COUPON_TAX сохраняется для совместимости с уже загруженными данными.
+    "OPERATION_TYPE_COUPON_TAX": ("coupon", "tax"),
+    "OPERATION_TYPE_BOND_TAX": ("coupon", "tax"),
+    "OPERATION_TYPE_BOND_TAX_PROGRESSIVE": ("coupon", "tax"),
+    "OPERATION_TYPE_DIVIDEND": ("dividend", "gross"),
+    "OPERATION_TYPE_DIVIDEND_TAX": ("dividend", "tax"),
+    "OPERATION_TYPE_DIVIDEND_TAX_PROGRESSIVE": ("dividend", "tax"),
+}
+EXECUTED_OPERATION_STATE = "OPERATION_STATE_EXECUTED"
+
+
+def _reconcile_income_events(
+    db,
+    account_id: str,
+    affected_keys: set[tuple[str, date, str]],
+) -> dict:
+    """
+    Пересчитывает затронутые доходные события по полной локальной истории.
+
+    Полная история ключа нужна для поздних налогов: узкое
+    API-окно может содержать налог, но не исходную выплату.
+    """
+    if not affected_keys:
+        return {"income_created": 0, "income_updated": 0}
+
+    income_by_key: dict[tuple[str, date, str], dict[str, float]] = {}
+
+    rows = (
+        db.query(Operation)
+        .filter(
+            Operation.account_id == account_id,
+            Operation.state == EXECUTED_OPERATION_STATE,
+            Operation.operation_type.in_(tuple(INCOME_OPERATION_TYPE_MAP)),
+        )
+        .all()
+    )
+    for row in rows:
+        if not row.figi:
+            continue
+        event_type, amount_kind = INCOME_OPERATION_TYPE_MAP[row.operation_type]
+        key = (row.figi, row.date.date(), event_type)
+        if key not in affected_keys:
+            continue
+        if key not in income_by_key:
+            income_by_key[key] = {"gross": 0.0, "tax": 0.0}
+        income_by_key[key][amount_kind] += float(row.amount or 0)
+
+    existing_events = (
+        db.query(IncomeEvent)
+        .filter(IncomeEvent.account_id == account_id)
+        .all()
+    )
+    existing_by_key = {
+        (row.figi, row.event_date, row.event_type): row
+        for row in existing_events
+        if (row.figi, row.event_date, row.event_type) in affected_keys
+    }
+
+    cost_basis_by_figi: dict[str, Optional[float]] = {}
+    created = 0
+    updated = 0
+
+    for (figi, event_date, event_type), amounts in income_by_key.items():
+        gross_sum = amounts["gross"]
+        tax_sum = amounts["tax"]
+        net_amount = compute_income_net_amount(gross_sum, tax_sum)
+        if net_amount <= 0:
+            continue
+
+        expected_amounts = {
+            "gross_amount": round(gross_sum, 2),
+            "tax_amount": round(tax_sum, 2),
+            "net_amount": round(net_amount, 2),
+        }
+        key = (figi, event_date, event_type)
+        existing = existing_by_key.get(key)
+        if existing is None:
+            if figi not in cost_basis_by_figi:
+                cost_basis_by_figi[figi] = get_latest_cost_basis(db, figi)
+            net_yield_pct = compute_income_net_yield_pct(
+                net_amount,
+                cost_basis_by_figi[figi],
+            )
+            db.add(
+                IncomeEvent(
+                    account_id=account_id,
+                    figi=figi,
+                    event_date=event_date,
+                    event_type=event_type,
+                    notified=False,
+                    net_yield_pct=round(net_yield_pct, 4),
+                    **expected_amounts,
+                )
+            )
+            created += 1
+            continue
+
+        amounts_changed = any(
+            round(float(getattr(existing, field)), 2) != value
+            for field, value in expected_amounts.items()
+        )
+        if amounts_changed:
+            if figi not in cost_basis_by_figi:
+                cost_basis_by_figi[figi] = get_latest_cost_basis(db, figi)
+            net_yield_pct = compute_income_net_yield_pct(
+                net_amount,
+                cost_basis_by_figi[figi],
+            )
+            for field, value in expected_amounts.items():
+                setattr(existing, field, value)
+            existing.net_yield_pct = round(net_yield_pct, 4)
+            # Уже отправленное уведомление не повторяем; отчёты и dataset
+            # сразу увидят исправленные суммы после commit.
+            updated += 1
+
+    return {
+        "income_created": created,
+        "income_updated": updated,
+    }
 
 
 def sync_operations_for_account(db, acc_data: dict):
@@ -1089,72 +1434,28 @@ def sync_operations_for_account(db, acc_data: dict):
             {"account_id": acc_id, "from": from_iso},
         )
 
-    stats = _sync_operations(db, acc_id, from_iso)
-
-    income_type_map = {
-        "OPERATION_TYPE_COUPON": ("coupon", "gross"),
-        "OPERATION_TYPE_COUPON_TAX": ("coupon", "tax"),
-        "OPERATION_TYPE_DIVIDEND": ("dividend", "gross"),
-        "OPERATION_TYPE_DIVIDEND_TAX": ("dividend", "tax"),
-    }
-    income_by_key: dict[tuple[str, date, str], dict[str, float]] = {}
-    from_dt = parse_iso_dt(from_iso) if from_iso else None
-
-    query = db.query(Operation).filter(Operation.account_id == acc_id)
-    if from_dt is not None:
-        if from_dt.tzinfo is not None:
-            from_dt = from_dt.astimezone(timezone.utc).replace(tzinfo=None)
-        query = query.filter(Operation.date >= from_dt)
-
-    for row in query:
-        if not row.figi or row.operation_type not in income_type_map:
-            continue
-        event_type, amount_kind = income_type_map[row.operation_type]
-        key = (row.figi, row.date.date(), event_type)
-        if key not in income_by_key:
-            income_by_key[key] = {"gross": 0.0, "tax": 0.0}
-        income_by_key[key][amount_kind] += float(row.amount or 0)
-
-    for (figi, event_date, event_type), amounts in income_by_key.items():
-        gross_sum = amounts["gross"]
-        tax_sum = amounts["tax"]
-        net_amount = compute_income_net_amount(gross_sum, tax_sum)
-        if net_amount <= 0:
-            continue
-
-        cost_basis = get_latest_cost_basis(db, figi)
-        net_yield_pct = compute_income_net_yield_pct(net_amount, cost_basis)
-
-        db.execute(
-            text(
-                """
-                INSERT INTO income_events (
-                    account_id, figi, event_date, event_type,
-                    gross_amount, tax_amount, net_amount, net_yield_pct, notified
-                ) VALUES (
-                    :account_id, :figi, :event_date, :event_type,
-                    :gross_amount, :tax_amount, :net_amount, :net_yield_pct, false
-                )
-                ON CONFLICT (account_id, figi, event_date, event_type) DO NOTHING
-                """
-            ),
-            {
-                "account_id": acc_id,
-                "figi": figi,
-                "event_date": event_date,
-                "event_type": event_type,
-                "gross_amount": round(gross_sum, 2),
-                "tax_amount": round(tax_sum, 2),
-                "net_amount": round(net_amount, 2),
-                "net_yield_pct": round(net_yield_pct, 4),
-            },
+    affected_income_keys: set[tuple[str, date, str]] = set()
+    stats = _sync_operations(
+        db,
+        acc_id,
+        from_iso,
+        affected_income_keys=affected_income_keys,
+    )
+    stats.update(
+        _reconcile_income_events(
+            db,
+            acc_id,
+            affected_income_keys,
         )
+    )
 
     logger.info(
         "operations_sync_completed",
         "Operations sync completed.",
         {"account_id": acc_id, **stats},
     )
+
+
 def run_snapshot_and_operations_once():
     accounts_data = api_get_accounts()
     acc = choose_account(accounts_data)
