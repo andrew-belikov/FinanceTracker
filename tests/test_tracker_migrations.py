@@ -72,6 +72,20 @@ class TrackerMigrationTests(unittest.TestCase):
                 {"20260101_missing.sql": "checksum"},
             )
 
+    def test_asset_alias_backfill_produces_one_row_per_conflict_key(self):
+        sql = (
+            PROJECT_ROOT / "migrations" / "20260324_dataset_source_fields.sql"
+        ).read_text(encoding="utf-8")
+        backfill = sql.split("INSERT INTO public.asset_aliases", 1)[1]
+        group_by = backfill.split("GROUP BY", 1)[1].split("ON CONFLICT", 1)[0]
+
+        self.assertIn("MAX(i.ticker)", backfill)
+        self.assertIn("MAX(COALESCE(", backfill)
+        self.assertIn("NOW() AS created_at", backfill)
+        self.assertIn("NOW() AS updated_at", backfill)
+        self.assertNotIn("i.ticker", group_by)
+        self.assertNotIn("o.name", group_by)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -45,25 +45,27 @@ INSERT INTO public.asset_aliases (
     ticker,
     name,
     first_seen_at,
-    last_seen_at
+    last_seen_at,
+    created_at,
+    updated_at
 )
 SELECT
     o.asset_uid,
     o.instrument_uid,
     o.figi,
-    i.ticker,
-    COALESCE(NULLIF(o.name, ''), i.name, o.figi, o.asset_uid) AS name,
+    MAX(i.ticker) AS ticker,
+    MAX(COALESCE(NULLIF(o.name, ''), i.name, o.figi, o.asset_uid)) AS name,
     MIN(o.date) AS first_seen_at,
-    MAX(o.date) AS last_seen_at
+    MAX(o.date) AS last_seen_at,
+    NOW() AS created_at,
+    NOW() AS updated_at
 FROM public.operations o
 LEFT JOIN public.instruments i ON i.figi = o.figi
 WHERE o.asset_uid IS NOT NULL
 GROUP BY
     o.asset_uid,
     o.instrument_uid,
-    o.figi,
-    i.ticker,
-    COALESCE(NULLIF(o.name, ''), i.name, o.figi, o.asset_uid)
+    o.figi
 ON CONFLICT (asset_uid, instrument_uid, figi) DO UPDATE
 SET
     ticker = COALESCE(EXCLUDED.ticker, public.asset_aliases.ticker),
