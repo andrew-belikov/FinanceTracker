@@ -13,6 +13,8 @@
   - команда `/targets` показывает текущие таргеты аллокации, а `/targets set stocks=50 bonds=30 cash=20` сохраняет целевые доли по классам активов;
   - команда `/rebalance` показывает текущие отклонения от таргетов и расчёт buy/sell по классам, чтобы вернуться к целевой структуре;
   - команда `/invest <sum>` подсказывает, как распределить новое пополнение по таргетам;
+  - команда `/calendar` показывает ожидаемые купоны и объявленные дивиденды по текущим позициям на следующие 90 дней;
+  - каждый понедельник в `10:00 Europe/Moscow` приходит сводка выплат с понедельника по воскресенье;
   - команда `/twr` с corrected дневным period-first TWR по активному счёту, XIRR в годовых, run-rate на 31 декабря (без новых внешних cashflow) и графиком по дням в двух связанных панелях: стоимость портфеля и TWR;
   - команда `/dataset` отправляет один ZIP-архив для AI-анализа: внутри `dataset.json`, `daily_timeseries.csv`, `positions_current.csv`, `operations.csv`, `income_events.csv` и `README_AI.md`; summary в архиве period-first, а не lifetime-first, плюс есть `logical_asset_id`, `reconciliation_*` и quality flags;
   - команда `/year` работает в двух режимах: без аргумента — отчёт за текущий год (YTD), с аргументом `/year YYYY` — отчёт за указанный календарный год;
@@ -251,6 +253,7 @@ docker compose config > /dev/null
 - `migrations/20260324_dataset_source_fields.sql` — добавляет поля для source-aware `/dataset` и таблицу `asset_aliases`;
 - `migrations/20260324_rebalance_targets_and_invest_notifications.sql` — создаёт `rebalance_targets` и `invest_notifications`.
 - `migrations/20260404_bot_daily_job_runs.sql` — создаёт `bot_daily_job_runs` для идемпотентного daily job и startup catch-up после позднего рестарта.
+- `migrations/20260728_payout_calendar_events.sql` — создаёт кеш ожидаемых купонов и объявленных дивидендов для `/calendar` и понедельничной рассылки.
 
 ### Историческая миграция со схемы `deposits`
 
@@ -291,6 +294,7 @@ docker compose exec -T db psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" < migration
 docker compose exec -T db psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" < migrations/20260324_dataset_source_fields.sql
 docker compose exec -T db psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" < migrations/20260324_rebalance_targets_and_invest_notifications.sql
 docker compose exec -T db psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" < migrations/20260404_bot_daily_job_runs.sql
+docker compose exec -T db psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" < migrations/20260728_payout_calendar_events.sql
 ```
 
 Нюансы:
@@ -298,6 +302,7 @@ docker compose exec -T db psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" < migration
 - `income_events` нужен для минутных уведомлений о купонах/дивидендах и части отчётных сумм;
 - миграцию `20260324_rebalance_targets_and_invest_notifications.sql` нужно применить до пересборки `tracker`, иначе новый код не сможет писать расширенные поля `portfolio_positions`.
 - миграция `20260404_bot_daily_job_runs.sql` нужна боту, чтобы не терять ежедневные trigger-уведомления после старта позже настроенных JobQueue-слотов.
+- `payout_calendar_events` на чистой БД создаётся автоматически; отдельная миграция нужна для явного управляемого обновления существующей схемы.
 
 ### Разовый repair после старого Windows backup
 
@@ -314,6 +319,7 @@ docker compose exec -T tracker python repair_operations_description_encoding.py
 Авто-рассылки JobQueue:
 - каждый день в `YESTERDAY_PEAK_ALERT_HOUR:YESTERDAY_PEAK_ALERT_MINUTE` по таймзоне `TIMEZONE` проверяется максимум по итогам вчерашнего дня;
 - каждый день в `DAILY_SUMMARY_HOUR:DAILY_SUMMARY_MINUTE` по таймзоне `TIMEZONE` проверяется выполнение годового плана;
+- каждый понедельник в `PAYOUT_WEEKLY_HOUR:PAYOUT_WEEKLY_MINUTE` по `PAYOUT_WEEKLY_TIMEZONE` отправляется календарь выплат на текущую неделю;
 - по пятницам в то же время дополнительно отправляется недельный отчёт;
 - в последний день месяца в то же время дополнительно отправляется месячный отчёт и PDF-версия.
 - если бот стартовал позже ежедневного слота, он один раз добирает пропущенный daily job после запуска и не дублирует его в пределах той же даты.
@@ -355,6 +361,7 @@ docker compose exec -T db psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "SELECT 
 - `/history` — строится график стоимости и пополнений, а максимум портфеля отмечается отдельной красной точкой с датой и значением.
 - `/structure` — корректно отрисовывается структура портфеля.
 - `/twr` — приходит corrected дневной period-first TWR по активному счёту, XIRR в годовых, run-rate на 31 декабря без новых пополнений/выводов и график по дням.
+- `/calendar` — приходит календарь ожидаемых купонов и объявленных дивидендов на 90 дней; суммы в разных валютах не складываются.
 - `/dataset` — приходит ZIP-архив с `json + csv + md`, пригодный для передачи ИИ-модели; внутри summary используются `period_*` поля, `has_full_history_from_zero`, `reconciliation_gap_abs`, а в `positions_current`/`operations` есть `logical_asset_id`.
 
 ## Бэклог `/dataset`

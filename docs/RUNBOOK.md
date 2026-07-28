@@ -94,6 +94,7 @@ cat backup.sql | docker compose exec -T db psql -U "$POSTGRES_USER" -d "$POSTGRE
 | `migrations/20260226_income_events.sql` | если существующая схема ещё без `income_events` | создаёт таблицу событий дохода | без этой таблицы минутные income-notifications и часть отчётных сумм не работают |
 | `migrations/20260304_operations_operation_item_fields.sql` | если существующая `operations` ещё без расширенных полей `OperationItem` | добавляет колонки `state`, `commission`, `yield`, `instrument_type` и другие | также добавляет unique-констрейнт по `operation_id`; после миграции возможен backfill исторических строк |
 | `migrations/20260404_bot_daily_job_runs.sql` | если нужен startup catch-up для daily job без дублей | создаёт таблицу `bot_daily_job_runs` | без этой таблицы бот не сможет надёжно добирать пропущенный daily job после позднего рестарта |
+| `migrations/20260728_payout_calendar_events.sql` | при добавлении `/calendar` в существующую БД | создаёт таблицу ожидаемых купонов и объявленных дивидендов | tracker также создаёт таблицу через `create_all`, но явная миграция оставляет управляемый след изменения схемы |
 
 ## Рекомендуемый Порядок Миграции
 
@@ -117,6 +118,7 @@ docker compose exec -T db psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" < migration
 docker compose exec -T db psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" < migrations/20260226_income_events.sql
 docker compose exec -T db psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" < migrations/20260304_operations_operation_item_fields.sql
 docker compose exec -T db psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" < migrations/20260404_bot_daily_job_runs.sql
+docker compose exec -T db psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" < migrations/20260728_payout_calendar_events.sql
 ```
 
 4. Поднимите сервисы обратно:
@@ -124,6 +126,22 @@ docker compose exec -T db psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" < migration
 ```bash
 docker compose up -d tracker bot
 ```
+
+### `/calendar` пуст или устарел
+
+Проверьте последний результат синхронизации:
+
+```bash
+docker compose logs --tail=300 tracker | grep payout_calendar
+docker compose exec -T db psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "SELECT event_type, currency, COUNT(*), MIN(payment_date), MAX(payment_date), MIN(fetched_at), MAX(fetched_at) FROM payout_calendar_events GROUP BY event_type, currency ORDER BY event_type, currency;"
+```
+
+Нормальное поведение:
+
+- `payout_calendar_sync_completed` с `failed=0`;
+- пустой календарь допустим, если по текущим позициям нет купонов или объявленных дивидендов;
+- при ошибке отдельного инструмента старые строки сохраняются;
+- `GetDividends` запрашивается с lookback по `record_date`, а итоговое окно фильтруется по `payment_date`.
 
 5. Проверьте логи:
 

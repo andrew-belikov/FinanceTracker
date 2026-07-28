@@ -25,6 +25,10 @@ from runtime import (
     POLLING_BACKLOG_RECOVERY_CONFIRMATION_COUNT,
     POLLING_BACKLOG_STALL_THRESHOLD_SECONDS,
     POLLING_SELF_HEAL_EXIT_CODE,
+    PAYOUT_WEEKLY_HOUR,
+    PAYOUT_WEEKLY_MINUTE,
+    PAYOUT_WEEKLY_SCHEDULE_LABEL,
+    PAYOUT_WEEKLY_TZ,
     TARGET_CHAT_IDS,
     TZ,
     YESTERDAY_PEAK_ALERT_HOUR,
@@ -50,6 +54,7 @@ from runtime import (
 from services import (
     build_invest_text_for_account,
     build_month_summary,
+    build_payout_calendar_text_for_account,
     build_triggers_messages,
     build_week_summary,
     build_yesterday_peak_alert_message,
@@ -63,8 +68,10 @@ BOT_EXIT_CODE = 0
 DAILY_JOB_NAME = "daily_summary"
 MONTHLY_PDF_JOB_NAME = "monthly_pdf_delivery"
 YESTERDAY_PEAK_ALERT_JOB_NAME = "yesterday_peak_alert"
+PAYOUT_WEEKLY_JOB_NAME = "weekly_payout_digest"
 DAILY_JOB_STARTUP_CATCHUP_DELAY_SECONDS = 5
 YESTERDAY_PEAK_ALERT_STARTUP_CATCHUP_DELAY_SECONDS = 7
+PAYOUT_WEEKLY_STARTUP_CATCHUP_DELAY_SECONDS = 9
 
 
 def reset_polling_watchdog_state() -> None:
@@ -97,6 +104,18 @@ def is_yesterday_peak_alert_catchup_due(now_local: datetime) -> bool:
     scheduled_at = now_local.replace(
         hour=YESTERDAY_PEAK_ALERT_HOUR,
         minute=YESTERDAY_PEAK_ALERT_MINUTE,
+        second=0,
+        microsecond=0,
+    )
+    return now_local >= scheduled_at
+
+
+def is_payout_weekly_catchup_due(now_local: datetime) -> bool:
+    if now_local.weekday() != 0:
+        return False
+    scheduled_at = now_local.replace(
+        hour=PAYOUT_WEEKLY_HOUR,
+        minute=PAYOUT_WEEKLY_MINUTE,
         second=0,
         microsecond=0,
     )
@@ -340,6 +359,137 @@ async def yesterday_peak_alert_startup_catchup(context: ContextTypes.DEFAULT_TYP
         return
 
     await _run_yesterday_peak_alert_job(context, trigger_source="startup_catchup", now_local=now_local)
+
+
+async def payout_weekly_job(context: ContextTypes.DEFAULT_TYPE):
+    await _run_payout_weekly_job(context, trigger_source="scheduled")
+
+
+async def payout_weekly_startup_catchup(context: ContextTypes.DEFAULT_TYPE):
+    now_local = datetime.now(PAYOUT_WEEKLY_TZ)
+    if not is_payout_weekly_catchup_due(now_local):
+        logger.info(
+            "payout_weekly_catchup_not_due",
+            "Skipping startup catch-up because the weekly payout digest is not due.",
+            {
+                "today": now_local.date().isoformat(),
+                "scheduled_for": PAYOUT_WEEKLY_SCHEDULE_LABEL,
+                "started_at": now_local.isoformat(),
+            },
+        )
+        return
+
+    await _run_payout_weekly_job(
+        context,
+        trigger_source="startup_catchup",
+        now_local=now_local,
+    )
+
+
+async def _run_payout_weekly_job(
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    trigger_source: str,
+    now_local: datetime | None = None,
+):
+    now_local = now_local or datetime.now(PAYOUT_WEEKLY_TZ)
+    week_start = now_local.date()
+    week_end = week_start + timedelta(days=6)
+    should_run, tracking_available = _claim_scheduled_job_run(
+        job_name=PAYOUT_WEEKLY_JOB_NAME,
+        run_date=week_start,
+        trigger_source=trigger_source,
+        scheduled_for=PAYOUT_WEEKLY_SCHEDULE_LABEL,
+    )
+    if not should_run:
+        return
+
+    logger.info(
+        "payout_weekly_started",
+        "Weekly payout digest started.",
+        {
+            "week_start": week_start.isoformat(),
+            "week_end": week_end.isoformat(),
+            "scheduled_for": PAYOUT_WEEKLY_SCHEDULE_LABEL,
+            "trigger_source": trigger_source,
+            "tracking_available": tracking_available,
+        },
+    )
+
+    message = None
+    sent_total = 0
+    failed_total = 0
+    try:
+        with db_session() as session:
+            account_id = resolve_reporting_account_id(session)
+            if account_id is None:
+                raise RuntimeError("Reporting account is unavailable")
+            message = build_payout_calendar_text_for_account(
+                session,
+                account_id,
+                start_date=week_start,
+                end_date=week_end,
+                heading="💸 Выплаты на этой неделе",
+            )
+    except Exception:
+        failed_total = len(TARGET_CHAT_IDS) or 1
+        logger.exception(
+            "payout_weekly_build_failed",
+            "Failed to build weekly payout digest.",
+            {
+                "week_start": week_start.isoformat(),
+                "week_end": week_end.isoformat(),
+                "trigger_source": trigger_source,
+            },
+        )
+
+    if message:
+        for chat_id in TARGET_CHAT_IDS:
+            try:
+                await safe_send_message(context.bot, chat_id, message, parse_mode=None)
+                sent_total += 1
+                logger.info(
+                    "payout_weekly_sent",
+                    "Weekly payout digest sent.",
+                    {
+                        "chat_id": chat_id,
+                        "week_start": week_start.isoformat(),
+                        "week_end": week_end.isoformat(),
+                    },
+                )
+            except Exception:
+                failed_total += 1
+                logger.exception(
+                    "payout_weekly_send_failed",
+                    "Failed to send weekly payout digest.",
+                    {
+                        "chat_id": chat_id,
+                        "week_start": week_start.isoformat(),
+                        "week_end": week_end.isoformat(),
+                    },
+                )
+
+    _finalize_scheduled_job_run(
+        tracking_available=tracking_available,
+        job_name=PAYOUT_WEEKLY_JOB_NAME,
+        run_date=week_start,
+        trigger_source=trigger_source,
+        sent_total=sent_total,
+        failed_total=failed_total,
+    )
+    logger.info(
+        "payout_weekly_completed",
+        "Weekly payout digest completed.",
+        {
+            "week_start": week_start.isoformat(),
+            "week_end": week_end.isoformat(),
+            "sent_total": sent_total,
+            "failed_total": failed_total,
+            "message_ready": bool(message),
+            "trigger_source": trigger_source,
+            "tracking_available": tracking_available,
+        },
+    )
 
 
 async def _run_yesterday_peak_alert_job(
