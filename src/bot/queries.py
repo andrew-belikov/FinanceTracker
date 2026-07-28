@@ -974,11 +974,20 @@ def get_year_financials_from_operations(session, account_id: str, start_dt: date
             SELECT
                 COALESCE(SUM(CASE WHEN operation_type IN :deposit_types THEN amount ELSE 0 END), 0) AS deposits,
                 COALESCE(SUM(CASE
-                    WHEN operation_type IN ('OPERATION_TYPE_DIVIDEND', 'OPERATION_TYPE_DIVIDEND_TAX') THEN amount
+                    WHEN operation_type IN (
+                        'OPERATION_TYPE_DIVIDEND',
+                        'OPERATION_TYPE_DIVIDEND_TAX',
+                        'OPERATION_TYPE_DIVIDEND_TAX_PROGRESSIVE'
+                    ) THEN amount
                     ELSE 0
                 END), 0) AS dividend_net,
                 COALESCE(SUM(CASE
-                    WHEN operation_type IN ('OPERATION_TYPE_COUPON', 'OPERATION_TYPE_COUPON_TAX') THEN amount
+                    WHEN operation_type IN (
+                        'OPERATION_TYPE_COUPON',
+                        'OPERATION_TYPE_COUPON_TAX',
+                        'OPERATION_TYPE_BOND_TAX',
+                        'OPERATION_TYPE_BOND_TAX_PROGRESSIVE'
+                    ) THEN amount
                     ELSE 0
                 END), 0) AS coupon_net
             FROM operations_dedup
@@ -1074,7 +1083,13 @@ def compute_income_by_asset_net(session, account_id: str, start_dt: datetime, en
                     COALESCE(SUM(
                         CASE
                             WHEN od.operation_type IN ('OPERATION_TYPE_DIVIDEND', 'OPERATION_TYPE_COUPON') THEN od.amount
-                            WHEN od.operation_type IN ('OPERATION_TYPE_DIVIDEND_TAX', 'OPERATION_TYPE_COUPON_TAX') THEN od.amount
+                            WHEN od.operation_type IN (
+                                'OPERATION_TYPE_DIVIDEND_TAX',
+                                'OPERATION_TYPE_DIVIDEND_TAX_PROGRESSIVE',
+                                'OPERATION_TYPE_COUPON_TAX',
+                                'OPERATION_TYPE_BOND_TAX',
+                                'OPERATION_TYPE_BOND_TAX_PROGRESSIVE'
+                            ) THEN od.amount
                             ELSE 0
                         END
                     ), 0) AS net_amount
@@ -1087,8 +1102,11 @@ def compute_income_by_asset_net(session, account_id: str, start_dt: datetime, en
                   AND od.operation_type IN (
                       'OPERATION_TYPE_DIVIDEND',
                       'OPERATION_TYPE_DIVIDEND_TAX',
+                      'OPERATION_TYPE_DIVIDEND_TAX_PROGRESSIVE',
                       'OPERATION_TYPE_COUPON',
-                      'OPERATION_TYPE_COUPON_TAX'
+                      'OPERATION_TYPE_COUPON_TAX',
+                      'OPERATION_TYPE_BOND_TAX',
+                      'OPERATION_TYPE_BOND_TAX_PROGRESSIVE'
                   )
                   AND od.figi IS NOT NULL
                 GROUP BY od.figi

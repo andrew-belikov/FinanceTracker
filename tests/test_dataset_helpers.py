@@ -88,6 +88,15 @@ class DatasetHelpersTests(unittest.TestCase):
         self.assertEqual(classify_operation_group("OPERATION_TYPE_TAX"), "income_tax")
         self.assertEqual(classify_operation_group("OPERATION_TYPE_DIVIDEND_TAX"), "income_tax")
         self.assertEqual(classify_operation_group("OPERATION_TYPE_COUPON_TAX"), "income_tax")
+        self.assertEqual(classify_operation_group("OPERATION_TYPE_BOND_TAX"), "income_tax")
+        self.assertEqual(
+            classify_operation_group("OPERATION_TYPE_BOND_TAX_PROGRESSIVE"),
+            "income_tax",
+        )
+        self.assertEqual(
+            classify_operation_group("OPERATION_TYPE_DIVIDEND_TAX_PROGRESSIVE"),
+            "income_tax",
+        )
         self.assertEqual(classify_operation_group("OPERATION_TYPE_DIVIDEND"), "dividend")
         self.assertEqual(classify_operation_group("OPERATION_TYPE_COUPON"), "coupon")
 
@@ -116,6 +125,13 @@ class DatasetHelpersTests(unittest.TestCase):
     def test_income_event_backed_tax_operation_detects_dividend_and_coupon_tax(self):
         self.assertTrue(is_income_event_backed_tax_operation("OPERATION_TYPE_DIVIDEND_TAX"))
         self.assertTrue(is_income_event_backed_tax_operation("OPERATION_TYPE_COUPON_TAX"))
+        self.assertTrue(is_income_event_backed_tax_operation("OPERATION_TYPE_BOND_TAX"))
+        self.assertTrue(
+            is_income_event_backed_tax_operation("OPERATION_TYPE_BOND_TAX_PROGRESSIVE")
+        )
+        self.assertTrue(
+            is_income_event_backed_tax_operation("OPERATION_TYPE_DIVIDEND_TAX_PROGRESSIVE")
+        )
         self.assertFalse(is_income_event_backed_tax_operation("OPERATION_TYPE_TAX"))
 
 
