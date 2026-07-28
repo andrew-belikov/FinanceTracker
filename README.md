@@ -241,7 +241,14 @@ docker compose config > /dev/null
 
 ## SQL-миграции
 
-На чистой БД проект стартует без ручного применения SQL-скриптов. Исторические миграции нужны только при обновлении уже существующей базы или при переходе со старой схемы `deposits`.
+При `docker compose up` одноразовый сервис `migrate` автоматически применяет все
+forward-миграции из `migrations/*.sql` до запуска `tracker`, `bot` и `reporter`.
+Файлы `*.rollback.sql` автоматически не выполняются.
+
+Применённые версии и SHA-256 файлов записываются в `schema_migrations`. Повторный
+запуск идемпотентен, параллельные запуски сериализуются advisory lock. Если
+миграция завершилась ошибкой, изменилась после применения или исчезла из
+репозитория, deploy останавливается и новый прикладной код не запускается.
 
 Активный код читает пополнения и прочие операции из `operations`. View `deposits`, если он вообще присутствует, нужен только как исторический compatibility-артефакт старой миграции.
 
@@ -285,24 +292,22 @@ docker compose exec -T db psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "SELECT 
 
 Откат с ограничениями остаётся в `migrations/20260221_operations_from_deposits.rollback.sql`: он возвращает `deposits` как таблицу при наличии `deposits_legacy`, но не удаляет `operations`.
 
-### Дополнительные миграции
+### Проверка миграций
 
 ```bash
-docker compose exec -T db psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" < migrations/20260225_operations_add_instrument_columns.sql
-docker compose exec -T db psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" < migrations/20260226_income_events.sql
-docker compose exec -T db psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" < migrations/20260304_operations_operation_item_fields.sql
-docker compose exec -T db psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" < migrations/20260324_dataset_source_fields.sql
-docker compose exec -T db psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" < migrations/20260324_rebalance_targets_and_invest_notifications.sql
-docker compose exec -T db psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" < migrations/20260404_bot_daily_job_runs.sql
-docker compose exec -T db psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" < migrations/20260728_payout_calendar_events.sql
+docker compose run --rm migrate --check
+docker compose logs --tail=200 migrate
+docker compose exec -T db psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
+  -c "SELECT filename, applied_at FROM schema_migrations ORDER BY filename;"
 ```
 
 Нюансы:
+- уже применённые migration-файлы нельзя редактировать или удалять; новое
+  изменение схемы оформляется новым датированным `.sql`-файлом;
 - `tracker` после миграций в `operations` может сделать backfill пустых полей для уже существующих строк;
 - `income_events` нужен для минутных уведомлений о купонах/дивидендах и части отчётных сумм;
-- миграцию `20260324_rebalance_targets_and_invest_notifications.sql` нужно применить до пересборки `tracker`, иначе новый код не сможет писать расширенные поля `portfolio_positions`.
-- миграция `20260404_bot_daily_job_runs.sql` нужна боту, чтобы не терять ежедневные trigger-уведомления после старта позже настроенных JobQueue-слотов.
-- `payout_calendar_events` на чистой БД создаётся автоматически; отдельная миграция нужна для явного управляемого обновления существующей схемы.
+- Compose-зависимости не разрешают `tracker`, `bot` и `reporter` стартовать,
+  пока `migrate` не завершился успешно.
 
 ### Разовый repair после старого Windows backup
 

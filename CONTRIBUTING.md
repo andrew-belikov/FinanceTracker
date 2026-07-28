@@ -24,6 +24,11 @@ GitHub Actions workflow `CI` дублирует базовую проверку 
 Workflow `Deploy FinanceTracker` автоматически запускается на `push` в `main` на self-hosted runner и работает с каноническим каталогом сервера `/home/andrey/projects/FinanceTracker`, а не с runner workspace.
 Ручной `workflow_dispatch` оставлен как fallback: в режиме `smoke` можно проверить runner и серверный checkout без перезапуска контейнеров, в режиме `deploy` — повторить обычный deploy вручную.
 
+Deploy подготавливает опциональную сеть `localllm_localllm`, запускает
+одноразовый сервис `migrate`, ждёт healthcheck сервисов и отдельно проверяет,
+что pending-миграций нет. Уже применённые файлы миграций не редактируйте:
+создавайте новый датированный forward-файл.
+
 ## Что обязательно в PR-описании
 Используйте структуру:
 
@@ -40,7 +45,8 @@ Workflow `Deploy FinanceTracker` автоматически запускаетс
 - Команды для обновления/запуска/логов (Docker):
 
 ```bash
-docker compose up -d --build --force-recreate --remove-orphans
+docker compose up -d --build --force-recreate --remove-orphans --wait
+docker compose run --rm migrate --check
 docker compose ps
 docker compose logs --tail=200 bot
 docker compose logs --tail=200 tracker

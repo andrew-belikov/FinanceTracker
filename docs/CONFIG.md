@@ -12,6 +12,16 @@
 - `TINVEST_API_TOKEN` — токен Invest API.
 - `ALLOWED_USER_IDS` — список Telegram user_id, которым разрешена работа с ботом (через запятую).
 
+## Миграции БД
+
+- `migrate` использует те же `POSTGRES_DB`, `POSTGRES_USER` и
+  `POSTGRES_PASSWORD`, что остальные сервисы.
+- `MIGRATIONS_DIR` внутри контейнера фиксирован как `/app/migrations`.
+- При обычном deploy все forward-миграции применяются автоматически до запуска
+  прикладных сервисов.
+- Применённые файлы отслеживаются в `schema_migrations`; изменение их содержимого
+  после применения блокирует deploy.
+
 ## Расписание
 
 - `TIMEZONE` — таймзона для отображения дат в текстах и для расписания JobQueue (например, `Europe/Moscow`).
