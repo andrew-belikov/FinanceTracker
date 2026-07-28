@@ -1,7 +1,7 @@
 import asyncio
 import os
 import tempfile
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from telegram import InputFile, Update
 from telegram.ext import ContextTypes
@@ -17,6 +17,7 @@ from queries import resolve_reporting_account_id
 from report_client import ReporterClientError, request_monthly_report_pdf
 from runtime import (
     INVEST_USAGE_TEXT,
+    PAYOUT_CALENDAR_HORIZON_DAYS,
     REBALANCE_FEATURE_UNAVAILABLE_TEXT,
     REPORTING_ACCOUNT_UNAVAILABLE_TEXT,
     TARGETS_USAGE_TEXT,
@@ -33,6 +34,7 @@ from services import (
     build_help_text,
     build_invest_text_for_account,
     build_month_summary,
+    build_payout_calendar_text_for_account,
     build_rebalance_text_for_account,
     build_structure_text,
     build_targets_text_for_account,
@@ -110,6 +112,31 @@ async def cmd_month(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     text = build_month_summary()
     await safe_send_message(context.bot, update.effective_chat.id, text, parse_mode="Markdown")
+
+
+async def cmd_calendar(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    log_update_received(update, command_name="/calendar")
+    if not is_authorized(update):
+        return
+    if context.args:
+        await update.message.reply_text("Формат: /calendar")
+        return
+
+    start_date = datetime.now(TZ).date()
+    end_date = start_date + timedelta(days=PAYOUT_CALENDAR_HORIZON_DAYS - 1)
+    with db_session() as session:
+        account_id = resolve_reporting_account_id(session)
+        if account_id is None:
+            await update.message.reply_text(REPORTING_ACCOUNT_UNAVAILABLE_TEXT)
+            return
+        text = build_payout_calendar_text_for_account(
+            session,
+            account_id,
+            start_date=start_date,
+            end_date=end_date,
+            heading=f"💸 Календарь выплат на {PAYOUT_CALENDAR_HORIZON_DAYS} дней",
+        )
+    await safe_send_message(context.bot, update.effective_chat.id, text, parse_mode=None)
 
 
 def _parse_monthpdf_args(args):

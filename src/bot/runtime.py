@@ -36,6 +36,17 @@ DAILY_JOB_HOUR = int(os.getenv("DAILY_SUMMARY_HOUR", "18"))
 DAILY_JOB_MINUTE = int(os.getenv("DAILY_SUMMARY_MINUTE", "0"))
 YESTERDAY_PEAK_ALERT_HOUR = int(os.getenv("YESTERDAY_PEAK_ALERT_HOUR", "8"))
 YESTERDAY_PEAK_ALERT_MINUTE = int(os.getenv("YESTERDAY_PEAK_ALERT_MINUTE", "0"))
+PAYOUT_WEEKLY_TIMEZONE = (
+    os.getenv("PAYOUT_WEEKLY_TIMEZONE", "Europe/Moscow").strip()
+    or "Europe/Moscow"
+)
+PAYOUT_WEEKLY_TZ = ZoneInfo(PAYOUT_WEEKLY_TIMEZONE)
+PAYOUT_WEEKLY_HOUR = int(os.getenv("PAYOUT_WEEKLY_HOUR", "10"))
+PAYOUT_WEEKLY_MINUTE = int(os.getenv("PAYOUT_WEEKLY_MINUTE", "0"))
+PAYOUT_CALENDAR_HORIZON_DAYS = max(
+    1,
+    int(os.getenv("PAYOUT_CALENDAR_HORIZON_DAYS", "90")),
+)
 
 
 def build_daily_job_time() -> time:
@@ -66,6 +77,24 @@ def format_yesterday_peak_alert_schedule() -> str:
 
 
 YESTERDAY_PEAK_ALERT_SCHEDULE_LABEL = format_yesterday_peak_alert_schedule()
+
+
+def build_payout_weekly_job_time() -> time:
+    return time(
+        hour=PAYOUT_WEEKLY_HOUR,
+        minute=PAYOUT_WEEKLY_MINUTE,
+        tzinfo=PAYOUT_WEEKLY_TZ,
+    )
+
+
+def format_payout_weekly_schedule() -> str:
+    return (
+        f"понедельник {PAYOUT_WEEKLY_HOUR:02d}:{PAYOUT_WEEKLY_MINUTE:02d} "
+        f"({PAYOUT_WEEKLY_TIMEZONE})"
+    )
+
+
+PAYOUT_WEEKLY_SCHEDULE_LABEL = format_payout_weekly_schedule()
 
 # Таймзона хоста остаётся только для служебной диагностики.
 HOST_TZ = datetime.now().astimezone().tzinfo

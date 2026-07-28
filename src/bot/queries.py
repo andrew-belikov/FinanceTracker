@@ -1874,6 +1874,58 @@ def get_unnotified_income_events(session, account_id: str) -> list[dict]:
         raise
 
 
+def get_payout_calendar_events(
+    session,
+    account_id: str,
+    start_date: date,
+    end_date: date,
+) -> list[dict] | None:
+    try:
+        return (
+            session.execute(
+                text(
+                    """
+                    SELECT
+                        id,
+                        figi,
+                        COALESCE(NULLIF(ticker, ''), NULLIF(name, ''), figi) AS instrument_name,
+                        event_type,
+                        payment_date,
+                        record_date,
+                        last_buy_date,
+                        amount_per_unit,
+                        quantity,
+                        expected_amount,
+                        currency,
+                        source_event_type,
+                        fetched_at
+                    FROM payout_calendar_events
+                    WHERE account_id = :account_id
+                      AND payment_date >= :start_date
+                      AND payment_date <= :end_date
+                    ORDER BY
+                        payment_date ASC,
+                        CASE event_type WHEN 'coupon' THEN 0 ELSE 1 END,
+                        COALESCE(NULLIF(ticker, ''), NULLIF(name, ''), figi) ASC,
+                        id ASC
+                    """
+                ),
+                {
+                    "account_id": account_id,
+                    "start_date": start_date,
+                    "end_date": end_date,
+                },
+            )
+            .mappings()
+            .all()
+        )
+    except Exception as exc:
+        if _is_undefined_table_error(exc, "payout_calendar_events"):
+            session.rollback()
+            return None
+        raise
+
+
 def mark_income_event_notified(session, income_event_id: int) -> bool:
     try:
         session.execute(

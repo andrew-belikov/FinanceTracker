@@ -28,6 +28,7 @@ from queries import (
     get_positions_diff_rows,
     get_positions_diff_snapshot_bounds,
     get_positions_for_snapshot,
+    get_payout_calendar_events,
     get_rebalance_targets as query_get_rebalance_targets,
     get_snapshot_for_date,
     get_taxes_for_period,
@@ -70,6 +71,7 @@ from week_templates import WeekContext, render_week_text
 
 
 YEAR_REPORT_TOP_N = 5
+PAYOUT_CALENDAR_MAX_LISTED_EVENTS = 30
 SNAPSHOT_TOTAL_FIELDS = {
     "share": "total_shares",
     "bond": "total_bonds",
@@ -175,6 +177,7 @@ def build_help_text() -> str:
         "/structure — текущая структура портфеля по позициям\n"
         "/history — график стоимости портфеля и суммы пополнений\n"
         "/twr — TWR, XIRR и run-rate на конец года + график по дням\n"
+        "/calendar — ожидаемые купоны и дивиденды на следующие 90 дней\n"
         "/targets — показать текущие таргеты аллокации\n"
         "/targets set stocks=50 bonds=30 cash=20 — задать таргеты по классам\n"
         "/rebalance — показать отклонения и buy/sell для возврата к таргетам\n"
@@ -183,9 +186,131 @@ def build_help_text() -> str:
         "Автоматически:\n"
         f"• каждый день в {peak_schedule_label} — проверка максимума по итогам вчерашнего дня\n"
         f"• каждый день в {schedule_label} — проверка годового плана\n"
+        "• каждый понедельник в 10:00 МСК — выплаты, ожидаемые на этой неделе\n"
         f"• по пятницам в {schedule_label} — недельный отчёт\n"
         f"• в последний день месяца в {schedule_label} — дополнительный отчёт за месяц\n"
         "• каждое новое пополнение счёта — подсказка, как распределить пополнение по таргетам."
+    )
+
+
+def _format_payout_amount(amount: Decimal | None, currency: str | None) -> str:
+    if amount is None:
+        return "сумма уточняется"
+
+    normalized_currency = (currency or "").upper()
+    if normalized_currency == "RUB":
+        return fmt_decimal_rub(amount, precision=2)
+
+    formatted = f"{amount:,.2f}".replace(",", " ")
+    return f"{formatted} {normalized_currency or '—'}"
+
+
+def _format_payout_fetched_at(value: datetime | None) -> str | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(TZ).strftime("%d.%m.%Y %H:%M")
+
+
+def render_payout_calendar_text(
+    rows: list[dict] | None,
+    *,
+    start_date: date,
+    end_date: date,
+    heading: str,
+) -> str:
+    period_label = f"{start_date:%d.%m.%Y} — {end_date:%d.%m.%Y}"
+    if rows is None:
+        return (
+            f"{heading}\n"
+            f"{period_label}\n\n"
+            "Календарь выплат пока недоступен. "
+            "Нужно применить миграцию и дождаться синхронизации tracker."
+        )
+
+    if not rows:
+        return (
+            f"{heading}\n"
+            f"{period_label}\n\n"
+            "Ожидаемых купонов и объявленных дивидендов нет.\n\n"
+            "Дивиденды появляются только после официального объявления."
+        )
+
+    totals: dict[str, Decimal] = {}
+    unknown_amounts = 0
+    for row in rows:
+        amount = row.get("expected_amount")
+        if amount is None:
+            unknown_amounts += 1
+            continue
+        currency = (row.get("currency") or "—").upper()
+        totals[currency] = totals.get(currency, Decimal("0")) + normalize_decimal(amount)
+
+    lines = [heading, period_label, ""]
+    if totals:
+        total_parts = [
+            _format_payout_amount(amount, currency)
+            for currency, amount in sorted(totals.items())
+        ]
+        lines.append(f"Ожидаемая сумма: {' · '.join(total_parts)}")
+    if unknown_amounts:
+        lines.append(f"Без известной суммы: {unknown_amounts}")
+    lines.extend(["", "Ближайшие выплаты:"])
+
+    listed_rows = rows[:PAYOUT_CALENDAR_MAX_LISTED_EVENTS]
+    for row in listed_rows:
+        event_label = "купон" if row.get("event_type") == "coupon" else "дивиденды"
+        amount_label = _format_payout_amount(
+            row.get("expected_amount"),
+            row.get("currency"),
+        )
+        instrument_name = row.get("instrument_name") or row.get("figi") or "Инструмент"
+        if len(instrument_name) > 64:
+            instrument_name = instrument_name[:61] + "..."
+        lines.append(
+            f"{row['payment_date']:%d.%m} · {event_label} · "
+            f"{instrument_name} · {amount_label}"
+        )
+
+    hidden_count = len(rows) - len(listed_rows)
+    if hidden_count > 0:
+        lines.append(f"…ещё {hidden_count} выплат")
+
+    fetched_values = [row.get("fetched_at") for row in rows if row.get("fetched_at")]
+    oldest_fetched_at = min(fetched_values) if fetched_values else None
+    freshness_label = _format_payout_fetched_at(oldest_fetched_at)
+    lines.extend(
+        [
+            "",
+            "Расчёт сделан по текущему количеству бумаг. "
+            "Фактическая сумма и налоги могут отличаться.",
+        ]
+    )
+    if freshness_label:
+        lines.append(f"Данные обновлены: {freshness_label} МСК.")
+    return "\n".join(lines)
+
+
+def build_payout_calendar_text_for_account(
+    session,
+    account_id: str,
+    *,
+    start_date: date,
+    end_date: date,
+    heading: str,
+) -> str:
+    rows = get_payout_calendar_events(
+        session,
+        account_id,
+        start_date,
+        end_date,
+    )
+    return render_payout_calendar_text(
+        rows,
+        start_date=start_date,
+        end_date=end_date,
+        heading=heading,
     )
 
 

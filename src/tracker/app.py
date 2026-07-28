@@ -9,16 +9,20 @@ iis_tracker: ежедневные снапшоты портфеля + синхр
     * сохраняем агрегаты по портфелю;
     * сохраняем состав портфеля (позиции);
     * синхронизируем операции в таблицу operations.
+- при старте и раз в сутки синхронизируем календарь будущих купонов
+  и объявленных дивидендов.
 """
 
 import os
 import json
 import copy
+import hashlib
 import textwrap
 import time
 import traceback
 from collections import OrderedDict
 from datetime import datetime, timezone, date, timedelta
+from decimal import Decimal, ROUND_HALF_UP
 from email.utils import parsedate_to_datetime
 from threading import Lock
 from typing import Optional
@@ -42,6 +46,7 @@ from sqlalchemy import (
     Numeric,
     Boolean,
     ForeignKey,
+    Index,
     UniqueConstraint,
     func,
     text,
@@ -89,6 +94,16 @@ INSTRUMENT_CACHE_MAX_ENTRIES = max(
     int(os.getenv("TINVEST_INSTRUMENT_CACHE_MAX_ENTRIES", "1024")),
 )
 OPERATIONS_MAX_PAGES = max(1, int(os.getenv("OPERATIONS_MAX_PAGES", "10000")))
+PAYOUT_CALENDAR_HORIZON_DAYS = max(
+    1,
+    int(os.getenv("PAYOUT_CALENDAR_HORIZON_DAYS", "90")),
+)
+PAYOUT_DIVIDEND_RECORD_LOOKBACK_DAYS = max(
+    1,
+    int(os.getenv("PAYOUT_DIVIDEND_RECORD_LOOKBACK_DAYS", "365")),
+)
+PAYOUT_CALENDAR_SYNC_HOUR = int(os.getenv("PAYOUT_CALENDAR_SYNC_HOUR", "9"))
+PAYOUT_CALENDAR_SYNC_MINUTE = int(os.getenv("PAYOUT_CALENDAR_SYNC_MINUTE", "0"))
 
 # Можно зафиксировать конкретный account_id, если надо
 TINKOFF_ACCOUNT_ID = os.getenv("TINKOFF_ACCOUNT_ID", "")
@@ -290,6 +305,45 @@ class IncomeEvent(Base):
     net_yield_pct = Column(Numeric(9, 4), nullable=False)
     notified = Column(Boolean, default=False, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class PayoutCalendarEvent(Base):
+    __tablename__ = "payout_calendar_events"
+    __table_args__ = (
+        UniqueConstraint(
+            "account_id",
+            "figi",
+            "event_type",
+            "event_uid",
+            name="uq_payout_calendar_event_source",
+        ),
+        Index(
+            "ix_payout_calendar_events_account_payment",
+            "account_id",
+            "payment_date",
+        ),
+    )
+
+    id = Column(Integer, primary_key=True)
+    account_id = Column(String, nullable=False)
+    figi = Column(String, nullable=False)
+    instrument_uid = Column(String, nullable=True)
+    ticker = Column(String, nullable=True)
+    name = Column(String, nullable=True)
+    instrument_type = Column(String, nullable=True)
+    event_type = Column(String, nullable=False)
+    event_uid = Column(String, nullable=False)
+    payment_date = Column(Date, nullable=False, index=True)
+    record_date = Column(Date, nullable=True)
+    last_buy_date = Column(Date, nullable=True)
+    amount_per_unit = Column(Numeric(18, 9), nullable=True)
+    quantity = Column(Numeric(18, 6), nullable=False)
+    expected_amount = Column(Numeric(18, 2), nullable=True)
+    currency = Column(String, nullable=True)
+    source_event_type = Column(String, nullable=True)
+    fetched_at = Column(DateTime, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
 
 class AssetAlias(Base):
@@ -790,6 +844,44 @@ def api_get_instrument_by_figi(figi: str) -> Optional[dict]:
     return instrument
 
 
+def api_get_bond_coupons(
+    instrument_id: str,
+    from_iso: str,
+    to_iso: str,
+) -> list[dict]:
+    data = post_api(
+        "tinkoff.public.invest.api.contract.v1.InstrumentsService/GetBondCoupons",
+        {
+            "instrumentId": instrument_id,
+            "from": from_iso,
+            "to": to_iso,
+        },
+    )
+    events = data.get("events") or []
+    if not isinstance(events, list):
+        raise RuntimeError("GetBondCoupons returned invalid events")
+    return events
+
+
+def api_get_dividends(
+    instrument_id: str,
+    from_iso: str,
+    to_iso: str,
+) -> list[dict]:
+    data = post_api(
+        "tinkoff.public.invest.api.contract.v1.InstrumentsService/GetDividends",
+        {
+            "instrumentId": instrument_id,
+            "from": from_iso,
+            "to": to_iso,
+        },
+    )
+    dividends = data.get("dividends") or []
+    if not isinstance(dividends, list):
+        raise RuntimeError("GetDividends returned invalid dividends")
+    return dividends
+
+
 class OperationsPaginationError(RuntimeError):
     """Pagination contract violation that must roll back a partial operation sync."""
 
@@ -912,6 +1004,311 @@ def dt_to_iso_z(dt_val: datetime) -> str:
     else:
         dt_val = dt_val.astimezone(timezone.utc)
     return dt_val.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _money_to_decimal(value: Optional[dict]) -> Optional[Decimal]:
+    if not isinstance(value, dict):
+        return None
+    units = Decimal(_to_int(value.get("units")))
+    nano = Decimal(_to_int(value.get("nano"))) / Decimal("1000000000")
+    return units + nano
+
+
+def _iso_to_local_date(value: Optional[str]) -> Optional[date]:
+    parsed = parse_iso_dt(value)
+    if parsed is None:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(LOCAL_TZ).date()
+
+
+def _payout_event_uid(*parts: object) -> str:
+    raw = "|".join("" if part is None else str(part) for part in parts)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:32]
+
+
+def _normalize_payout_instrument_type(value: Optional[str]) -> str:
+    normalized = (value or "").strip().lower()
+    aliases = {
+        "instrument_type_bond": "bond",
+        "instrument_type_share": "share",
+        "instrument_type_etf": "etf",
+        "stock": "share",
+    }
+    return aliases.get(normalized, normalized)
+
+
+def _upsert_payout_calendar_event(
+    db,
+    *,
+    account_id: str,
+    position: PortfolioPosition,
+    event_type: str,
+    event_uid: str,
+    payment_date: date,
+    record_date: Optional[date],
+    last_buy_date: Optional[date],
+    amount_per_unit: Optional[Decimal],
+    currency: Optional[str],
+    source_event_type: Optional[str],
+    fetched_at: datetime,
+) -> None:
+    quantity = Decimal(position.quantity or 0)
+    expected_amount = None
+    if amount_per_unit is not None:
+        expected_amount = (amount_per_unit * quantity).quantize(
+            Decimal("0.01"),
+            rounding=ROUND_HALF_UP,
+        )
+
+    row = (
+        db.query(PayoutCalendarEvent)
+        .filter(
+            PayoutCalendarEvent.account_id == account_id,
+            PayoutCalendarEvent.figi == position.figi,
+            PayoutCalendarEvent.event_type == event_type,
+            PayoutCalendarEvent.event_uid == event_uid,
+        )
+        .one_or_none()
+    )
+    if row is None:
+        row = PayoutCalendarEvent(
+            account_id=account_id,
+            figi=position.figi,
+            event_type=event_type,
+            event_uid=event_uid,
+            created_at=fetched_at,
+        )
+        db.add(row)
+
+    instrument = position.instrument
+    row.instrument_uid = position.instrument_uid
+    row.ticker = position.ticker or (instrument.ticker if instrument is not None else None)
+    row.name = position.name or (instrument.name if instrument is not None else None)
+    row.instrument_type = position.instrument_type
+    row.payment_date = payment_date
+    row.record_date = record_date
+    row.last_buy_date = last_buy_date
+    row.amount_per_unit = amount_per_unit
+    row.quantity = quantity
+    row.expected_amount = expected_amount
+    row.currency = (currency or "").upper() or None
+    row.source_event_type = source_event_type
+    row.fetched_at = fetched_at
+    row.updated_at = fetched_at
+
+
+def _replace_position_payout_events(
+    db,
+    *,
+    account_id: str,
+    position: PortfolioPosition,
+    event_type: str,
+    source_events: list[dict],
+    period_start: date,
+    period_end: date,
+    fetched_at: datetime,
+) -> int:
+    seen_uids: set[str] = set()
+    stored = 0
+
+    for event in source_events:
+        if event_type == "coupon":
+            payment_date = _iso_to_local_date(get_json_value(event, "coupon_date"))
+            record_date = _iso_to_local_date(get_json_value(event, "fix_date"))
+            last_buy_date = None
+            money = get_json_value(event, "pay_one_bond")
+            source_event_type = get_json_value(event, "coupon_type")
+            event_uid = _payout_event_uid(
+                event_type,
+                get_json_value(event, "coupon_number"),
+                get_json_value(event, "coupon_date"),
+                get_json_value(event, "coupon_start_date"),
+                get_json_value(event, "coupon_end_date"),
+            )
+        else:
+            payment_date = _iso_to_local_date(get_json_value(event, "payment_date"))
+            record_date = _iso_to_local_date(get_json_value(event, "record_date"))
+            last_buy_date = _iso_to_local_date(get_json_value(event, "last_buy_date"))
+            money = get_json_value(event, "dividend_net")
+            source_event_type = get_json_value(event, "dividend_type")
+            if "cancel" in (source_event_type or "").lower():
+                continue
+            event_uid = _payout_event_uid(
+                event_type,
+                get_json_value(event, "record_date"),
+                get_json_value(event, "payment_date"),
+                get_json_value(event, "declared_date"),
+                source_event_type,
+            )
+
+        if payment_date is None or not (period_start <= payment_date <= period_end):
+            continue
+
+        amount_per_unit = _money_to_decimal(money)
+        if amount_per_unit is not None and amount_per_unit <= 0:
+            amount_per_unit = None
+        currency = get_json_value(money, "currency") if isinstance(money, dict) else None
+        _upsert_payout_calendar_event(
+            db,
+            account_id=account_id,
+            position=position,
+            event_type=event_type,
+            event_uid=event_uid,
+            payment_date=payment_date,
+            record_date=record_date,
+            last_buy_date=last_buy_date,
+            amount_per_unit=amount_per_unit,
+            currency=currency,
+            source_event_type=source_event_type,
+            fetched_at=fetched_at,
+        )
+        seen_uids.add(event_uid)
+        stored += 1
+
+    stale_query = db.query(PayoutCalendarEvent).filter(
+        PayoutCalendarEvent.account_id == account_id,
+        PayoutCalendarEvent.figi == position.figi,
+        PayoutCalendarEvent.event_type == event_type,
+        PayoutCalendarEvent.payment_date >= period_start,
+        PayoutCalendarEvent.payment_date <= period_end,
+    )
+    if seen_uids:
+        stale_query = stale_query.filter(~PayoutCalendarEvent.event_uid.in_(seen_uids))
+    stale_query.delete(synchronize_session=False)
+    return stored
+
+
+def sync_payout_calendar_for_account(db, account_id: str) -> dict[str, int]:
+    latest_snapshot = (
+        db.query(PortfolioSnapshot)
+        .filter(PortfolioSnapshot.account_id == account_id)
+        .order_by(
+            PortfolioSnapshot.snapshot_date.desc(),
+            PortfolioSnapshot.snapshot_at.desc(),
+            PortfolioSnapshot.id.desc(),
+        )
+        .first()
+    )
+    if latest_snapshot is None:
+        logger.warning(
+            "payout_calendar_snapshot_missing",
+            "Cannot sync payout calendar without a portfolio snapshot.",
+            {"account_id": account_id},
+        )
+        return {"positions": 0, "events": 0, "failed": 0}
+
+    positions = [
+        position
+        for position in latest_snapshot.positions
+        if position.figi and Decimal(position.quantity or 0) > 0
+    ]
+    if not positions:
+        logger.warning(
+            "payout_calendar_positions_missing",
+            "Cannot sync payout calendar because the latest snapshot has no positions.",
+            {"account_id": account_id, "snapshot_id": latest_snapshot.id},
+        )
+        return {"positions": 0, "events": 0, "failed": 0}
+
+    period_start = local_today()
+    period_end = period_start + timedelta(days=PAYOUT_CALENDAR_HORIZON_DAYS - 1)
+    from_iso = dt_to_iso_z(datetime.combine(period_start, datetime.min.time(), tzinfo=LOCAL_TZ))
+    dividends_from_iso = dt_to_iso_z(
+        datetime.combine(
+            period_start - timedelta(days=PAYOUT_DIVIDEND_RECORD_LOOKBACK_DAYS),
+            datetime.min.time(),
+            tzinfo=LOCAL_TZ,
+        )
+    )
+    to_iso = dt_to_iso_z(
+        datetime.combine(period_end + timedelta(days=1), datetime.min.time(), tzinfo=LOCAL_TZ)
+    )
+    fetched_at = utc_now_naive()
+    held_figis = {position.figi for position in positions}
+    events_stored = 0
+    failed = 0
+    supported_positions = 0
+
+    for position in positions:
+        instrument = position.instrument
+        instrument_type = _normalize_payout_instrument_type(
+            position.instrument_type
+            or (instrument.instrument_type if instrument is not None else None)
+        )
+        instrument_id = position.instrument_uid or position.figi
+
+        if instrument_type == "bond":
+            supported_positions += 1
+            try:
+                source_events = api_get_bond_coupons(instrument_id, from_iso, to_iso)
+                events_stored += _replace_position_payout_events(
+                    db,
+                    account_id=account_id,
+                    position=position,
+                    event_type="coupon",
+                    source_events=source_events,
+                    period_start=period_start,
+                    period_end=period_end,
+                    fetched_at=fetched_at,
+                )
+            except Exception:
+                failed += 1
+                logger.exception(
+                    "payout_calendar_instrument_sync_failed",
+                    "Failed to sync bond coupon calendar; cached rows are preserved.",
+                    {
+                        "account_id": account_id,
+                        "figi": position.figi,
+                        "event_type": "coupon",
+                    },
+                )
+        elif instrument_type in {"share", "etf"}:
+            supported_positions += 1
+            try:
+                source_events = api_get_dividends(
+                    instrument_id,
+                    dividends_from_iso,
+                    to_iso,
+                )
+                events_stored += _replace_position_payout_events(
+                    db,
+                    account_id=account_id,
+                    position=position,
+                    event_type="dividend",
+                    source_events=source_events,
+                    period_start=period_start,
+                    period_end=period_end,
+                    fetched_at=fetched_at,
+                )
+            except Exception:
+                failed += 1
+                logger.exception(
+                    "payout_calendar_instrument_sync_failed",
+                    "Failed to sync dividend calendar; cached rows are preserved.",
+                    {
+                        "account_id": account_id,
+                        "figi": position.figi,
+                        "event_type": "dividend",
+                    },
+                )
+
+    db.query(PayoutCalendarEvent).filter(
+        PayoutCalendarEvent.account_id == account_id,
+        PayoutCalendarEvent.payment_date < period_start,
+    ).delete(synchronize_session=False)
+    db.query(PayoutCalendarEvent).filter(
+        PayoutCalendarEvent.account_id == account_id,
+        ~PayoutCalendarEvent.figi.in_(held_figis),
+    ).delete(synchronize_session=False)
+    db.flush()
+
+    return {
+        "positions": supported_positions,
+        "events": events_stored,
+        "failed": failed,
+    }
 
 
 def choose_account(accounts_data: dict) -> dict:
@@ -1477,6 +1874,22 @@ def run_snapshot_and_operations_once():
             )
 
 
+def run_payout_calendar_sync_once():
+    accounts_data = api_get_accounts()
+    account = choose_account(accounts_data)
+    account_id = str(account.get("id"))
+
+    with SessionLocal() as db:
+        stats = sync_payout_calendar_for_account(db, account_id)
+        db.commit()
+
+    logger.info(
+        "payout_calendar_sync_completed",
+        "Payout calendar sync completed.",
+        {"account_id": account_id, **stats},
+    )
+
+
 def job_with_retry():
     """
     Обёртка для планировщика:
@@ -1492,6 +1905,21 @@ def job_with_retry():
         logger.exception("snapshot_job_failed", "Snapshot job failed.")
 
 
+def payout_calendar_job_with_retry():
+    try:
+        logger.info(
+            "payout_calendar_sync_started",
+            "Payout calendar sync started.",
+            {"horizon_days": PAYOUT_CALENDAR_HORIZON_DAYS},
+        )
+        run_payout_calendar_sync_once()
+    except Exception:
+        logger.exception(
+            "payout_calendar_sync_failed",
+            "Payout calendar sync failed; previously cached rows are preserved.",
+        )
+
+
 def main() -> int:
     if not API_TOKEN:
         logger.error(
@@ -1504,9 +1932,31 @@ def main() -> int:
 
     # Разовый запуск при старте — перезаписываем текущий день
     job_with_retry()
+    payout_calendar_job_with_retry()
 
     # Планировщик: запускаем job_with_retry каждые SNAPSHOT_INTERVAL_MINUTES минут
     scheduler = BlockingScheduler(timezone=SCHED_TZ)
+    scheduler.add_job(
+        payout_calendar_job_with_retry,
+        CronTrigger(
+            hour=PAYOUT_CALENDAR_SYNC_HOUR,
+            minute=PAYOUT_CALENDAR_SYNC_MINUTE,
+            timezone=LOCAL_TZ,
+        ),
+        name="daily_payout_calendar_sync",
+        misfire_grace_time=3600,
+        replace_existing=True,
+    )
+    logger.info(
+        "payout_calendar_schedule_registered",
+        "Payout calendar schedule registered.",
+        {
+            "hour": PAYOUT_CALENDAR_SYNC_HOUR,
+            "minute": PAYOUT_CALENDAR_SYNC_MINUTE,
+            "timezone": SCHED_TZ,
+            "horizon_days": PAYOUT_CALENDAR_HORIZON_DAYS,
+        },
+    )
 
     if SNAPSHOT_MODE == "cron":
         trigger = CronTrigger(hour=SNAPSHOT_HOUR, minute=SNAPSHOT_MINUTE)

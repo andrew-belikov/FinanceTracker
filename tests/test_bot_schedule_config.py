@@ -48,6 +48,7 @@ def load_symbols():
     namespace = {
         "os": os,
         "TZ": ZoneInfo("Europe/Moscow"),
+        "ZoneInfo": ZoneInfo,
     }
     exec("from datetime import time\n", namespace)
 
@@ -59,6 +60,9 @@ def load_symbols():
             "DAILY_SUMMARY_MINUTE": "0",
             "YESTERDAY_PEAK_ALERT_HOUR": "8",
             "YESTERDAY_PEAK_ALERT_MINUTE": "0",
+            "PAYOUT_WEEKLY_TIMEZONE": "Europe/Moscow",
+            "PAYOUT_WEEKLY_HOUR": "10",
+            "PAYOUT_WEEKLY_MINUTE": "0",
             "BOT_PROXY_ENABLED": "true",
             "BOT_PROXY_ENDPOINT": "socks5h://xray-client:1080",
         },
@@ -74,6 +78,11 @@ def load_symbols():
                 "YESTERDAY_PEAK_ALERT_HOUR",
                 "YESTERDAY_PEAK_ALERT_MINUTE",
                 "YESTERDAY_PEAK_ALERT_SCHEDULE_LABEL",
+                "PAYOUT_WEEKLY_TIMEZONE",
+                "PAYOUT_WEEKLY_TZ",
+                "PAYOUT_WEEKLY_HOUR",
+                "PAYOUT_WEEKLY_MINUTE",
+                "PAYOUT_WEEKLY_SCHEDULE_LABEL",
                 "BOT_PROXY_ENABLED",
                 "BOT_PROXY_ENDPOINT",
                 "POLLING_BACKLOG_PENDING_THRESHOLD",
@@ -85,6 +94,8 @@ def load_symbols():
                 "build_yesterday_peak_alert_time",
                 "format_daily_job_schedule",
                 "format_yesterday_peak_alert_schedule",
+                "build_payout_weekly_job_time",
+                "format_payout_weekly_schedule",
                 "resolve_telegram_proxy_url",
                 "build_telegram_request_kwargs",
                 "is_polling_backlog_detected",
@@ -131,6 +142,17 @@ class BotScheduleConfigTests(unittest.TestCase):
         self.assertEqual(
             self.symbols["format_yesterday_peak_alert_schedule"](),
             "08:00 (Europe/Moscow)",
+        )
+
+    def test_weekly_payout_schedule_is_monday_at_ten_moscow_time(self):
+        job_time = self.symbols["build_payout_weekly_job_time"]()
+
+        self.assertEqual(job_time.hour, 10)
+        self.assertEqual(job_time.minute, 0)
+        self.assertEqual(getattr(job_time.tzinfo, "key", None), "Europe/Moscow")
+        self.assertEqual(
+            self.symbols["format_payout_weekly_schedule"](),
+            "понедельник 10:00 (Europe/Moscow)",
         )
 
     def test_help_text_mentions_configured_schedule(self):

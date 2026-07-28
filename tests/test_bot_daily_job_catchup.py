@@ -32,7 +32,12 @@ def load_selected_symbols(file_path: Path, wanted_functions: set[str], namespace
 
 SYMBOLS = load_selected_symbols(
     JOBS_FILE,
-    {"is_daily_job_catchup_due", "is_yesterday_peak_alert_catchup_due", "should_release_daily_job_run"},
+    {
+        "is_daily_job_catchup_due",
+        "is_yesterday_peak_alert_catchup_due",
+        "is_payout_weekly_catchup_due",
+        "should_release_daily_job_run",
+    },
     namespace={
         "datetime": datetime,
         "TZ": ZoneInfo("Europe/Moscow"),
@@ -40,11 +45,14 @@ SYMBOLS = load_selected_symbols(
         "DAILY_JOB_MINUTE": 0,
         "YESTERDAY_PEAK_ALERT_HOUR": 8,
         "YESTERDAY_PEAK_ALERT_MINUTE": 0,
+        "PAYOUT_WEEKLY_HOUR": 10,
+        "PAYOUT_WEEKLY_MINUTE": 0,
     },
 )
 
 is_daily_job_catchup_due = SYMBOLS["is_daily_job_catchup_due"]
 is_yesterday_peak_alert_catchup_due = SYMBOLS["is_yesterday_peak_alert_catchup_due"]
+is_payout_weekly_catchup_due = SYMBOLS["is_payout_weekly_catchup_due"]
 should_release_daily_job_run = SYMBOLS["should_release_daily_job_run"]
 
 
@@ -70,6 +78,15 @@ class DailyJobCatchupTests(unittest.TestCase):
 
         self.assertFalse(is_yesterday_peak_alert_catchup_due(before_alert))
         self.assertTrue(is_yesterday_peak_alert_catchup_due(at_alert))
+
+    def test_weekly_payout_catchup_runs_only_on_monday_after_ten(self):
+        monday_before = datetime(2026, 4, 6, 9, 59, 59, tzinfo=ZoneInfo("Europe/Moscow"))
+        monday_at = datetime(2026, 4, 6, 10, 0, 0, tzinfo=ZoneInfo("Europe/Moscow"))
+        tuesday = datetime(2026, 4, 7, 12, 0, 0, tzinfo=ZoneInfo("Europe/Moscow"))
+
+        self.assertFalse(is_payout_weekly_catchup_due(monday_before))
+        self.assertTrue(is_payout_weekly_catchup_due(monday_at))
+        self.assertFalse(is_payout_weekly_catchup_due(tuesday))
 
     def test_release_claim_only_when_every_send_failed(self):
         self.assertTrue(should_release_daily_job_run(sent_total=0, failed_total=2))
