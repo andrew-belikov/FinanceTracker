@@ -30,5 +30,6 @@ COPY src/common/ ./common/
 
 # App code
 COPY src/tracker/ ./
+COPY migrations/ ./migrations/
 
 ENTRYPOINT ["tracker-entrypoint.sh"]

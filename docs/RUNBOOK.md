@@ -74,15 +74,13 @@ docker compose exec -T db pg_dump -U "$POSTGRES_USER" "$POSTGRES_DB" > backup.sq
 cat backup.sql | docker compose exec -T db psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"
 ```
 
-Перед любой миграцией или крупным redeploy делайте backup.
+Перед крупным изменением схемы или redeploy делайте backup.
 
 ## Когда Нужны SQL-Миграции
 
-На чистой БД проект запускается и без них, но исторические SQL-скрипты нужны, если:
-
-- вы обновляете старую БД со схемой `deposits`;
-- вам нужен точный migrated shape таблицы `operations`;
-- в текущей БД ещё нет таблицы `income_events` или дополнительных полей из поздних миграций.
+Forward-миграции применяются автоматически сервисом `migrate` при каждом
+`docker compose up`. Ручной запуск нужен только для диагностики, repair или
+контролируемого исторического rollback.
 
 ## Миграции В Репозитории
 
@@ -96,36 +94,29 @@ cat backup.sql | docker compose exec -T db psql -U "$POSTGRES_USER" -d "$POSTGRE
 | `migrations/20260404_bot_daily_job_runs.sql` | если нужен startup catch-up для daily job без дублей | создаёт таблицу `bot_daily_job_runs` | без этой таблицы бот не сможет надёжно добирать пропущенный daily job после позднего рестарта |
 | `migrations/20260728_payout_calendar_events.sql` | при добавлении `/calendar` в существующую БД | создаёт таблицу ожидаемых купонов и объявленных дивидендов | tracker также создаёт таблицу через `create_all`, но явная миграция оставляет управляемый след изменения схемы |
 
-## Рекомендуемый Порядок Миграции
+## Автоматический Порядок Миграции
 
-1. Если миграция затрагивает рабочие сервисы, остановите writer и reader:
+1. `db` проходит healthcheck.
+2. Одноразовый сервис `migrate` создаёт ORM-baseline для чистой БД.
+3. Под advisory lock последовательно применяются ещё не зарегистрированные
+   `migrations/*.sql`, кроме `*.rollback.sql`.
+4. В одной транзакции с каждой миграцией в `schema_migrations` сохраняется
+   имя файла и SHA-256.
+5. Только после успешного завершения `migrate` запускаются `tracker`, `bot`
+   и `reporter`.
 
-```bash
-docker compose stop tracker bot
-```
-
-2. Сделайте backup:
-
-```bash
-docker compose exec -T db pg_dump -U "$POSTGRES_USER" "$POSTGRES_DB" > pre_migration_backup.sql
-```
-
-3. Примените только нужные SQL-скрипты:
+Проверка без применения новых миграций:
 
 ```bash
-docker compose exec -T db psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" < migrations/20260221_operations_from_deposits.sql
-docker compose exec -T db psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" < migrations/20260225_operations_add_instrument_columns.sql
-docker compose exec -T db psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" < migrations/20260226_income_events.sql
-docker compose exec -T db psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" < migrations/20260304_operations_operation_item_fields.sql
-docker compose exec -T db psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" < migrations/20260404_bot_daily_job_runs.sql
-docker compose exec -T db psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" < migrations/20260728_payout_calendar_events.sql
+docker compose run --rm migrate --check
+docker compose logs --tail=200 migrate
+docker compose exec -T db psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
+  -c "SELECT filename, checksum_sha256, applied_at FROM schema_migrations ORDER BY filename;"
 ```
 
-4. Поднимите сервисы обратно:
-
-```bash
-docker compose up -d tracker bot
-```
+Если checksum уже применённого файла изменился либо файл удалён, migration
+runner намеренно завершится ошибкой. Исправление — вернуть исходный файл и
+оформить изменение новой миграцией.
 
 ### `/calendar` пуст или устарел
 

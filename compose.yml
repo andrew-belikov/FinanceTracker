@@ -43,6 +43,25 @@ services:
       start_period: 10s
     restart: unless-stopped
 
+  migrate:
+    image: financetracker-tracker
+    entrypoint: ["python", "-u", "migrate.py"]
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      APP_ENV: ${APP_ENV:-dev}
+      APP_SERVICE: iis_tracker_migrate
+      DB_HOST: db
+      DB_PORT: "5432"
+      DB_NAME: ${POSTGRES_DB}
+      DB_USER: ${POSTGRES_USER}
+      DB_PASSWORD: ${POSTGRES_PASSWORD}
+      MIGRATIONS_DIR: /app/migrations
+    restart: "no"
+
   tracker:
     build:
       context: .
@@ -52,6 +71,8 @@ services:
     depends_on:
       db:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     env_file:
       - .env
     environment:
@@ -75,6 +96,8 @@ services:
     depends_on:
       db:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
       xray-client:
         condition: service_started
     env_file:
@@ -104,6 +127,8 @@ services:
     depends_on:
       db:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     env_file:
       - .env
     environment:

@@ -71,15 +71,28 @@ jobs:
           docker compose config > /dev/null
           docker compose ps
 
+      - name: Prepare optional integration network
+        if: ${{ env.DEPLOY_MODE == 'deploy' }}
+        run: |
+          docker network inspect localllm_localllm > /dev/null 2>&1 \
+            || docker network create localllm_localllm
+
       - name: Apply deploy
         if: ${{ env.DEPLOY_MODE == 'deploy' }}
         run: |
           cd "$PROJECT_DIR"
-          docker compose up -d --build --force-recreate --remove-orphans
+          docker compose up -d --build --force-recreate --remove-orphans \
+            --wait --wait-timeout 180
+
+      - name: Verify database migrations
+        if: ${{ env.DEPLOY_MODE == 'deploy' }}
+        run: |
+          cd "$PROJECT_DIR"
+          docker compose run --rm migrate --check
 
       - name: Show post-deploy status
         if: ${{ env.DEPLOY_MODE == 'deploy' }}
         run: |
           cd "$PROJECT_DIR"
-          docker compose ps
-          docker compose logs --tail=200 bot tracker reporter
+          docker compose ps --all
+          docker compose logs --tail=200 migrate bot tracker reporter
