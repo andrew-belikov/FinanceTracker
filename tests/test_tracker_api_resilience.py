@@ -4,6 +4,7 @@ from pathlib import Path
 import sys
 import unittest
 from datetime import date, datetime
+from decimal import Decimal
 from unittest import mock
 
 from sqlalchemy import create_engine
@@ -230,6 +231,46 @@ class IncomeEventReconciliationTests(unittest.TestCase):
 
     def tearDown(self):
         self.engine.dispose()
+
+    def test_latest_cost_basis_is_scoped_to_account(self):
+        with self.Session() as session:
+            first_snapshot = tracker_app.PortfolioSnapshot(
+                account_id="first",
+                snapshot_at=datetime(2026, 1, 15, 10, 0, 0),
+                snapshot_date=date(2026, 1, 15),
+                currency="RUB",
+            )
+            second_snapshot = tracker_app.PortfolioSnapshot(
+                account_id="second",
+                snapshot_at=datetime(2026, 1, 15, 11, 0, 0),
+                snapshot_date=date(2026, 1, 15),
+                currency="RUB",
+            )
+            session.add_all([first_snapshot, second_snapshot])
+            session.flush()
+            session.add_all(
+                [
+                    tracker_app.PortfolioPosition(
+                        snapshot_id=first_snapshot.id,
+                        figi="FIGI1",
+                        currency="RUB",
+                        position_value=Decimal("1200"),
+                        expected_yield=Decimal("200"),
+                    ),
+                    tracker_app.PortfolioPosition(
+                        snapshot_id=second_snapshot.id,
+                        figi="FIGI1",
+                        currency="RUB",
+                        position_value=Decimal("2400"),
+                        expected_yield=Decimal("400"),
+                    ),
+                ]
+            )
+            session.commit()
+
+            result = tracker_app.get_latest_cost_basis(session, "first", "FIGI1")
+
+        self.assertEqual(result, 1000.0)
 
     @staticmethod
     def operation(

@@ -336,6 +336,9 @@ class PayoutCalendarEvent(Base):
     payment_date = Column(Date, nullable=False, index=True)
     record_date = Column(Date, nullable=True)
     last_buy_date = Column(Date, nullable=True)
+    coupon_start_date = Column(Date, nullable=True)
+    coupon_end_date = Column(Date, nullable=True)
+    coupon_period_days = Column(Integer, nullable=True)
     amount_per_unit = Column(Numeric(18, 9), nullable=True)
     quantity = Column(Numeric(18, 6), nullable=False)
     expected_amount = Column(Numeric(18, 2), nullable=True)
@@ -1049,6 +1052,9 @@ def _upsert_payout_calendar_event(
     payment_date: date,
     record_date: Optional[date],
     last_buy_date: Optional[date],
+    coupon_start_date: Optional[date],
+    coupon_end_date: Optional[date],
+    coupon_period_days: Optional[int],
     amount_per_unit: Optional[Decimal],
     currency: Optional[str],
     source_event_type: Optional[str],
@@ -1090,6 +1096,9 @@ def _upsert_payout_calendar_event(
     row.payment_date = payment_date
     row.record_date = record_date
     row.last_buy_date = last_buy_date
+    row.coupon_start_date = coupon_start_date
+    row.coupon_end_date = coupon_end_date
+    row.coupon_period_days = coupon_period_days
     row.amount_per_unit = amount_per_unit
     row.quantity = quantity
     row.expected_amount = expected_amount
@@ -1118,6 +1127,19 @@ def _replace_position_payout_events(
             payment_date = _iso_to_local_date(get_json_value(event, "coupon_date"))
             record_date = _iso_to_local_date(get_json_value(event, "fix_date"))
             last_buy_date = None
+            coupon_start_date = _iso_to_local_date(
+                get_json_value(event, "coupon_start_date")
+            )
+            coupon_end_date = _iso_to_local_date(
+                get_json_value(event, "coupon_end_date")
+            )
+            raw_coupon_period = get_json_value(event, "coupon_period")
+            try:
+                coupon_period_days = (
+                    int(raw_coupon_period) if raw_coupon_period is not None else None
+                )
+            except (TypeError, ValueError):
+                coupon_period_days = None
             money = get_json_value(event, "pay_one_bond")
             source_event_type = get_json_value(event, "coupon_type")
             event_uid = _payout_event_uid(
@@ -1131,6 +1153,9 @@ def _replace_position_payout_events(
             payment_date = _iso_to_local_date(get_json_value(event, "payment_date"))
             record_date = _iso_to_local_date(get_json_value(event, "record_date"))
             last_buy_date = _iso_to_local_date(get_json_value(event, "last_buy_date"))
+            coupon_start_date = None
+            coupon_end_date = None
+            coupon_period_days = None
             money = get_json_value(event, "dividend_net")
             source_event_type = get_json_value(event, "dividend_type")
             if "cancel" in (source_event_type or "").lower():
@@ -1159,6 +1184,9 @@ def _replace_position_payout_events(
             payment_date=payment_date,
             record_date=record_date,
             last_buy_date=last_buy_date,
+            coupon_start_date=coupon_start_date,
+            coupon_end_date=coupon_end_date,
+            coupon_period_days=coupon_period_days,
             amount_per_unit=amount_per_unit,
             currency=currency,
             source_event_type=source_event_type,
@@ -1362,11 +1390,14 @@ def compute_expected_yield_pct(
     return expected_yield / invested * 100.0
 
 
-def get_latest_cost_basis(db, figi: str) -> Optional[float]:
+def get_latest_cost_basis(db, account_id: str, figi: str) -> Optional[float]:
     row = (
         db.query(PortfolioPosition.position_value, PortfolioPosition.expected_yield)
         .join(PortfolioSnapshot, PortfolioSnapshot.id == PortfolioPosition.snapshot_id)
-        .filter(PortfolioPosition.figi == figi)
+        .filter(
+            PortfolioSnapshot.account_id == account_id,
+            PortfolioPosition.figi == figi,
+        )
         .order_by(PortfolioSnapshot.snapshot_date.desc(), PortfolioSnapshot.snapshot_at.desc())
         .first()
     )
@@ -1753,7 +1784,7 @@ def _reconcile_income_events(
         existing = existing_by_key.get(key)
         if existing is None:
             if figi not in cost_basis_by_figi:
-                cost_basis_by_figi[figi] = get_latest_cost_basis(db, figi)
+                cost_basis_by_figi[figi] = get_latest_cost_basis(db, account_id, figi)
             net_yield_pct = compute_income_net_yield_pct(
                 net_amount,
                 cost_basis_by_figi[figi],
@@ -1778,7 +1809,7 @@ def _reconcile_income_events(
         )
         if amounts_changed:
             if figi not in cost_basis_by_figi:
-                cost_basis_by_figi[figi] = get_latest_cost_basis(db, figi)
+                cost_basis_by_figi[figi] = get_latest_cost_basis(db, account_id, figi)
             net_yield_pct = compute_income_net_yield_pct(
                 net_amount,
                 cost_basis_by_figi[figi],
