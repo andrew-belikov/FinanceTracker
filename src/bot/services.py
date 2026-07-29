@@ -4,6 +4,7 @@ import random
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 
+from common.finance import annualize_simple_yield_pct
 from month_templates import MonthContext, render_month_text
 from common.text_utils import has_mojibake
 from queries import (
@@ -60,6 +61,7 @@ from runtime import (
     db_session,
     decimal_to_str,
     fmt_decimal_rub,
+    fmt_plain_pct,
     fmt_pct,
     fmt_rub,
     normalize_decimal,
@@ -268,9 +270,37 @@ def render_payout_calendar_text(
         instrument_name = row.get("instrument_name") or row.get("figi") or "Инструмент"
         if len(instrument_name) > 64:
             instrument_name = instrument_name[:61] + "..."
+        annualized_label = ""
+        if row.get("event_type") == "coupon":
+            coupon_start_date = row.get("coupon_start_date")
+            coupon_end_date = row.get("coupon_end_date")
+            coupon_period_days = row.get("coupon_period_days")
+            actual_period_days = None
+            if coupon_start_date is not None and coupon_end_date is not None:
+                actual_period_days = (coupon_end_date - coupon_start_date).days
+            if (
+                actual_period_days is not None
+                and actual_period_days > 0
+                and (
+                    coupon_period_days is None
+                    or coupon_period_days == actual_period_days
+                )
+            ):
+                cost_basis = normalize_decimal(row.get("cost_basis"))
+                expected_amount = normalize_decimal(row.get("expected_amount"))
+                if cost_basis > 0 and expected_amount > 0:
+                    period_yield_pct = expected_amount / cost_basis * Decimal("100")
+                    annualized_pct = annualize_simple_yield_pct(
+                        period_yield_pct,
+                        actual_period_days,
+                    )
+                    if annualized_pct is not None:
+                        annualized_label = (
+                            f" · ≈ {fmt_plain_pct(annualized_pct)} % годовых"
+                        )
         lines.append(
             f"{row['payment_date']:%d.%m} · {event_label} · "
-            f"{instrument_name} · {amount_label}"
+            f"{instrument_name} · {amount_label}{annualized_label}"
         )
 
     hidden_count = len(rows) - len(listed_rows)
@@ -284,6 +314,8 @@ def render_payout_calendar_text(
         [
             "",
             "Расчёт сделан по текущему количеству бумаг. "
+            "Проценты — простой годовой эквивалент ожидаемого купона к cost basis, "
+            "без реинвестирования; это не YTM и не прогноз. "
             "Фактическая сумма и налоги могут отличаться.",
         ]
     )

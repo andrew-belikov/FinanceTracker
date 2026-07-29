@@ -85,6 +85,8 @@ class PayoutCalendarSyncTests(unittest.TestCase):
                     instrument_type="bond",
                     quantity=Decimal("10"),
                     currency="RUB",
+                    position_value=Decimal("1000"),
+                    expected_yield=Decimal("100"),
                 ),
                 tracker_app.PortfolioPosition(
                     snapshot_id=snapshot.id,
@@ -176,6 +178,8 @@ class PayoutCalendarSyncTests(unittest.TestCase):
         self.assertEqual(rows[0].coupon_end_date, date(2026, 8, 1))
         self.assertEqual(rows[0].coupon_period_days, 92)
         self.assertEqual(rows[0].currency, "RUB")
+        self.assertEqual(query_rows[0]["coupon_period_days"], 92)
+        self.assertEqual(query_rows[0]["cost_basis"], Decimal("900"))
         self.assertEqual(rows[1].event_type, "dividend")
         self.assertEqual(rows[1].expected_amount, Decimal("15.00"))
         self.assertEqual(rows[1].last_buy_date, date(2026, 7, 17))
@@ -291,7 +295,11 @@ class PayoutCalendarRenderingTests(unittest.TestCase):
                 "instrument_name": "ОФЗ",
                 "event_type": "coupon",
                 "payment_date": date(2026, 8, 1),
+                "coupon_start_date": date(2026, 5, 1),
+                "coupon_end_date": date(2026, 8, 1),
+                "coupon_period_days": 92,
                 "expected_amount": Decimal("125.50"),
+                "cost_basis": Decimal("10000"),
                 "currency": "RUB",
                 "fetched_at": datetime(2026, 7, 28, 6, 0, 0),
             },
@@ -323,11 +331,13 @@ class PayoutCalendarRenderingTests(unittest.TestCase):
         )
 
         self.assertIn("125.50 ₽", text)
+        self.assertIn("≈ 4.98 % годовых", text)
         self.assertIn("10.00 USD", text)
         self.assertIn("Без известной суммы: 1", text)
         self.assertIn("03.08 · купон · Флоатер · сумма уточняется", text)
         self.assertIn("Данные обновлены: 28.07.2026 09:00 МСК", text)
         self.assertIn("Фактическая сумма и налоги могут отличаться", text)
+        self.assertIn("это не YTM и не прогноз", text)
 
     def test_renderer_explains_empty_declared_calendar(self):
         text = render_payout_calendar_text(

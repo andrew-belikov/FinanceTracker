@@ -31,6 +31,7 @@ Telegram-бот для проекта iis_tracker.
 - Все остальные пользователи игнорируются.
 """
 
+from telegram import BotCommand
 from telegram.error import NetworkError, TimedOut
 from telegram.ext import (
     Application,
@@ -110,23 +111,25 @@ from runtime import (
 )
 
 
-COMMAND_HANDLERS = (
-    ("start", cmd_start),
-    ("help", cmd_help),
-    ("today", cmd_today),
-    ("week", cmd_week),
-    ("month", cmd_month),
-    ("monthpdf", cmd_monthpdf),
-    ("calendar", cmd_calendar),
-    ("year", cmd_year),
-    ("dataset", cmd_dataset),
-    ("structure", cmd_structure),
-    ("history", cmd_history),
-    ("twr", cmd_twr),
-    ("targets", cmd_targets),
-    ("rebalance", cmd_rebalance),
-    ("invest", cmd_invest),
+COMMAND_SPECS = (
+    ("start", "Приветствие и быстрый старт", cmd_start),
+    ("help", "Список всех команд", cmd_help),
+    ("today", "Сводка по портфелю на сегодня", cmd_today),
+    ("week", "Сводка по текущей неделе", cmd_week),
+    ("month", "Отчёт по текущему месяцу", cmd_month),
+    ("monthpdf", "PDF-отчёт по текущему месяцу", cmd_monthpdf),
+    ("calendar", "Купоны и дивиденды на 90 дней", cmd_calendar),
+    ("year", "Отчёт за текущий или указанный год", cmd_year),
+    ("dataset", "ZIP-архив данных для анализа", cmd_dataset),
+    ("structure", "Текущая структура портфеля", cmd_structure),
+    ("history", "График стоимости и пополнений", cmd_history),
+    ("twr", "TWR, XIRR и годовой run-rate", cmd_twr),
+    ("targets", "Целевое распределение активов", cmd_targets),
+    ("rebalance", "Отклонения и план ребалансировки", cmd_rebalance),
+    ("invest", "Распределить новое пополнение", cmd_invest),
 )
+COMMAND_HANDLERS = tuple((name, handler) for name, _, handler in COMMAND_SPECS)
+BOT_COMMANDS = tuple(BotCommand(name, description) for name, description, _ in COMMAND_SPECS)
 
 BOT_STARTUP_RETRY_EXIT_CODE = 76
 
@@ -135,6 +138,18 @@ def register_handlers(app: Application) -> None:
     app.add_handler(MessageHandler(filters.COMMAND, debug_command_probe), group=-1)
     for command_name, handler in COMMAND_HANDLERS:
         app.add_handler(CommandHandler(command_name, handler))
+
+
+async def sync_bot_commands(app: Application) -> None:
+    await app.bot.set_my_commands(BOT_COMMANDS)
+    logger.info(
+        "bot_commands_synced",
+        "Telegram bot commands synchronized.",
+        {
+            "commands_count": len(BOT_COMMANDS),
+            "commands": [command.command for command in BOT_COMMANDS],
+        },
+    )
 
 
 def configure_jobs(app: Application) -> None:
@@ -240,6 +255,7 @@ def build_application() -> Application:
         .token(TELEGRAM_BOT_TOKEN)
         .request(request)
         .get_updates_request(get_updates_request)
+        .post_init(sync_bot_commands)
         .build()
     )
     register_handlers(app)
