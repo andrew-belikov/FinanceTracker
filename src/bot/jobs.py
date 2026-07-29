@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 
 from telegram.ext import ContextTypes
 
+from common.finance import annualize_simple_yield_pct
 from queries import (
     claim_daily_job_run,
     complete_daily_job_run,
@@ -72,6 +73,28 @@ PAYOUT_WEEKLY_JOB_NAME = "weekly_payout_digest"
 DAILY_JOB_STARTUP_CATCHUP_DELAY_SECONDS = 5
 YESTERDAY_PEAK_ALERT_STARTUP_CATCHUP_DELAY_SECONDS = 7
 PAYOUT_WEEKLY_STARTUP_CATCHUP_DELAY_SECONDS = 9
+
+
+def build_income_event_notification_text(row: dict) -> str:
+    event_type = row["event_type"]
+    icon = "💸" if event_type == "coupon" else "💰"
+    action_line = "Купон зачислен" if event_type == "coupon" else "Дивиденды зачислены"
+    net_amount = float(row["net_amount"])
+    net_yield_pct = float(row["net_yield_pct"])
+    instrument_name = row["instrument_name"]
+
+    lines = [
+        f"{icon} {instrument_name}",
+        action_line,
+        f"{fmt_signed_amount(net_amount)} ₽ ({fmt_plain_pct(net_yield_pct)} %)",
+    ]
+    annualized_pct = annualize_simple_yield_pct(
+        net_yield_pct,
+        row.get("coupon_period_days"),
+    )
+    if event_type == "coupon" and annualized_pct is not None:
+        lines.append(f"≈ {fmt_plain_pct(annualized_pct)} % годовых по этому купону")
+    return "\n".join(lines)
 
 
 def reset_polling_watchdog_state() -> None:
@@ -886,17 +909,7 @@ async def check_income_events(context: ContextTypes.DEFAULT_TYPE):
 
     for row in rows:
         event_type = row["event_type"]
-        icon = "💸" if event_type == "coupon" else "💰"
-        action_line = "Купон зачислен" if event_type == "coupon" else "Дивиденды зачислены"
-        net_amount = float(row["net_amount"])
-        net_yield_pct = float(row["net_yield_pct"])
-        instrument_name = row["instrument_name"]
-
-        text_msg = (
-            f"{icon} {instrument_name}\n"
-            f"{action_line}\n"
-            f"{fmt_signed_amount(net_amount)} ₽ ({fmt_plain_pct(net_yield_pct)} %)"
-        )
+        text_msg = build_income_event_notification_text(row)
 
         sent_ok = True
         for chat_id in TARGET_CHAT_IDS:

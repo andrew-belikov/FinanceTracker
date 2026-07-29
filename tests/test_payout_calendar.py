@@ -109,6 +109,7 @@ class PayoutCalendarSyncTests(unittest.TestCase):
                 "couponNumber": "7",
                 "couponStartDate": "2026-05-01T00:00:00Z",
                 "couponEndDate": "2026-08-01T00:00:00Z",
+                "couponPeriod": 92,
                 "payOneBond": {
                     "units": "12",
                     "nano": 500_000_000,
@@ -171,6 +172,9 @@ class PayoutCalendarSyncTests(unittest.TestCase):
         self.assertEqual(rows[0].event_type, "coupon")
         self.assertEqual(rows[0].amount_per_unit, Decimal("12.500000000"))
         self.assertEqual(rows[0].expected_amount, Decimal("125.00"))
+        self.assertEqual(rows[0].coupon_start_date, date(2026, 5, 1))
+        self.assertEqual(rows[0].coupon_end_date, date(2026, 8, 1))
+        self.assertEqual(rows[0].coupon_period_days, 92)
         self.assertEqual(rows[0].currency, "RUB")
         self.assertEqual(rows[1].event_type, "dividend")
         self.assertEqual(rows[1].expected_amount, Decimal("15.00"))

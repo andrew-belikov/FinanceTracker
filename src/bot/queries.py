@@ -1854,9 +1854,34 @@ def get_unnotified_income_events(session, account_id: str) -> list[dict]:
                         ie.event_type,
                         ie.net_amount,
                         ie.net_yield_pct,
+                        coupon.coupon_period_days,
                         COALESCE(i.name, i.ticker, ie.figi) AS instrument_name
                     FROM income_events ie
                     LEFT JOIN instruments i ON i.figi = ie.figi
+                    LEFT JOIN LATERAL (
+                        SELECT
+                            CASE
+                                WHEN COUNT(*) = 1
+                                THEN MAX(
+                                    pce.coupon_end_date - pce.coupon_start_date
+                                )
+                                ELSE NULL
+                            END AS coupon_period_days
+                        FROM payout_calendar_events pce
+                        WHERE pce.account_id = ie.account_id
+                          AND pce.figi = ie.figi
+                          AND pce.event_type = 'coupon'
+                          AND pce.payment_date = ie.event_date
+                          AND pce.coupon_start_date IS NOT NULL
+                          AND pce.coupon_end_date IS NOT NULL
+                          AND pce.coupon_end_date > pce.coupon_start_date
+                          AND (
+                              pce.coupon_period_days IS NULL
+                              OR pce.coupon_period_days = (
+                                  pce.coupon_end_date - pce.coupon_start_date
+                              )
+                          )
+                    ) coupon ON ie.event_type = 'coupon'
                     WHERE ie.account_id = :account_id
                       AND ie.notified = false
                     ORDER BY ie.created_at ASC
