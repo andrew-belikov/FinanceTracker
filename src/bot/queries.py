@@ -1911,28 +1911,44 @@ def get_payout_calendar_events(
                 text(
                     """
                     SELECT
-                        id,
-                        figi,
-                        COALESCE(NULLIF(ticker, ''), NULLIF(name, ''), figi) AS instrument_name,
-                        event_type,
-                        payment_date,
-                        record_date,
-                        last_buy_date,
-                        amount_per_unit,
-                        quantity,
-                        expected_amount,
-                        currency,
-                        source_event_type,
-                        fetched_at
-                    FROM payout_calendar_events
-                    WHERE account_id = :account_id
-                      AND payment_date >= :start_date
-                      AND payment_date <= :end_date
+                        pce.id,
+                        pce.figi,
+                        COALESCE(NULLIF(pce.ticker, ''), NULLIF(pce.name, ''), pce.figi)
+                            AS instrument_name,
+                        pce.event_type,
+                        pce.payment_date,
+                        pce.record_date,
+                        pce.last_buy_date,
+                        pce.coupon_start_date,
+                        pce.coupon_end_date,
+                        pce.coupon_period_days,
+                        pce.amount_per_unit,
+                        pce.quantity,
+                        pce.expected_amount,
+                        pce.currency,
+                        pce.source_event_type,
+                        pce.fetched_at,
+                        (
+                            SELECT pp.position_value - pp.expected_yield
+                            FROM portfolio_positions pp
+                            JOIN portfolio_snapshots ps ON ps.id = pp.snapshot_id
+                            WHERE ps.account_id = pce.account_id
+                              AND pp.figi = pce.figi
+                            ORDER BY
+                                ps.snapshot_date DESC,
+                                ps.snapshot_at DESC,
+                                ps.id DESC
+                            LIMIT 1
+                        ) AS cost_basis
+                    FROM payout_calendar_events pce
+                    WHERE pce.account_id = :account_id
+                      AND pce.payment_date >= :start_date
+                      AND pce.payment_date <= :end_date
                     ORDER BY
-                        payment_date ASC,
-                        CASE event_type WHEN 'coupon' THEN 0 ELSE 1 END,
-                        COALESCE(NULLIF(ticker, ''), NULLIF(name, ''), figi) ASC,
-                        id ASC
+                        pce.payment_date ASC,
+                        CASE pce.event_type WHEN 'coupon' THEN 0 ELSE 1 END,
+                        COALESCE(NULLIF(pce.ticker, ''), NULLIF(pce.name, ''), pce.figi) ASC,
+                        pce.id ASC
                     """
                 ),
                 {
