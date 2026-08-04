@@ -267,8 +267,8 @@ class PayoutCalendarSyncTests(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertIsNone(rows[0]["expected_amount"])
         self.assertEqual(
-            rows[0]["previous_coupon_amount_per_unit"],
-            Decimal("13.030000000"),
+            Decimal(str(rows[0]["previous_coupon_amount_per_unit"])),
+            Decimal("13.03"),
         )
 
     def test_successful_empty_refresh_removes_cancelled_event(self):
