@@ -636,7 +636,9 @@ def build_deterministic_monthly_narrative(payload: dict[str, Any]) -> dict[str, 
     cashflow_notes = [
         f"Пополнения: {_display_rub(summary.get('deposits'), precision=0)}, "
         f"выводы: {_display_rub(summary.get('withdrawals'), precision=0)}.",
-        f"Доходы за месяц: {_display_rub(summary.get('income_net'), precision=2)}, "
+        f"Купоны и дивиденды: {_display_rub(summary.get('income_net'), precision=2)}, "
+        f"вычет ИИС: {_display_rub(summary.get('iis_tax_deduction_income'), precision=2)}, "
+        f"всего доходов: {_display_rub(summary.get('total_income_net'), precision=2)}, "
         f"комиссии: {_display_rub(summary.get('commissions'), precision=2)}, "
         f"налоги: {_display_rub(summary.get('taxes'), precision=2)}.",
     ]
@@ -1022,7 +1024,9 @@ def build_monthly_report_html(
             "Денежный поток",
             [
                 ("Пополнения", _render_fact_stack(_display_rub(summary.get("deposits"), precision=0))),
-                ("Доходы за месяц", _render_fact_stack(_display_rub(summary.get("income_net"), precision=2))),
+                ("Купоны и дивиденды", _render_fact_stack(_display_rub(summary.get("income_net"), precision=2))),
+                ("Налоговый вычет ИИС", _render_fact_stack(_display_rub(summary.get("iis_tax_deduction_income"), precision=2))),
+                ("Доходы всего", _render_fact_stack(_display_rub(summary.get("total_income_net"), precision=2))),
             ],
         ),
     ]

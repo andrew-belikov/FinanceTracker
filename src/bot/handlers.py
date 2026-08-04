@@ -13,7 +13,12 @@ from charts import (
     render_twr_chart,
 )
 from dataset import create_dataset_archive
-from queries import resolve_reporting_account_id
+from iis_tax_deduction import (
+    CALLBACK_PREFIX,
+    build_iis_tax_deduction_markup,
+    render_iis_tax_deduction_message,
+)
+from queries import resolve_reporting_account_id, set_iis_tax_deduction_category
 from report_client import ReporterClientError, request_monthly_report_pdf
 from runtime import (
     INVEST_USAGE_TEXT,
@@ -58,6 +63,53 @@ async def debug_command_probe(update: Update, context: ContextTypes.DEFAULT_TYPE
     if text.startswith("/"):
         command_name = text.split()[0]
     log_update_received(update, command_name=command_name)
+
+
+async def handle_iis_tax_deduction_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if query is None:
+        return
+    if not is_authorized(update):
+        await query.answer("Недостаточно прав", show_alert=True)
+        return
+
+    parts = (query.data or "").split(":", 2)
+    if len(parts) != 3 or parts[0] != CALLBACK_PREFIX or parts[1] not in {"set", "unset"}:
+        await query.answer("Кнопка устарела", show_alert=True)
+        return
+
+    enabled = parts[1] == "set"
+    operation_id = parts[2].strip()
+    if not operation_id:
+        await query.answer("Операция не найдена", show_alert=True)
+        return
+
+    with db_session() as session:
+        account_id = resolve_reporting_account_id(session)
+        if account_id is None:
+            await query.answer(REPORTING_ACCOUNT_UNAVAILABLE_TEXT, show_alert=True)
+            return
+        result = set_iis_tax_deduction_category(
+            session,
+            account_id=account_id,
+            operation_id=operation_id,
+            enabled=enabled,
+        )
+
+    if result == "not_found":
+        await query.answer("Исполненное пополнение не найдено", show_alert=True)
+        return
+
+    message = query.message
+    source_text = message.text if message is not None else ""
+    rendered_text = render_iis_tax_deduction_message(source_text, marked=enabled)
+    markup = build_iis_tax_deduction_markup(operation_id, marked=enabled)
+    if message is not None:
+        try:
+            await query.edit_message_text(rendered_text, parse_mode="Markdown", reply_markup=markup)
+        except Exception:
+            await query.edit_message_text(rendered_text, reply_markup=markup)
+    await query.answer("Вычет отмечен" if enabled else "Отметка снята")
 
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):

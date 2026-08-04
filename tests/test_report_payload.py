@@ -475,6 +475,7 @@ class MonthlyReportPayloadBuilderTests(unittest.TestCase):
             mock.patch.object(report_payload, "get_deposits_for_period", side_effect=deposits_for_period),
             mock.patch.object(report_payload, "get_net_external_flow_for_period", return_value=Decimal("4500")),
             mock.patch.object(report_payload, "get_income_for_period", return_value=(Decimal("128.60"), Decimal("50.25"))),
+            mock.patch.object(report_payload, "get_iis_tax_deductions_for_period", return_value=Decimal("52000")),
             mock.patch.object(report_payload, "get_commissions_for_period", return_value=Decimal("35")),
             mock.patch.object(report_payload, "get_taxes_for_period", return_value=Decimal("12.10")),
             mock.patch.object(
@@ -523,6 +524,8 @@ class MonthlyReportPayloadBuilderTests(unittest.TestCase):
         self.assertEqual(payload["summary_metrics"]["withdrawals"], "500")
         self.assertEqual(payload["summary_metrics"]["period_twr_pct"], "8.1")
         self.assertEqual(payload["summary_metrics"]["open_pl_end_total"], "315")
+        self.assertEqual(payload["summary_metrics"]["iis_tax_deduction_income"], "52000")
+        self.assertEqual(payload["summary_metrics"]["total_income_net"], "52178.85")
         self.assertEqual(payload["positions_current"][0]["ticker"], "EQMX")
         self.assertEqual(payload["position_flow_groups"]["new"][0]["ticker"], "BOND1")
         self.assertEqual(payload["position_flow_groups"]["closed"][0]["ticker"], "GAZP")

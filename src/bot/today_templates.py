@@ -13,6 +13,7 @@ class TodayContext:
     pnl_pct: str          # "-3.0 %"
     coupons: Decimal = Decimal('0')
     dividends: Decimal = Decimal('0')
+    iis_tax_deductions: Decimal = Decimal('0')
     commissions: Decimal = Decimal('0')
     taxes: Decimal = Decimal('0')
 
@@ -320,7 +321,7 @@ TODAY_TEMPLATES: List[str] = [
 ]
 
 TODAY_INCOME_EXPENSE_LINES = (
-    "\nДоходы: купоны {coupons}, дивиденды {dividends}."
+    "\nДоходы: купоны {coupons}, дивиденды {dividends}, налоговые вычеты ИИС {iis_tax_deductions}."
     "\nРасходы: комиссии {commissions}, налоги {taxes}."
 )
 

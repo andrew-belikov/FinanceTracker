@@ -86,6 +86,14 @@ class TrackerMigrationTests(unittest.TestCase):
         self.assertNotIn("i.ticker", group_by)
         self.assertNotIn("o.name", group_by)
 
+    def test_iis_tax_deduction_migration_is_idempotent(self):
+        sql = (
+            PROJECT_ROOT / "migrations" / "20260805_operations_cashflow_category.sql"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("ADD COLUMN IF NOT EXISTS cashflow_category TEXT", sql)
+        self.assertIn("CREATE INDEX IF NOT EXISTS ix_operations_cashflow_category", sql)
+
 
 if __name__ == "__main__":
     unittest.main()

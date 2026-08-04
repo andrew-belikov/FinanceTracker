@@ -208,6 +208,7 @@ engine = create_engine(DB_DSN, future=True)
 SessionLocal = sessionmaker(bind=engine, expire_on_commit=False)
 
 DEPOSIT_OPERATION_TYPES: tuple[str, ...] = ("OPERATION_TYPE_INPUT",)
+IIS_TAX_DEDUCTION_CATEGORY = "iis_tax_deduction"
 COMMISSION_OPERATION_TYPES: tuple[str, ...] = (
     "OPERATION_TYPE_BROKER_FEE",
     "OPERATION_TYPE_MARGIN_FEE",
@@ -250,6 +251,7 @@ WITH operations_dedup AS (
         date,
         amount,
         operation_type,
+        cashflow_category,
         state,
         figi,
         name,
@@ -347,7 +349,13 @@ def db_session():
         session.close()
 
 
-async def safe_send_message(bot, chat_id: int, text: str, parse_mode: str = "Markdown"):
+async def safe_send_message(
+    bot,
+    chat_id: int,
+    text: str,
+    parse_mode: str = "Markdown",
+    reply_markup=None,
+):
     """Send message; if Markdown parsing fails, fallback to plain text."""
     try:
         logger.info(
@@ -355,7 +363,12 @@ async def safe_send_message(bot, chat_id: int, text: str, parse_mode: str = "Mar
             "Sending Telegram message.",
             {"chat_id": chat_id, "parse_mode": parse_mode, "text_preview": text[:120]},
         )
-        await bot.send_message(chat_id=chat_id, text=text, parse_mode=parse_mode)
+        message = await bot.send_message(
+            chat_id=chat_id,
+            text=text,
+            parse_mode=parse_mode,
+            reply_markup=reply_markup,
+        )
         logger.info(
             "bot_send_message_succeeded",
             "Telegram message sent.",
@@ -368,12 +381,13 @@ async def safe_send_message(bot, chat_id: int, text: str, parse_mode: str = "Mar
             "Telegram message send with parse_mode failed; retrying without parse mode.",
             {"chat_id": chat_id, "parse_mode": parse_mode},
         )
-        await bot.send_message(chat_id=chat_id, text=text)
+        message = await bot.send_message(chat_id=chat_id, text=text, reply_markup=reply_markup)
         logger.info(
             "bot_send_message_plain_succeeded",
             "Telegram message sent without parse mode fallback.",
             {"chat_id": chat_id},
         )
+    return message
 
 
 async def safe_send_document(

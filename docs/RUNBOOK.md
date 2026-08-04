@@ -93,6 +93,7 @@ Forward-миграции применяются автоматически се�
 | `migrations/20260304_operations_operation_item_fields.sql` | если существующая `operations` ещё без расширенных полей `OperationItem` | добавляет колонки `state`, `commission`, `yield`, `instrument_type` и другие | также добавляет unique-констрейнт по `operation_id`; после миграции возможен backfill исторических строк |
 | `migrations/20260404_bot_daily_job_runs.sql` | если нужен startup catch-up для daily job без дублей | создаёт таблицу `bot_daily_job_runs` | без этой таблицы бот не сможет надёжно добирать пропущенный daily job после позднего рестарта |
 | `migrations/20260728_payout_calendar_events.sql` | при добавлении `/calendar` в существующую БД | создаёт таблицу ожидаемых купонов и объявленных дивидендов | tracker также создаёт таблицу через `create_all`, но явная миграция оставляет управляемый след изменения схемы |
+| `migrations/20260805_operations_cashflow_category.sql` | при добавлении учёта вычета ИИС | добавляет nullable `operations.cashflow_category` и индекс | API-sync сохраняет ручную категорию; исторический backfill делать только по точному `operation_id` после миграции |
 
 ## Автоматический Порядок Миграции
 

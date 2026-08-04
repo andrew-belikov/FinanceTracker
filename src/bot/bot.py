@@ -35,6 +35,7 @@ from telegram import BotCommand
 from telegram.error import NetworkError, TimedOut
 from telegram.ext import (
     Application,
+    CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
     MessageHandler,
@@ -59,7 +60,9 @@ from handlers import (
     cmd_week,
     cmd_year,
     debug_command_probe,
+    handle_iis_tax_deduction_callback,
 )
+from iis_tax_deduction import CALLBACK_PREFIX
 from jobs import (
     check_income_events,
     check_invest_notifications,
@@ -136,6 +139,12 @@ BOT_STARTUP_RETRY_EXIT_CODE = 76
 
 def register_handlers(app: Application) -> None:
     app.add_handler(MessageHandler(filters.COMMAND, debug_command_probe), group=-1)
+    app.add_handler(
+        CallbackQueryHandler(
+            handle_iis_tax_deduction_callback,
+            pattern=rf"^{CALLBACK_PREFIX}:(?:set|unset):",
+        )
+    )
     for command_name, handler in COMMAND_HANDLERS:
         app.add_handler(CommandHandler(command_name, handler))
 

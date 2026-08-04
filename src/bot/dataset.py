@@ -18,6 +18,7 @@ from queries import (
 )
 from runtime import (
     ACCOUNT_FRIENDLY_NAME,
+    IIS_TAX_DEDUCTION_CATEGORY,
     REPORTING_ACCOUNT_UNAVAILABLE_TEXT,
     TZ_NAME,
     db_session,
@@ -74,6 +75,7 @@ def build_dataset_export(session) -> tuple[dict, list[dict], list[dict], list[di
         twr_by_date = {dt: round(value * 100.0, 6) for dt, value in zip(dates, twr_series)}
 
     deposits_by_day: dict[date, Decimal] = {}
+    iis_tax_deductions_by_day: dict[date, Decimal] = {}
     withdrawals_by_day: dict[date, Decimal] = {}
     commissions_by_day: dict[date, Decimal] = {}
     taxes_by_day: dict[date, Decimal] = {}
@@ -110,8 +112,12 @@ def build_dataset_export(session) -> tuple[dict, list[dict], list[dict], list[di
         amount = normalize_decimal(row["amount"])
         amount_abs = abs(amount)
         if local_date is not None:
-            if group == "deposit":
-                deposits_by_day[local_date] = deposits_by_day.get(local_date, Decimal("0")) + amount
+            if group == "deposit" and row.get("cashflow_category") == IIS_TAX_DEDUCTION_CATEGORY:
+                iis_tax_deductions_by_day[local_date] = (
+                    iis_tax_deductions_by_day.get(local_date, Decimal("0")) + amount_abs
+                )
+            elif group == "deposit":
+                deposits_by_day[local_date] = deposits_by_day.get(local_date, Decimal("0")) + amount_abs
             elif group == "withdrawal":
                 withdrawals_by_day[local_date] = withdrawals_by_day.get(local_date, Decimal("0")) + amount_abs
             elif group == "commission":
@@ -126,6 +132,7 @@ def build_dataset_export(session) -> tuple[dict, list[dict], list[dict], list[di
                 "local_date": local_date.isoformat() if local_date is not None else None,
                 "operation_type": row["operation_type"],
                 "operation_group": group,
+                "cashflow_category": row.get("cashflow_category"),
                 "state": row["state"],
                 "logical_asset_id": logical_asset_id,
                 "asset_uid": asset_uid,
@@ -185,6 +192,8 @@ def build_dataset_export(session) -> tuple[dict, list[dict], list[dict], list[di
         deposits = deposits_by_day.get(snapshot_date, Decimal("0"))
         withdrawals = withdrawals_by_day.get(snapshot_date, Decimal("0"))
         income_net = income_net_by_day.get(snapshot_date, Decimal("0"))
+        iis_tax_deduction_income = iis_tax_deductions_by_day.get(snapshot_date, Decimal("0"))
+        total_income_net = income_net + iis_tax_deduction_income
         commissions = commissions_by_day.get(snapshot_date, Decimal("0"))
         taxes = taxes_by_day.get(snapshot_date, Decimal("0"))
         income_tax = income_tax_by_day.get(snapshot_date, Decimal("0"))
@@ -204,6 +213,8 @@ def build_dataset_export(session) -> tuple[dict, list[dict], list[dict], list[di
                 "deposits": deposits,
                 "withdrawals": withdrawals,
                 "income_net": income_net,
+                "iis_tax_deduction_income": iis_tax_deduction_income,
+                "total_income_net": total_income_net,
                 "commissions": commissions,
                 "operation_taxes": taxes,
                 "income_taxes": income_tax,
@@ -256,6 +267,10 @@ def build_dataset_export(session) -> tuple[dict, list[dict], list[dict], list[di
     deposits_total = sum((row["deposits"] for row in daily_csv_rows), Decimal("0"))
     withdrawals_total = sum((row["withdrawals"] for row in daily_csv_rows), Decimal("0"))
     income_net_total = sum((row["income_net"] for row in daily_csv_rows), Decimal("0"))
+    iis_tax_deduction_income_total = sum(
+        (row["iis_tax_deduction_income"] for row in daily_csv_rows), Decimal("0")
+    )
+    total_income_net = income_net_total + iis_tax_deduction_income_total
     commissions_total = sum((row["commissions"] for row in daily_csv_rows), Decimal("0"))
     operation_taxes_total = sum((row["operation_taxes"] for row in daily_csv_rows), Decimal("0"))
     income_taxes_total = sum((row["income_taxes"] for row in daily_csv_rows), Decimal("0"))
@@ -264,7 +279,11 @@ def build_dataset_export(session) -> tuple[dict, list[dict], list[dict], list[di
     period_start_value = normalize_decimal(daily_csv_rows[0]["portfolio_value"])
     period_end_value = current_value
     period_net_cashflow = sum((row["net_cashflow"] for row in daily_csv_rows[1:]), Decimal("0"))
-    period_pnl_abs = period_end_value - period_start_value - period_net_cashflow
+    period_external_cashflow = sum(
+        (row["deposits"] - row["withdrawals"] for row in daily_csv_rows[1:]),
+        Decimal("0"),
+    )
+    period_pnl_abs = period_end_value - period_start_value - period_external_cashflow
     has_full_history_from_zero = period_start_value == Decimal("0")
     reconciliation_rows, positions_value_sum, reconciliation_gap_abs = build_reconciliation_by_asset_type(
         latest_snapshot,
@@ -276,7 +295,7 @@ def build_dataset_export(session) -> tuple[dict, list[dict], list[dict], list[di
 
     dataset = {
         "meta": {
-            "dataset_version": 2,
+            "dataset_version": 3,
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "timezone": TZ_NAME,
             "account_name": ACCOUNT_FRIENDLY_NAME,
@@ -291,6 +310,8 @@ def build_dataset_export(session) -> tuple[dict, list[dict], list[dict], list[di
             "deposits_total": deposits_total,
             "withdrawals_total": withdrawals_total,
             "income_net_total": income_net_total,
+            "iis_tax_deduction_income_total": iis_tax_deduction_income_total,
+            "total_income_net": total_income_net,
             "commissions_total": commissions_total,
             "income_taxes_total": income_taxes_total,
             "operation_taxes_total": operation_taxes_total,
@@ -298,6 +319,7 @@ def build_dataset_export(session) -> tuple[dict, list[dict], list[dict], list[di
             "period_start_value": period_start_value,
             "period_end_value": period_end_value,
             "period_net_cashflow": period_net_cashflow,
+            "period_external_cashflow": period_external_cashflow,
             "period_pnl_abs": period_pnl_abs,
             "period_twr_pct": twr_by_date.get(max_date),
             "has_full_history_from_zero": has_full_history_from_zero,
@@ -338,6 +360,7 @@ def build_dataset_export(session) -> tuple[dict, list[dict], list[dict], list[di
             "В operations включены только исполненные операции после дедупликации по operation_id.",
             "Дневные cashflow-агрегаты привязаны к локальной дате Europe/Moscow.",
             "income_net в daily timeseries уже учитывает удержанный налог из income_events.",
+            "iis_tax_deduction_income считается доходом портфеля и не входит во внешний денежный поток.",
             "operation_taxes_total не включает dividend/coupon tax, если тот же налог уже представлен в income_events.",
             "Архив считается period-first: lifetime return не вычисляется без полной истории с нуля.",
             "reconciliation_by_asset_type строится от snapshot totals по классам активов; нераскрытый остаток остаётся residual.",
@@ -370,6 +393,9 @@ def build_dataset_readme(dataset: dict) -> str:
         f"- Period start value: {decimal_to_str(summary['period_start_value'])} {meta['base_currency']}\n"
         f"- Period end value: {decimal_to_str(summary['period_end_value'])} {meta['base_currency']}\n"
         f"- Period net cashflow: {decimal_to_str(summary['period_net_cashflow'])} {meta['base_currency']}\n"
+        f"- Period external cashflow: {decimal_to_str(summary['period_external_cashflow'])} {meta['base_currency']}\n"
+        f"- IIS tax deduction income: {decimal_to_str(summary['iis_tax_deduction_income_total'])} {meta['base_currency']}\n"
+        f"- Total income net: {decimal_to_str(summary['total_income_net'])} {meta['base_currency']}\n"
         f"- Period pnl abs: {decimal_to_str(summary['period_pnl_abs'])} {meta['base_currency']}\n"
         f"- Period twr pct: {summary['period_twr_pct']}\n"
         f"- Positions value sum: {decimal_to_str(summary['positions_value_sum'])} {meta['base_currency']}\n"
@@ -380,6 +406,8 @@ def build_dataset_readme(dataset: dict) -> str:
         "- `operation_group` нормализует сырые типы операций; налоги по операциям экспортируются как `income_tax`.\n"
         "- `logical_asset_id` строится из `asset_uid` и нужен для склейки бумаг при смене FIGI.\n"
         "- `income_net` в дневном ряду уже очищен от удержанного налога по income_events.\n"
+        "- `iis_tax_deduction_income` — отдельный доход; `total_income_net` включает его вместе с купонами и дивидендами.\n"
+        "- В TWR и `period_external_cashflow` входят только собственные пополнения и выводы.\n"
         "- `taxes_total` дедуплицирован: dividend/coupon tax не суммируется второй раз из operations, если он уже попал в income_events.\n"
         "- Если `has_full_history_from_zero=false`, архив нельзя трактовать как полную lifetime-историю портфеля.\n"
         "- Если `reconciliation_gap_abs` не равен нулю, смотрите `reconciliation_by_asset_type`: это residual между snapshot totals и суммой позиционных оценок.\n"
@@ -408,6 +436,8 @@ def create_dataset_archive() -> tuple[str, str]:
         "deposits",
         "withdrawals",
         "income_net",
+        "iis_tax_deduction_income",
+        "total_income_net",
         "commissions",
         "operation_taxes",
         "income_taxes",
@@ -442,6 +472,7 @@ def create_dataset_archive() -> tuple[str, str]:
         "local_date",
         "operation_type",
         "operation_group",
+        "cashflow_category",
         "state",
         "logical_asset_id",
         "asset_uid",

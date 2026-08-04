@@ -10,6 +10,7 @@ from runtime import (
     COMMISSION_OPERATION_TYPES,
     DEPOSIT_OPERATION_TYPES,
     EXECUTED_OPERATION_STATE,
+    IIS_TAX_DEDUCTION_CATEGORY,
     OPERATIONS_DEDUP_CTE,
     TAX_OPERATION_TYPES,
     TINKOFF_ACCOUNT_ID,
@@ -98,12 +99,14 @@ def get_latest_deposit_date(
             FROM operations_dedup
             WHERE account_id = :account_id
               AND operation_type IN :operation_types
+              AND COALESCE(cashflow_category, '') <> :deduction_category
               AND state = :executed_state
             """
         ).bindparams(bindparam("operation_types", expanding=True)),
         {
             "account_id": account_id,
             "operation_types": operation_types,
+            "deduction_category": IIS_TAX_DEDUCTION_CATEGORY,
             "executed_state": EXECUTED_OPERATION_STATE,
         },
     ).scalar_one()
@@ -122,12 +125,14 @@ def get_total_deposits(
             FROM operations_dedup
             WHERE account_id = :account_id
               AND operation_type IN :operation_types
+              AND COALESCE(cashflow_category, '') <> :deduction_category
               AND state = :executed_state
             """
         ).bindparams(bindparam("operation_types", expanding=True)),
         {
             "account_id": account_id,
             "operation_types": operation_types,
+            "deduction_category": IIS_TAX_DEDUCTION_CATEGORY,
             "executed_state": EXECUTED_OPERATION_STATE,
         },
     ).scalar_one()
@@ -151,6 +156,7 @@ def get_deposits_for_period(
           AND date >= :start_dt
           AND date < :end_dt
           AND operation_type IN :operation_types
+          AND COALESCE(cashflow_category, '') <> :deduction_category
           AND state = :executed_state
         """
         ).bindparams(bindparam("operation_types", expanding=True)),
@@ -159,10 +165,43 @@ def get_deposits_for_period(
             "start_dt": start_dt,
             "end_dt": end_dt,
             "operation_types": operation_types,
+            "deduction_category": IIS_TAX_DEDUCTION_CATEGORY,
             "executed_state": EXECUTED_OPERATION_STATE,
         },
     ).scalar_one()
     return float(row or 0)
+
+
+def get_iis_tax_deductions_for_period(
+    session,
+    account_id: str,
+    start_dt: datetime,
+    end_dt: datetime,
+) -> Decimal:
+    row = session.execute(
+        text(
+            f"""
+            {OPERATIONS_DEDUP_CTE}
+            SELECT COALESCE(SUM(ABS(amount)), 0)
+            FROM operations_dedup
+            WHERE account_id = :account_id
+              AND date >= :start_dt
+              AND date < :end_dt
+              AND operation_type IN :deposit_types
+              AND cashflow_category = :deduction_category
+              AND state = :executed_state
+            """
+        ).bindparams(bindparam("deposit_types", expanding=True)),
+        {
+            "account_id": account_id,
+            "start_dt": start_dt,
+            "end_dt": end_dt,
+            "deposit_types": DEPOSIT_OPERATION_TYPES,
+            "deduction_category": IIS_TAX_DEDUCTION_CATEGORY,
+            "executed_state": EXECUTED_OPERATION_STATE,
+        },
+    ).scalar_one()
+    return Decimal(row or 0)
 
 
 def get_net_external_flow_for_period(
@@ -178,7 +217,9 @@ def get_net_external_flow_for_period(
         SELECT COALESCE(
             SUM(
                 CASE
-                    WHEN operation_type IN :deposit_types THEN ABS(amount)
+                    WHEN operation_type IN :deposit_types
+                         AND COALESCE(cashflow_category, '') <> :deduction_category
+                    THEN ABS(amount)
                     WHEN operation_type IN :withdrawal_types THEN -ABS(amount)
                     ELSE 0
                 END
@@ -204,6 +245,7 @@ def get_net_external_flow_for_period(
             "deposit_types": DEPOSIT_OPERATION_TYPES,
             "withdrawal_types": WITHDRAWAL_OPERATION_TYPES,
             "operation_types": DEPOSIT_OPERATION_TYPES + WITHDRAWAL_OPERATION_TYPES,
+            "deduction_category": IIS_TAX_DEDUCTION_CATEGORY,
             "executed_state": EXECUTED_OPERATION_STATE,
         },
     ).scalar_one()
@@ -739,6 +781,7 @@ def get_dataset_operations(session, account_id: str, start_dt: datetime, end_dt:
                         amount,
                         currency,
                         operation_type,
+                        cashflow_category,
                         state,
                         instrument_uid,
                         asset_uid,
@@ -759,6 +802,7 @@ def get_dataset_operations(session, account_id: str, start_dt: datetime, end_dt:
                     amount,
                     currency,
                     operation_type,
+                    cashflow_category,
                     state,
                     instrument_uid,
                     asset_uid,
@@ -949,6 +993,7 @@ def get_deposits_by_date(
         FROM operations_dedup
         WHERE account_id = :account_id
           AND operation_type IN :operation_types
+          AND COALESCE(cashflow_category, '') <> :deduction_category
           AND state = :executed_state
         GROUP BY date::date
         ORDER BY d ASC
@@ -957,6 +1002,7 @@ def get_deposits_by_date(
             {
                 "account_id": account_id,
                 "operation_types": operation_types,
+                "deduction_category": IIS_TAX_DEDUCTION_CATEGORY,
                 "executed_state": EXECUTED_OPERATION_STATE,
             },
         )
@@ -966,13 +1012,48 @@ def get_deposits_by_date(
     return rows
 
 
+def get_iis_tax_deductions_by_date(session, account_id: str):
+    return (
+        session.execute(
+            text(
+                f"""
+                {OPERATIONS_DEDUP_CTE}
+                SELECT date::date AS d, SUM(ABS(amount)) AS s
+                FROM operations_dedup
+                WHERE account_id = :account_id
+                  AND operation_type IN :operation_types
+                  AND cashflow_category = :deduction_category
+                  AND state = :executed_state
+                GROUP BY date::date
+                ORDER BY d ASC
+                """
+            ).bindparams(bindparam("operation_types", expanding=True)),
+            {
+                "account_id": account_id,
+                "operation_types": DEPOSIT_OPERATION_TYPES,
+                "deduction_category": IIS_TAX_DEDUCTION_CATEGORY,
+                "executed_state": EXECUTED_OPERATION_STATE,
+            },
+        )
+        .mappings()
+        .all()
+    )
+
+
 def get_year_financials_from_operations(session, account_id: str, start_dt: datetime, end_dt: datetime) -> dict[str, Decimal]:
     row = session.execute(
         text(
             f"""
             {OPERATIONS_DEDUP_CTE}
             SELECT
-                COALESCE(SUM(CASE WHEN operation_type IN :deposit_types THEN amount ELSE 0 END), 0) AS deposits,
+                COALESCE(SUM(CASE
+                    WHEN operation_type IN :deposit_types
+                         AND COALESCE(cashflow_category, '') <> :deduction_category
+                    THEN amount ELSE 0 END), 0) AS deposits,
+                COALESCE(SUM(CASE
+                    WHEN operation_type IN :deposit_types
+                         AND cashflow_category = :deduction_category
+                    THEN ABS(amount) ELSE 0 END), 0) AS iis_tax_deduction_income,
                 COALESCE(SUM(CASE
                     WHEN operation_type IN (
                         'OPERATION_TYPE_DIVIDEND',
@@ -1004,12 +1085,14 @@ def get_year_financials_from_operations(session, account_id: str, start_dt: date
             "start_dt": start_dt,
             "end_dt": end_dt,
             "deposit_types": DEPOSIT_OPERATION_TYPES,
+            "deduction_category": IIS_TAX_DEDUCTION_CATEGORY,
             "executed_state": EXECUTED_OPERATION_STATE,
         },
     ).mappings().one()
 
     dividend_net = Decimal(row["dividend_net"] or 0)
     coupon_net = Decimal(row["coupon_net"] or 0)
+    iis_tax_deduction_income = Decimal(row["iis_tax_deduction_income"] or 0)
     income_net = dividend_net + coupon_net
 
     return {
@@ -1017,6 +1100,7 @@ def get_year_financials_from_operations(session, account_id: str, start_dt: date
         "income_net": income_net,
         "dividend_net": dividend_net,
         "coupon_net": coupon_net,
+        "iis_tax_deduction_income": iis_tax_deduction_income,
     }
 
 
@@ -1199,6 +1283,7 @@ def get_year_deposits_by_date(
                   AND date >= :start_dt
                   AND date < :end_dt
                   AND operation_type IN :operation_types
+                  AND COALESCE(cashflow_category, '') <> :deduction_category
                   AND state = :executed_state
                 GROUP BY date::date
                 ORDER BY d ASC
@@ -1209,6 +1294,7 @@ def get_year_deposits_by_date(
                 "start_dt": start_dt,
                 "end_dt": end_dt,
                 "operation_types": DEPOSIT_OPERATION_TYPES,
+                "deduction_category": IIS_TAX_DEDUCTION_CATEGORY,
                 "executed_state": EXECUTED_OPERATION_STATE,
             },
         )
@@ -1274,6 +1360,7 @@ def get_monthly_deposits(session, account_id: str, from_dt: datetime, to_dt: dat
                   AND date < :to_dt
                   AND state = :executed_state
                   AND operation_type = 'OPERATION_TYPE_INPUT'
+                  AND COALESCE(cashflow_category, '') <> :deduction_category
                 GROUP BY month_start
                 ORDER BY month_start ASC
                 """
@@ -1283,12 +1370,51 @@ def get_monthly_deposits(session, account_id: str, from_dt: datetime, to_dt: dat
                 "from_dt": from_dt,
                 "to_dt": to_dt,
                 "executed_state": EXECUTED_OPERATION_STATE,
+                "deduction_category": IIS_TAX_DEDUCTION_CATEGORY,
             },
         )
         .mappings()
         .all()
     )
     return rows
+
+
+def get_monthly_iis_tax_deductions(
+    session,
+    account_id: str,
+    from_dt: datetime,
+    to_dt: datetime,
+):
+    return (
+        session.execute(
+            text(
+                f"""
+                {OPERATIONS_DEDUP_CTE}
+                SELECT
+                    date_trunc('month', date)::date AS month_start,
+                    SUM(ABS(amount)) AS amount
+                FROM operations_dedup
+                WHERE account_id = :account_id
+                  AND date >= :from_dt
+                  AND date < :to_dt
+                  AND state = :executed_state
+                  AND operation_type = 'OPERATION_TYPE_INPUT'
+                  AND cashflow_category = :deduction_category
+                GROUP BY month_start
+                ORDER BY month_start ASC
+                """
+            ),
+            {
+                "account_id": account_id,
+                "from_dt": from_dt,
+                "to_dt": to_dt,
+                "executed_state": EXECUTED_OPERATION_STATE,
+                "deduction_category": IIS_TAX_DEDUCTION_CATEGORY,
+            },
+        )
+        .mappings()
+        .all()
+    )
 
 
 def get_last_snapshot_before_date(session, account_id: str, d: date):
@@ -1344,6 +1470,7 @@ def get_deposits_sum_for_period(session, account_id: str, start_dt: datetime, en
               AND date < :end_dt
               AND state = :executed_state
               AND operation_type = 'OPERATION_TYPE_INPUT'
+              AND COALESCE(cashflow_category, '') <> :deduction_category
             """
         ),
         {
@@ -1351,6 +1478,7 @@ def get_deposits_sum_for_period(session, account_id: str, start_dt: datetime, en
             "start_dt": start_dt,
             "end_dt": end_dt,
             "executed_state": EXECUTED_OPERATION_STATE,
+            "deduction_category": IIS_TAX_DEDUCTION_CATEGORY,
         },
     ).scalar_one()
     return float(row or 0)
@@ -1391,7 +1519,7 @@ def get_external_cashflows_raw(session, account_id: str):
             text(
                 f"""
         {OPERATIONS_DEDUP_CTE}
-        SELECT date, amount, operation_type
+        SELECT date, amount, operation_type, cashflow_category
         FROM operations_dedup
         WHERE account_id = :account_id
           AND operation_type IN :operation_types
@@ -1654,7 +1782,8 @@ def get_pending_invest_notifications(session, account_id: str) -> list[dict] | N
                     SELECT
                         operations_dedup.operation_id,
                         operations_dedup.date,
-                        ABS(operations_dedup.amount) AS amount
+                        ABS(operations_dedup.amount) AS amount,
+                        operations_dedup.cashflow_category
                     FROM operations_dedup
                     LEFT JOIN invest_notifications notified
                       ON notified.account_id = operations_dedup.account_id
@@ -1681,6 +1810,68 @@ def get_pending_invest_notifications(session, account_id: str) -> list[dict] | N
             return None
         raise
     return rows
+
+
+def set_iis_tax_deduction_category(
+    session,
+    *,
+    account_id: str,
+    operation_id: str,
+    enabled: bool,
+) -> str:
+    row = (
+        session.execute(
+            text(
+                """
+                SELECT cashflow_category
+                FROM operations
+                WHERE account_id = :account_id
+                  AND operation_id = :operation_id
+                  AND operation_type IN :operation_types
+                  AND state = :executed_state
+                FOR UPDATE
+                """
+            ).bindparams(bindparam("operation_types", expanding=True)),
+            {
+                "account_id": account_id,
+                "operation_id": operation_id,
+                "operation_types": DEPOSIT_OPERATION_TYPES,
+                "executed_state": EXECUTED_OPERATION_STATE,
+            },
+        )
+        .mappings()
+        .first()
+    )
+    if row is None:
+        session.rollback()
+        return "not_found"
+
+    current_category = row.get("cashflow_category")
+    desired_category = IIS_TAX_DEDUCTION_CATEGORY if enabled else None
+    if current_category == desired_category:
+        session.commit()
+        return "unchanged"
+    if not enabled and current_category != IIS_TAX_DEDUCTION_CATEGORY:
+        session.commit()
+        return "unchanged"
+
+    session.execute(
+        text(
+            """
+            UPDATE operations
+            SET cashflow_category = :cashflow_category
+            WHERE account_id = :account_id
+              AND operation_id = :operation_id
+            """
+        ),
+        {
+            "account_id": account_id,
+            "operation_id": operation_id,
+            "cashflow_category": desired_category,
+        },
+    )
+    session.commit()
+    return "marked" if enabled else "unmarked"
 
 
 def mark_invest_notification_sent(

@@ -272,6 +272,38 @@ class IncomeEventReconciliationTests(unittest.TestCase):
 
         self.assertEqual(result, 1000.0)
 
+    def test_operation_api_upsert_preserves_manual_cashflow_category(self):
+        with self.Session() as session:
+            session.add(
+                tracker_app.Operation(
+                    account_id="account",
+                    operation_id="deposit-1",
+                    operation_type="OPERATION_TYPE_INPUT",
+                    state="OPERATION_STATE_EXECUTED",
+                    date=datetime(2026, 4, 1, 12, 0, 0),
+                    amount=Decimal("52000"),
+                    currency="RUB",
+                    cashflow_category="iis_tax_deduction",
+                )
+            )
+            session.commit()
+
+            operation, created = tracker_app._upsert_operation(
+                session,
+                "account",
+                {
+                    "id": "deposit-1",
+                    "type": "OPERATION_TYPE_INPUT",
+                    "state": "OPERATION_STATE_EXECUTED",
+                    "date": "2026-04-01T12:00:00Z",
+                    "payment": {"units": "52000", "nano": 0, "currency": "rub"},
+                    "description": "Пополнение счёта",
+                },
+            )
+
+            self.assertFalse(created)
+            self.assertEqual(operation.cashflow_category, "iis_tax_deduction")
+
     @staticmethod
     def operation(
         *,
