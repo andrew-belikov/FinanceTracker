@@ -47,6 +47,11 @@ PAYOUT_CALENDAR_HORIZON_DAYS = max(
     1,
     int(os.getenv("PAYOUT_CALENDAR_HORIZON_DAYS", "90")),
 )
+PAYOUT_CALENDAR_TAX_RATE_PCT = Decimal(
+    os.getenv("PAYOUT_CALENDAR_TAX_RATE_PCT", "13").strip() or "13"
+)
+if not Decimal("0") <= PAYOUT_CALENDAR_TAX_RATE_PCT <= Decimal("100"):
+    raise ValueError("PAYOUT_CALENDAR_TAX_RATE_PCT must be between 0 and 100")
 
 
 def build_daily_job_time() -> time:
