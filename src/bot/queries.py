@@ -1925,6 +1925,17 @@ def get_payout_calendar_events(
                         pce.amount_per_unit,
                         pce.quantity,
                         pce.expected_amount,
+                        (
+                            SELECT previous.amount_per_unit
+                            FROM payout_calendar_events previous
+                            WHERE previous.account_id = pce.account_id
+                              AND previous.figi = pce.figi
+                              AND previous.event_type = 'coupon'
+                              AND previous.payment_date < pce.payment_date
+                              AND previous.amount_per_unit > 0
+                            ORDER BY previous.payment_date DESC, previous.id DESC
+                            LIMIT 1
+                        ) AS previous_coupon_amount_per_unit,
                         pce.currency,
                         pce.source_event_type,
                         pce.fetched_at,
