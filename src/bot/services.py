@@ -196,16 +196,22 @@ def build_help_text() -> str:
     )
 
 
-def _format_payout_amount(amount: Decimal | None, currency: str | None) -> str:
+def _format_payout_amount(
+    amount: Decimal | None,
+    currency: str | None,
+    *,
+    estimated: bool = False,
+) -> str:
     if amount is None:
         return "сумма уточняется"
 
+    prefix = "~ " if estimated else ""
     normalized_currency = (currency or "").upper()
     if normalized_currency == "RUB":
-        return fmt_decimal_rub(amount, precision=2)
+        return f"{prefix}{fmt_decimal_rub(amount, precision=2)}"
 
     formatted = f"{amount:,.2f}".replace(",", " ")
-    return f"{formatted} {normalized_currency or '—'}"
+    return f"{prefix}{formatted} {normalized_currency or '—'}"
 
 
 def _estimate_net_payout_amount(amount: Decimal | None) -> Decimal | None:
@@ -220,21 +226,39 @@ def _estimate_net_payout_amount(amount: Decimal | None) -> Decimal | None:
     )
 
 
+def _resolve_row_net_payout_amount(row: dict) -> tuple[Decimal | None, bool]:
+    gross_amount = row.get("expected_amount")
+    estimated = False
+    if gross_amount is None and row.get("event_type") == "coupon":
+        previous_amount_per_unit = row.get("previous_coupon_amount_per_unit")
+        quantity = row.get("quantity")
+        if previous_amount_per_unit is not None and quantity is not None:
+            gross_amount = (
+                normalize_decimal(previous_amount_per_unit)
+                * normalize_decimal(quantity)
+            ).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+            estimated = True
+    return _estimate_net_payout_amount(gross_amount), estimated
+
+
 def _format_monthly_payout_totals(
     rows: list[dict],
 ) -> list[str]:
     monthly_totals: dict[tuple[int, int], dict[str, Decimal]] = {}
     monthly_unknowns: dict[tuple[int, int], int] = {}
+    monthly_estimated_currencies: dict[tuple[int, int], set[str]] = {}
 
     for row in rows:
         payment_date = row["payment_date"]
         month_key = (payment_date.year, payment_date.month)
-        net_amount = _estimate_net_payout_amount(row.get("expected_amount"))
+        net_amount, estimated = _resolve_row_net_payout_amount(row)
         if net_amount is None:
             monthly_unknowns[month_key] = monthly_unknowns.get(month_key, 0) + 1
             monthly_totals.setdefault(month_key, {})
             continue
         currency = (row.get("currency") or "—").upper()
+        if estimated:
+            monthly_estimated_currencies.setdefault(month_key, set()).add(currency)
         currency_totals = monthly_totals.setdefault(month_key, {})
         currency_totals[currency] = currency_totals.get(
             currency,
@@ -245,7 +269,14 @@ def _format_monthly_payout_totals(
     for year, month in sorted(set(monthly_totals) | set(monthly_unknowns)):
         month_key = (year, month)
         parts = [
-            _format_payout_amount(amount, currency)
+            _format_payout_amount(
+                amount,
+                currency,
+                estimated=(
+                    currency
+                    in monthly_estimated_currencies.get(month_key, set())
+                ),
+            )
             for currency, amount in sorted(monthly_totals.get(month_key, {}).items())
         ]
         unknown_count = monthly_unknowns.get(month_key, 0)
@@ -289,20 +320,27 @@ def render_payout_calendar_text(
         )
 
     totals: dict[str, Decimal] = {}
+    estimated_currencies: set[str] = set()
     unknown_amounts = 0
     for row in rows:
-        amount = _estimate_net_payout_amount(row.get("expected_amount"))
+        amount, estimated = _resolve_row_net_payout_amount(row)
         if amount is None:
             unknown_amounts += 1
             continue
         currency = (row.get("currency") or "—").upper()
+        if estimated:
+            estimated_currencies.add(currency)
         totals[currency] = totals.get(currency, Decimal("0")) + normalize_decimal(amount)
 
     tax_rate_label = fmt_plain_pct(PAYOUT_CALENDAR_TAX_RATE_PCT)
     lines = [heading, period_label, ""]
     if totals:
         total_parts = [
-            _format_payout_amount(amount, currency)
+            _format_payout_amount(
+                amount,
+                currency,
+                estimated=currency in estimated_currencies,
+            )
             for currency, amount in sorted(totals.items())
         ]
         lines.append(
@@ -318,10 +356,11 @@ def render_payout_calendar_text(
     listed_rows = rows[:PAYOUT_CALENDAR_MAX_LISTED_EVENTS]
     for row in listed_rows:
         event_label = "купон" if row.get("event_type") == "coupon" else "дивиденды"
-        net_amount = _estimate_net_payout_amount(row.get("expected_amount"))
+        net_amount, estimated = _resolve_row_net_payout_amount(row)
         amount_label = _format_payout_amount(
             net_amount,
             row.get("currency"),
+            estimated=estimated,
         )
         instrument_name = row.get("instrument_name") or row.get("figi") or "Инструмент"
         if len(instrument_name) > 64:
@@ -357,6 +396,7 @@ def render_payout_calendar_text(
         lines.append(
             f"{row['payment_date']:%d.%m} · {event_label} · "
             f"{instrument_name} · {amount_label}{annualized_label}"
+            f"{' · по предыдущему купону' if estimated else ''}"
         )
 
     hidden_count = len(rows) - len(listed_rows)
@@ -372,7 +412,8 @@ def render_payout_calendar_text(
             "Расчёт сделан по текущему количеству бумаг и расчётной "
             f"ставке налога {tax_rate_label} %. "
             "Проценты — простой годовой эквивалент ожидаемого купона после этого налога к cost basis, "
-            "без реинвестирования; это не YTM и не прогноз. "
+            "без реинвестирования; это не YTM и не прогноз доходности. "
+            "Суммы с `~` оценены по предыдущему купону. "
             "Фактическая сумма и налог могут отличаться.",
         ]
     )

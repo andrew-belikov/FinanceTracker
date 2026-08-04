@@ -224,6 +224,53 @@ class PayoutCalendarSyncTests(unittest.TestCase):
         self.assertEqual(len(coupons), 1)
         self.assertEqual(coupons[0].expected_amount, Decimal("125.00"))
 
+    def test_query_exposes_previous_known_coupon_for_unknown_future_payment(self):
+        with self.Session() as session:
+            self.add_portfolio(session)
+            session.add_all(
+                [
+                    tracker_app.PayoutCalendarEvent(
+                        account_id="account",
+                        figi="BOND1",
+                        event_type="coupon",
+                        event_uid="coupon-1",
+                        payment_date=date(2026, 9, 7),
+                        amount_per_unit=Decimal("13.03"),
+                        quantity=Decimal("10"),
+                        expected_amount=Decimal("130.30"),
+                        currency="RUB",
+                        fetched_at=datetime(2026, 8, 4, 6, 0, 0),
+                    ),
+                    tracker_app.PayoutCalendarEvent(
+                        account_id="account",
+                        figi="BOND1",
+                        event_type="coupon",
+                        event_uid="coupon-2",
+                        payment_date=date(2026, 10, 7),
+                        amount_per_unit=None,
+                        quantity=Decimal("10"),
+                        expected_amount=None,
+                        currency="RUB",
+                        fetched_at=datetime(2026, 8, 4, 6, 0, 0),
+                    ),
+                ]
+            )
+            session.commit()
+
+            rows = get_payout_calendar_events(
+                session,
+                "account",
+                date(2026, 10, 1),
+                date(2026, 10, 31),
+            )
+
+        self.assertEqual(len(rows), 1)
+        self.assertIsNone(rows[0]["expected_amount"])
+        self.assertEqual(
+            rows[0]["previous_coupon_amount_per_unit"],
+            Decimal("13.030000000"),
+        )
+
     def test_successful_empty_refresh_removes_cancelled_event(self):
         with self.Session() as session:
             self.add_portfolio(session)
@@ -340,7 +387,7 @@ class PayoutCalendarRenderingTests(unittest.TestCase):
         self.assertIn("03.08 · купон · Флоатер · сумма уточняется", text)
         self.assertIn("Данные обновлены: 28.07.2026 09:00 МСК", text)
         self.assertIn("Фактическая сумма и налог могут отличаться", text)
-        self.assertIn("это не YTM и не прогноз", text)
+        self.assertIn("это не YTM и не прогноз доходности", text)
 
     def test_renderer_aggregates_known_net_amounts_by_month(self):
         rows = [
@@ -371,6 +418,39 @@ class PayoutCalendarRenderingTests(unittest.TestCase):
 
         self.assertIn("Август 2026: 87.00 ₽", text)
         self.assertIn("Сентябрь 2026: 174.00 ₽", text)
+
+    def test_renderer_estimates_unknown_coupon_from_previous_payment(self):
+        rows = [
+            {
+                "figi": "FLOAT1",
+                "instrument_name": "Флоатер",
+                "event_type": "coupon",
+                "payment_date": date(2026, 10, 7),
+                "expected_amount": None,
+                "previous_coupon_amount_per_unit": Decimal("13.03"),
+                "quantity": Decimal("10"),
+                "currency": "RUB",
+            }
+        ]
+
+        text = render_payout_calendar_text(
+            rows,
+            start_date=date(2026, 8, 4),
+            end_date=date(2026, 11, 1),
+            heading="Календарь",
+        )
+
+        self.assertIn(
+            "Ожидаемая сумма после расчётного налога 13 %: ~ 113.36 ₽",
+            text,
+        )
+        self.assertIn("Октябрь 2026: ~ 113.36 ₽", text)
+        self.assertIn(
+            "07.10 · купон · Флоатер · ~ 113.36 ₽ · по предыдущему купону",
+            text,
+        )
+        self.assertNotIn("Без известной суммы", text)
+        self.assertIn("Суммы с `~` оценены по предыдущему купону", text)
 
     def test_renderer_explains_empty_declared_calendar(self):
         text = render_payout_calendar_text(
