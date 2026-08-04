@@ -17,6 +17,7 @@ from queries import (
     get_deposits_for_period,
     get_external_cashflows_raw,
     get_income_for_period,
+    get_iis_tax_deductions_for_period,
     get_last_snapshot_before_date,
     get_latest_snapshot_with_id,
     get_latest_snapshots,
@@ -47,6 +48,7 @@ from runtime import (
     DEPOSIT_OPERATION_TYPES,
     INCOME_EVENT_TAX_OPERATION_TYPES,
     INCOME_TAX_OPERATION_TYPES,
+    IIS_TAX_DEDUCTION_CATEGORY,
     MONTHS_RU,
     MONTHS_RU_GENITIVE,
     PAYOUT_CALENDAR_TAX_RATE_PCT,
@@ -847,6 +849,9 @@ def build_today_summary() -> str:
         )
         total_deposits = get_total_deposits(session, account_id)
         coupons, dividends = get_income_for_period(session, account_id, day_start, day_end)
+        iis_tax_deductions = get_iis_tax_deductions_for_period(
+            session, account_id, day_start, day_end_exclusive
+        )
         commissions = get_commissions_for_period(session, account_id, day_start, day_end)
         taxes = get_taxes_for_period(session, account_id, day_start, day_end)
 
@@ -890,6 +895,7 @@ def build_today_summary() -> str:
         pnl_pct=fmt_pct(pnl_pct) if pnl_pct is not None else "—",
         coupons=fmt_decimal_rub(coupons),
         dividends=fmt_decimal_rub(dividends),
+        iis_tax_deductions=fmt_decimal_rub(iis_tax_deductions),
         commissions=fmt_decimal_rub(commissions),
         taxes=fmt_decimal_rub(taxes),
     )
@@ -950,6 +956,9 @@ def build_week_summary() -> str:
 
         dep_week = get_deposits_for_period(session, account_id, week_start, week_end_exclusive)
         coupons, dividends = get_income_for_period(session, account_id, week_start, week_end)
+        iis_tax_deductions = get_iis_tax_deductions_for_period(
+            session, account_id, week_start, week_end_exclusive
+        )
         commissions = get_commissions_for_period(session, account_id, week_start, week_end)
         taxes = get_taxes_for_period(session, account_id, week_start, week_end)
 
@@ -968,6 +977,7 @@ def build_week_summary() -> str:
         plan_progress_pct=f"{plan_pct:.1f} %",
         coupons=fmt_decimal_rub(coupons),
         dividends=fmt_decimal_rub(dividends),
+        iis_tax_deductions=fmt_decimal_rub(iis_tax_deductions),
         commissions=fmt_decimal_rub(commissions),
         taxes=fmt_decimal_rub(taxes),
     )
@@ -1012,6 +1022,9 @@ def build_month_summary() -> str:
             end_dt=month_end_exclusive,
         )
         coupons, dividends = get_income_for_period(session, account_id, month_start_dt, month_end_dt)
+        iis_tax_deductions = get_iis_tax_deductions_for_period(
+            session, account_id, month_start_dt, month_end_exclusive
+        )
         commissions = get_commissions_for_period(session, account_id, month_start_dt, month_end_dt)
         taxes = get_taxes_for_period(session, account_id, month_start_dt, month_end_dt)
         dep_year = get_deposits_for_period(
@@ -1075,6 +1088,7 @@ def build_month_summary() -> str:
         plan_status_phrase=status_phrase,
         coupons=fmt_decimal_rub(coupons),
         dividends=fmt_decimal_rub(dividends),
+        iis_tax_deductions=fmt_decimal_rub(iis_tax_deductions),
         commissions=fmt_decimal_rub(commissions),
         taxes=fmt_decimal_rub(taxes),
     )
@@ -2535,6 +2549,12 @@ def build_year_summary(year: int | None) -> tuple[str, str, str | None]:
             period_start_dt,
             period_end_dt_exclusive,
         )
+        net_external_flow = get_net_external_flow_for_period(
+            session,
+            account_id,
+            period_start_dt,
+            period_end_dt_exclusive,
+        )
         start_snap, end_snap = get_period_snapshots(session, account_id, period_start, period_end_dt_exclusive.date())
         diff_lines, diff_error = compute_positions_diff_grouped(session, account_id, period_start_dt, period_end_dt_exclusive)
         realized_by_asset, realized_total = compute_realized_by_asset(
@@ -2553,6 +2573,7 @@ def build_year_summary(year: int | None) -> tuple[str, str, str | None]:
 
     dep_year = float(year_financials["deposits"])
     income_total_net = year_financials["income_net"]
+    iis_tax_deduction_income = year_financials["iis_tax_deduction_income"]
 
     current_value = float(end_snap["total_value"]) if end_snap else 0.0
     delta_abs = None
@@ -2560,9 +2581,11 @@ def build_year_summary(year: int | None) -> tuple[str, str, str | None]:
     if start_snap and end_snap:
         start_val = float(start_snap["total_value"])
         end_val = float(end_snap["total_value"])
-        delta_abs = end_val - start_val
-        if start_val != 0:
-            delta_pct = delta_abs / start_val * 100.0
+        delta_abs, delta_pct = compute_period_delta_excluding_external_flow(
+            start_val,
+            end_val,
+            net_external_flow,
+        )
 
     plan = PLAN_ANNUAL_CONTRIB_RUB
     plan_pct = dep_year / plan * 100.0 if plan > 0 else 0.0
@@ -2591,6 +2614,16 @@ def build_year_summary(year: int | None) -> tuple[str, str, str | None]:
             summary_lines.append("")
         summary_lines.extend(_format_asset_lines(income_by_asset_net, income_total_net, "🧾 Дивиденды/купоны"))
 
+    if iis_tax_deduction_income != 0:
+        if summary_lines and summary_lines[-1] != "":
+            summary_lines.append("")
+        summary_lines.extend(
+            [
+                "🏛 Налоговый вычет ИИС",
+                f"Итого: {fmt_decimal_rub(iis_tax_deduction_income)}",
+            ]
+        )
+
     while summary_lines and summary_lines[-1] == "":
         summary_lines.pop()
 
@@ -2616,6 +2649,11 @@ def build_net_external_flow_by_day(external_cashflows: list[dict]) -> dict[date,
 
         amount = abs(float(row.get("amount") or 0.0))
         operation_type = (row.get("operation_type") or "").strip()
+        if (
+            operation_type in DEPOSIT_OPERATION_TYPES
+            and row.get("cashflow_category") == IIS_TAX_DEDUCTION_CATEGORY
+        ):
+            continue
         if operation_type in DEPOSIT_OPERATION_TYPES:
             signed_amount = amount
         elif operation_type in WITHDRAWAL_OPERATION_TYPES:
@@ -2635,16 +2673,9 @@ def compute_twr_timeseries(session, account_id: str):
     return compute_twr_series(snapshot_rows, net_external_flow_by_day)
 
 
-def compute_portfolio_xirr_and_run_rate(
-    session,
-    account_id: str,
-) -> tuple[float | None, float | None, date | None]:
-    latest_snapshot = get_latest_snapshot_with_id(session, account_id)
-    if latest_snapshot is None or latest_snapshot.get("total_value") is None:
-        return None, None, None
-
+def build_xirr_external_cashflows(external_cashflows: list[dict]) -> list[tuple[datetime, float]]:
     cashflows: list[tuple[datetime, float]] = []
-    for row in get_external_cashflows_raw(session, account_id):
+    for row in external_cashflows:
         dt = row.get("date")
         if dt is None:
             continue
@@ -2653,10 +2684,27 @@ def compute_portfolio_xirr_and_run_rate(
 
         amount = abs(float(row.get("amount") or 0.0))
         operation_type = (row.get("operation_type") or "").strip()
+        if (
+            operation_type in DEPOSIT_OPERATION_TYPES
+            and row.get("cashflow_category") == IIS_TAX_DEDUCTION_CATEGORY
+        ):
+            continue
         if operation_type in DEPOSIT_OPERATION_TYPES:
             cashflows.append((dt, -amount))
         elif operation_type in WITHDRAWAL_OPERATION_TYPES:
             cashflows.append((dt, amount))
+    return cashflows
+
+
+def compute_portfolio_xirr_and_run_rate(
+    session,
+    account_id: str,
+) -> tuple[float | None, float | None, date | None]:
+    latest_snapshot = get_latest_snapshot_with_id(session, account_id)
+    if latest_snapshot is None or latest_snapshot.get("total_value") is None:
+        return None, None, None
+
+    cashflows = build_xirr_external_cashflows(get_external_cashflows_raw(session, account_id))
 
     if latest_snapshot["snapshot_at"] is not None:
         terminal_dt = latest_snapshot["snapshot_at"]

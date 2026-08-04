@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 from telegram.ext import ContextTypes
 
 from common.finance import annualize_simple_yield_pct
+from iis_tax_deduction import build_iis_tax_deduction_markup
 from queries import (
     claim_daily_job_run,
     complete_daily_job_run,
@@ -22,6 +23,7 @@ from runtime import (
     DAILY_JOB_HOUR,
     DAILY_JOB_SCHEDULE_LABEL,
     DAILY_JOB_MINUTE,
+    IIS_TAX_DEDUCTION_CATEGORY,
     POLLING_BACKLOG_PENDING_THRESHOLD,
     POLLING_BACKLOG_RECOVERY_CONFIRMATION_COUNT,
     POLLING_BACKLOG_STALL_THRESHOLD_SECONDS,
@@ -912,9 +914,19 @@ async def check_income_events(context: ContextTypes.DEFAULT_TYPE):
         text_msg = build_income_event_notification_text(row)
 
         sent_ok = True
+        reply_markup = build_iis_tax_deduction_markup(
+            str(row["operation_id"]),
+            marked=row.get("cashflow_category") == IIS_TAX_DEDUCTION_CATEGORY,
+        )
         for chat_id in TARGET_CHAT_IDS:
             try:
-                await safe_send_message(context.bot, chat_id, text_msg, parse_mode="Markdown")
+                await safe_send_message(
+                    context.bot,
+                    chat_id,
+                    text_msg,
+                    parse_mode="Markdown",
+                    reply_markup=reply_markup,
+                )
                 logger.info(
                     "income_event_notification_sent",
                     "Income event notification sent.",

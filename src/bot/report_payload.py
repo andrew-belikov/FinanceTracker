@@ -15,6 +15,7 @@ from queries import (
     get_dataset_operations,
     get_income_events_for_period,
     get_income_for_period,
+    get_iis_tax_deductions_for_period,
     get_instrument_eod_rows,
     get_month_snapshots,
     get_net_external_flow_for_period,
@@ -28,6 +29,7 @@ from queries import (
 )
 from runtime import (
     ACCOUNT_FRIENDLY_NAME,
+    IIS_TAX_DEDUCTION_CATEGORY,
     MONTHS_RU,
     PLAN_ANNUAL_CONTRIB_RUB,
     REPORTING_ACCOUNT_UNAVAILABLE_TEXT,
@@ -278,6 +280,7 @@ def _build_operations_month_data(
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     normalized_rows: list[dict[str, Any]] = []
     deposits_by_day: dict[date, Decimal] = {}
+    iis_tax_deductions_by_day: dict[date, Decimal] = {}
     withdrawals_by_day: dict[date, Decimal] = {}
     commissions_by_day: dict[date, Decimal] = {}
     taxes_by_day: dict[date, Decimal] = {}
@@ -302,8 +305,12 @@ def _build_operations_month_data(
         amount_abs = abs(amount)
 
         if local_date is not None:
-            if operation_group == "deposit":
-                deposits_by_day[local_date] = deposits_by_day.get(local_date, Decimal("0")) + amount
+            if operation_group == "deposit" and row.get("cashflow_category") == IIS_TAX_DEDUCTION_CATEGORY:
+                iis_tax_deductions_by_day[local_date] = (
+                    iis_tax_deductions_by_day.get(local_date, Decimal("0")) + amount_abs
+                )
+            elif operation_group == "deposit":
+                deposits_by_day[local_date] = deposits_by_day.get(local_date, Decimal("0")) + amount_abs
             elif operation_group == "withdrawal":
                 withdrawals_by_day[local_date] = withdrawals_by_day.get(local_date, Decimal("0")) + amount_abs
             elif operation_group == "commission":
@@ -318,6 +325,7 @@ def _build_operations_month_data(
                 "local_date": local_date,
                 "operation_type": row.get("operation_type"),
                 "operation_group": operation_group,
+                "cashflow_category": row.get("cashflow_category"),
                 "logical_asset_id": identity["logical_asset_id"],
                 "asset_uid": identity["asset_uid"],
                 "instrument_uid": identity["instrument_uid"],
@@ -338,6 +346,7 @@ def _build_operations_month_data(
 
     return normalized_rows, {
         "deposits_by_day": deposits_by_day,
+        "iis_tax_deductions_by_day": iis_tax_deductions_by_day,
         "withdrawals_by_day": withdrawals_by_day,
         "commissions_by_day": commissions_by_day,
         "taxes_by_day": taxes_by_day,
@@ -395,6 +404,7 @@ def _build_timeseries_daily(
     snapshot_rows: list[dict[str, Any]],
     *,
     deposits_by_day: dict[date, Decimal],
+    iis_tax_deductions_by_day: dict[date, Decimal],
     withdrawals_by_day: dict[date, Decimal],
     income_net_by_day: dict[date, Decimal],
     commissions_by_day: dict[date, Decimal],
@@ -411,6 +421,8 @@ def _build_timeseries_daily(
         deposits = deposits_by_day.get(snapshot_date, Decimal("0"))
         withdrawals = withdrawals_by_day.get(snapshot_date, Decimal("0"))
         income_net = income_net_by_day.get(snapshot_date, Decimal("0"))
+        iis_tax_deduction_income = iis_tax_deductions_by_day.get(snapshot_date, Decimal("0"))
+        total_income_net = income_net + iis_tax_deduction_income
         commissions = commissions_by_day.get(snapshot_date, Decimal("0"))
         operation_taxes = taxes_by_day.get(snapshot_date, Decimal("0"))
         income_taxes = income_tax_by_day.get(snapshot_date, Decimal("0"))
@@ -431,6 +443,8 @@ def _build_timeseries_daily(
                 "deposits": deposits,
                 "withdrawals": withdrawals,
                 "income_net": income_net,
+                "iis_tax_deduction_income": iis_tax_deduction_income,
+                "total_income_net": total_income_net,
                 "commissions": commissions,
                 "operation_taxes": operation_taxes,
                 "income_taxes": income_taxes,
@@ -828,6 +842,7 @@ def _build_summary_metrics(
     deposits: Decimal,
     withdrawals: Decimal,
     income_net: Decimal,
+    iis_tax_deduction_income: Decimal,
     coupon_net: Decimal,
     dividend_net: Decimal,
     commissions: Decimal,
@@ -876,6 +891,8 @@ def _build_summary_metrics(
         "deposits": deposits,
         "withdrawals": withdrawals,
         "income_net": income_net,
+        "iis_tax_deduction_income": iis_tax_deduction_income,
+        "total_income_net": income_net + iis_tax_deduction_income,
         "coupon_net": coupon_net,
         "dividend_net": dividend_net,
         "commissions": commissions,
@@ -955,6 +972,8 @@ def _build_overview_facts(payload: dict[str, Any]) -> dict[str, Any]:
         else "—",
         "net_external_flow": _display_rub(summary.get("net_external_flow"), precision=0),
         "income_net": _display_rub(summary.get("income_net"), precision=2),
+        "iis_tax_deduction_income": _display_rub(summary.get("iis_tax_deduction_income"), precision=2),
+        "total_income_net": _display_rub(summary.get("total_income_net"), precision=2),
         "commissions": _display_rub(summary.get("commissions"), precision=2),
         "taxes": _display_rub(summary.get("taxes"), precision=2),
         "top_holding_name": summary.get("top_holding_name"),
@@ -1141,6 +1160,8 @@ def _build_cashflow_facts(payload: dict[str, Any]) -> dict[str, Any]:
         "deposits": _display_rub(summary.get("deposits"), precision=0),
         "withdrawals": _display_rub(summary.get("withdrawals"), precision=0),
         "income_net": _display_rub(summary.get("income_net"), precision=2),
+        "iis_tax_deduction_income": _display_rub(summary.get("iis_tax_deduction_income"), precision=2),
+        "total_income_net": _display_rub(summary.get("total_income_net"), precision=2),
         "commissions": _display_rub(summary.get("commissions"), precision=2),
         "taxes": _display_rub(summary.get("taxes"), precision=2),
         "operations_top": [
@@ -1322,6 +1343,7 @@ def build_monthly_report_payload(
     timeseries_daily = _build_timeseries_daily(
         daily_snapshot_rows,
         deposits_by_day=operation_aggregates["deposits_by_day"],
+        iis_tax_deductions_by_day=operation_aggregates["iis_tax_deductions_by_day"],
         withdrawals_by_day=operation_aggregates["withdrawals_by_day"],
         income_net_by_day=income_net_by_day,
         commissions_by_day=operation_aggregates["commissions_by_day"],
@@ -1344,6 +1366,14 @@ def build_monthly_report_payload(
     coupon_net = normalize_decimal(coupon_net)
     dividend_net = normalize_decimal(dividend_net)
     income_net = coupon_net + dividend_net
+    iis_tax_deduction_income = normalize_decimal(
+        get_iis_tax_deductions_for_period(
+            session,
+            report_account_id,
+            period_start_dt,
+            period_end_exclusive_dt,
+        )
+    )
     commissions = normalize_decimal(get_commissions_for_period(session, report_account_id, period_start_dt, period_end_dt))
     taxes = normalize_decimal(get_taxes_for_period(session, report_account_id, period_start_dt, period_end_dt))
     deposits_ytd = normalize_decimal(
@@ -1403,6 +1433,7 @@ def build_monthly_report_payload(
         deposits=deposits,
         withdrawals=withdrawals,
         income_net=income_net,
+        iis_tax_deduction_income=iis_tax_deduction_income,
         coupon_net=coupon_net,
         dividend_net=dividend_net,
         commissions=commissions,

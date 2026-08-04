@@ -55,6 +55,7 @@ def load_symbols():
         {
             "DEPOSIT_OPERATION_TYPES",
             "WITHDRAWAL_OPERATION_TYPES",
+            "IIS_TAX_DEDUCTION_CATEGORY",
             "TINKOFF_ACCOUNT_ID",
         },
         {
@@ -78,6 +79,7 @@ def load_symbols():
         set(),
         {
             "build_net_external_flow_by_day",
+            "build_xirr_external_cashflows",
             "compute_period_delta_excluding_external_flow",
             "compute_twr_series",
             "compute_xnpv",
@@ -93,6 +95,7 @@ normalize_reporting_account_id = SYMBOLS["normalize_reporting_account_id"]
 choose_reporting_account_id = SYMBOLS["choose_reporting_account_id"]
 resolve_reporting_account_id = SYMBOLS["resolve_reporting_account_id"]
 build_net_external_flow_by_day = SYMBOLS["build_net_external_flow_by_day"]
+build_xirr_external_cashflows = SYMBOLS["build_xirr_external_cashflows"]
 compute_period_delta_excluding_external_flow = SYMBOLS["compute_period_delta_excluding_external_flow"]
 compute_twr_series = SYMBOLS["compute_twr_series"]
 compute_xnpv = SYMBOLS["compute_xnpv"]
@@ -185,6 +188,34 @@ class TWRComputationTests(unittest.TestCase):
         result = build_net_external_flow_by_day(rows)
         self.assertEqual(result[date(2026, 1, 2)], 15.0)
 
+    def test_build_net_external_flow_by_day_excludes_iis_tax_deduction(self):
+        rows = [
+            {
+                "date": datetime(2026, 1, 2, 10, 0, 0),
+                "amount": 20.0,
+                "operation_type": "OPERATION_TYPE_INPUT",
+            },
+            {
+                "date": datetime(2026, 1, 2, 12, 0, 0),
+                "amount": 52.0,
+                "operation_type": "OPERATION_TYPE_INPUT",
+                "cashflow_category": "iis_tax_deduction",
+            },
+        ]
+
+        result = build_net_external_flow_by_day(rows)
+
+        self.assertEqual(result[date(2026, 1, 2)], 20.0)
+        data = compute_twr_series(
+            [
+                {"snapshot_date": date(2026, 1, 1), "total_value": 100.0},
+                {"snapshot_date": date(2026, 1, 2), "total_value": 172.0},
+            ],
+            result,
+        )
+        self.assertIsNotNone(data)
+        self.assertAlmostEqual(data[2][-1], 0.52, places=8)
+
     def test_compute_twr_series_skips_step_when_previous_value_zero_or_current_missing(self):
         rows = [
             {"snapshot_date": date(2026, 1, 1), "total_value": 0.0},
@@ -222,6 +253,26 @@ class PeriodDeltaCalculationTests(unittest.TestCase):
 
 
 class XIRRAndRunRateTests(unittest.TestCase):
+    def test_iis_tax_deduction_is_not_treated_as_invested_capital(self):
+        flows = build_xirr_external_cashflows(
+            [
+                {
+                    "date": datetime(2026, 1, 1),
+                    "amount": 100.0,
+                    "operation_type": "OPERATION_TYPE_INPUT",
+                },
+                {
+                    "date": datetime(2026, 4, 1),
+                    "amount": 52.0,
+                    "operation_type": "OPERATION_TYPE_INPUT",
+                    "cashflow_category": "iis_tax_deduction",
+                },
+            ]
+        )
+
+        self.assertEqual(len(flows), 1)
+        self.assertEqual(flows[0][1], -100.0)
+
     def test_compute_xirr_with_multiple_deposits_in_different_dates(self):
         cashflows = [
             (datetime(2025, 1, 1, tzinfo=timezone.utc), -100.0),

@@ -39,6 +39,7 @@ class HistoryChartTests(unittest.TestCase):
             mock.patch.object(charts, "resolve_reporting_account_id", return_value="account-1"),
             mock.patch.object(charts, "get_portfolio_timeseries", return_value=timeseries),
             mock.patch.object(charts, "get_deposits_by_date", return_value=deposits),
+            mock.patch.object(charts, "get_iis_tax_deductions_by_date", return_value=[]),
             mock.patch.object(charts.plt, "close", return_value=None),
             mock.patch("matplotlib.figure.Figure.savefig", new=fake_savefig),
         ):

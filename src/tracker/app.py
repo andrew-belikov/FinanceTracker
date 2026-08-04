@@ -251,6 +251,7 @@ class Operation(Base):
 
     operation_id = Column(String, nullable=False)
     operation_type = Column(String, nullable=False)
+    cashflow_category = Column(String, nullable=True)
     cursor = Column(String, nullable=True)
     broker_account_id = Column(String, nullable=True)
     parent_operation_id = Column(String, nullable=True)

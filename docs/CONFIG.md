@@ -170,6 +170,12 @@ docker compose exec bot python proxy_smoke.py
   при синхронизации обновляет не только новые операции, но и делает backfill существующих строк,
   где эти поля ещё пустые.
 
+### Ручная категория денежного потока в `operations`
+
+- Миграция `migrations/20260805_operations_cashflow_category.sql` добавляет nullable-поле `cashflow_category`.
+- Значение `iis_tax_deduction` разрешено только для вручную помеченного исполненного пополнения и означает доход от налогового вычета ИИС.
+- Upsert из Invest API не меняет это поле; поставить или снять категорию можно кнопкой в Telegram-уведомлении о пополнении.
+
 
 ### Поля `OperationItem` в `operations`
 

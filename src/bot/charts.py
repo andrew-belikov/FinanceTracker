@@ -13,6 +13,8 @@ from queries import (
     get_first_snapshot_in_period,
     get_last_snapshot_before_date,
     get_monthly_deposits,
+    get_iis_tax_deductions_by_date,
+    get_monthly_iis_tax_deductions,
     get_monthly_portfolio_values,
     get_portfolio_timeseries,
     resolve_reporting_account_id,
@@ -34,6 +36,7 @@ CHART_COLORS = {
     "portfolio_fill": "#d9eef4",
     "deposits": "#d8a25e",
     "deposits_fill": "#f6e4c9",
+    "deductions": "#8a6fb0",
     "twr": "#6b7aa1",
     "positive": "#3e8e63",
     "positive_fill": "#dcefe3",
@@ -308,6 +311,7 @@ def build_history_chart(path: str) -> str | None:
 
         ts = get_portfolio_timeseries(session, account_id)
         deps = get_deposits_by_date(session, account_id)
+        deductions = get_iis_tax_deductions_by_date(session, account_id)
 
     if len(ts) < 2:
         return None
@@ -315,6 +319,7 @@ def build_history_chart(path: str) -> str | None:
     # Сортируем исходные данные (на всякий случай)
     ts_sorted = sorted(ts, key=lambda x: x["snapshot_date"])
     deps_sorted = sorted(deps, key=lambda x: x["d"])
+    deductions_sorted = sorted(deductions, key=lambda x: x["d"])
 
     start_date = ts_sorted[0]["snapshot_date"]
     end_date = ts_sorted[-1]["snapshot_date"]
@@ -333,11 +338,13 @@ def build_history_chart(path: str) -> str | None:
     # Подготавливаем массивы значений для графика
     values = []
     cum_deps = []
+    cum_deductions = []
 
     # Превращаем ts_sorted в список кортежей для удобства
     ts_data = [(row["snapshot_date"], float(row["total_value"])) for row in ts_sorted]
     # Превращаем deps_sorted в список кортежей
     deps_data = [(row["d"], float(row["s"])) for row in deps_sorted]
+    deductions_data = [(row["d"], float(row["s"])) for row in deductions_sorted]
 
     for d in week_dates:
         # 1. Стоимость портфеля на дату d (берем последний снапшот <= d)
@@ -351,12 +358,13 @@ def build_history_chart(path: str) -> str | None:
         relevant_deps = [amt for (dt, amt) in deps_data if dt <= d]
         total_d = sum(relevant_deps)
         cum_deps.append(total_d)
+        cum_deductions.append(sum(amt for dt, amt in deductions_data if dt <= d))
 
     fig, ax = plt.subplots(figsize=(10.5, 4.8))
     set_chart_header(
         fig,
         f"{ACCOUNT_FRIENDLY_NAME}: портфель и пополнения",
-        "Разница между линиями показывает результат сверх пополнений.",
+        "Пополнения — собственные взносы; вычеты ИИС показаны отдельно.",
     )
     apply_chart_style(ax, rub_axis_formatter)
 
@@ -399,6 +407,15 @@ def build_history_chart(path: str) -> str | None:
         linewidth=2.6,
         zorder=3,
     )
+    if any(cum_deductions):
+        ax.plot(
+            week_dates,
+            cum_deductions,
+            color=CHART_COLORS["deductions"],
+            linewidth=2.0,
+            linestyle=(0, (2, 2)),
+            zorder=2,
+        )
 
     tick_dates, tick_labels = build_date_ticks(week_dates, max_ticks=7)
     ax.set_xticks(tick_dates)
@@ -452,6 +469,15 @@ def build_history_chart(path: str) -> str | None:
             CHART_COLORS["deposits"],
             y_offset=deposits_offset,
         )
+    if any(cum_deductions):
+        annotate_series_last_point(
+            ax,
+            week_dates,
+            cum_deductions,
+            f"Вычеты ИИС {fmt_compact_rub(cum_deductions[-1])}",
+            CHART_COLORS["deductions"],
+            y_offset=-34,
+        )
 
     fig.tight_layout(rect=(0, 0, 1, 0.9))
     fig.savefig(path, dpi=170, facecolor=fig.get_facecolor())
@@ -473,6 +499,9 @@ def build_year_chart(path: str, year: int, end_date_exclusive: date) -> str | No
 
         portfolio_rows = get_monthly_portfolio_values(session, account_id, period_start_dt, period_end_dt_exclusive, is_ytd)
         deposits_rows = get_monthly_deposits(session, account_id, period_start_dt, period_end_dt_exclusive)
+        deductions_rows = get_monthly_iis_tax_deductions(
+            session, account_id, period_start_dt, period_end_dt_exclusive
+        )
 
     if not portfolio_rows:
         return None
@@ -485,21 +514,28 @@ def build_year_chart(path: str, year: int, end_date_exclusive: date) -> str | No
         row["month_start"]: float(row["amount"] or 0)
         for row in deposits_rows
     }
+    deductions_by_month = {
+        row["month_start"]: float(row["amount"] or 0)
+        for row in deductions_rows
+    }
 
     months = sorted(portfolio_by_month.keys())
     portfolio_values = [portfolio_by_month[m] for m in months]
     deposits_values = [deposits_by_month.get(m, 0.0) for m in months]
+    deductions_values = [deductions_by_month.get(m, 0.0) for m in months]
 
     x = list(range(len(months)))
     chart_title = f"{year} YTD: как рос портфель" if is_ytd else f"{year}: как рос портфель"
     has_deposits = any(value != 0 for value in deposits_values)
+    has_deductions = any(value != 0 for value in deductions_values)
+    has_cashflows = has_deposits or has_deductions
     chart_subtitle = (
-        "Сверху — стоимость на конец месяца, снизу — пополнения за месяц."
-        if has_deposits
+        "Сверху — стоимость на конец месяца, снизу — собственные пополнения и вычеты ИИС."
+        if has_cashflows
         else "Пополнений за этот период не было, поэтому показана только динамика портфеля."
     )
 
-    if has_deposits:
+    if has_cashflows:
         fig, (ax_portfolio, ax_deposits) = plt.subplots(
             2,
             1,
@@ -548,26 +584,51 @@ def build_year_chart(path: str, year: int, end_date_exclusive: date) -> str | No
 
     labels = build_month_tick_labels(months)
     if ax_deposits is not None:
-        ax_deposits.bar(
-            x,
-            deposits_values,
-            width=0.58,
-            color=CHART_COLORS["deposits"],
-            edgecolor="none",
-            zorder=3,
-        )
-        ax_deposits.set_ylabel("Пополнения")
+        bar_width = 0.34 if has_deposits and has_deductions else 0.58
+        deposit_x = [value - bar_width / 2 for value in x] if has_deposits and has_deductions else x
+        deduction_x = [value + bar_width / 2 for value in x] if has_deposits and has_deductions else x
+        if has_deposits:
+            ax_deposits.bar(
+                deposit_x,
+                deposits_values,
+                width=bar_width,
+                color=CHART_COLORS["deposits"],
+                edgecolor="none",
+                label="Пополнения",
+                zorder=3,
+            )
+        if has_deductions:
+            ax_deposits.bar(
+                deduction_x,
+                deductions_values,
+                width=bar_width,
+                color=CHART_COLORS["deductions"],
+                edgecolor="none",
+                label="Вычеты ИИС",
+                zorder=3,
+            )
+        ax_deposits.set_ylabel("Денежные поступления")
+        ax_deposits.legend(frameon=False, loc="upper left")
         ax_deposits.margins(x=0.04)
-        max_deposit = max(deposits_values) if deposits_values else 0.0
+        max_deposit = max([*deposits_values, *deductions_values], default=0.0)
         upper_limit = max_deposit * 1.2 if max_deposit > 0 else 1.0
         ax_deposits.set_ylim(0, upper_limit)
-        annotate_bar_values(
-            ax_deposits,
-            x,
-            deposits_values,
-            lambda value: fmt_compact_rub(value, precision=0),
-            text_color=CHART_COLORS["muted"],
-        )
+        if has_deposits:
+            annotate_bar_values(
+                ax_deposits,
+                deposit_x,
+                deposits_values,
+                lambda value: fmt_compact_rub(value, precision=0),
+                text_color=CHART_COLORS["muted"],
+            )
+        if has_deductions:
+            annotate_bar_values(
+                ax_deposits,
+                deduction_x,
+                deductions_values,
+                lambda value: fmt_compact_rub(value, precision=0),
+                text_color=CHART_COLORS["muted"],
+            )
         ax_deposits.set_xticks(x)
         ax_deposits.set_xticklabels(labels)
         fig.tight_layout(rect=(0, 0, 1, 0.86), h_pad=1.2)
@@ -655,7 +716,7 @@ def build_year_monthly_delta_chart(path: str, year: int, end_date_exclusive: dat
     best_idx = max(range(len(deltas)), key=lambda idx: deltas[idx])
     worst_idx = min(range(len(deltas)), key=lambda idx: deltas[idx])
     subtitle = (
-        f"Без пополнений. Лучший месяц: {format_month_short_label(month_labels[best_idx])} "
+        f"Без собственных пополнений; вычеты ИИС входят в результат. Лучший месяц: {format_month_short_label(month_labels[best_idx])} "
         f"{fmt_compact_rub(deltas[best_idx], signed=True)}, "
         f"худший: {format_month_short_label(month_labels[worst_idx])} "
         f"{fmt_compact_rub(deltas[worst_idx], signed=True)}."

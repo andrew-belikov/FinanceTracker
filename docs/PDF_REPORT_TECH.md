@@ -399,6 +399,8 @@ OLLAMA_BASE_URL=http://ollama:11434
 - `deposits`;
 - `withdrawals`;
 - `income_net`;
+- `iis_tax_deduction_income`;
+- `total_income_net` (`income_net + iis_tax_deduction_income`);
 - `coupon_net`;
 - `dividend_net`;
 - `commissions`;
@@ -442,6 +444,8 @@ OLLAMA_BASE_URL=http://ollama:11434
 - `deposits`;
 - `withdrawals`;
 - `income_net`;
+- `iis_tax_deduction_income`;
+- `total_income_net`;
 - `commissions`;
 - `operation_taxes`;
 - `income_taxes`;
