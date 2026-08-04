@@ -330,14 +330,47 @@ class PayoutCalendarRenderingTests(unittest.TestCase):
             heading="Календарь",
         )
 
-        self.assertIn("125.50 ₽", text)
-        self.assertIn("≈ 4.98 % годовых", text)
-        self.assertIn("10.00 USD", text)
+        self.assertIn("Ожидаемая сумма после расчётного налога 13 %", text)
+        self.assertIn("109.19 ₽", text)
+        self.assertIn("≈ 4.33 % годовых", text)
+        self.assertIn("8.70 USD", text)
         self.assertIn("Без известной суммы: 1", text)
+        self.assertIn("По месяцам:", text)
+        self.assertIn("Август 2026: 109.19 ₽ · 8.70 USD · без известной суммы: 1", text)
         self.assertIn("03.08 · купон · Флоатер · сумма уточняется", text)
         self.assertIn("Данные обновлены: 28.07.2026 09:00 МСК", text)
-        self.assertIn("Фактическая сумма и налоги могут отличаться", text)
+        self.assertIn("Фактическая сумма и налог могут отличаться", text)
         self.assertIn("это не YTM и не прогноз", text)
+
+    def test_renderer_aggregates_known_net_amounts_by_month(self):
+        rows = [
+            {
+                "figi": "BOND1",
+                "instrument_name": "Облигация",
+                "event_type": "coupon",
+                "payment_date": date(2026, 8, 8),
+                "expected_amount": Decimal("100.00"),
+                "currency": "RUB",
+            },
+            {
+                "figi": "BOND2",
+                "instrument_name": "Облигация 2",
+                "event_type": "coupon",
+                "payment_date": date(2026, 9, 7),
+                "expected_amount": Decimal("200.00"),
+                "currency": "RUB",
+            },
+        ]
+
+        text = render_payout_calendar_text(
+            rows,
+            start_date=date(2026, 8, 4),
+            end_date=date(2026, 11, 1),
+            heading="Календарь",
+        )
+
+        self.assertIn("Август 2026: 87.00 ₽", text)
+        self.assertIn("Сентябрь 2026: 174.00 ₽", text)
 
     def test_renderer_explains_empty_declared_calendar(self):
         text = render_payout_calendar_text(
