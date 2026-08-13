@@ -44,6 +44,16 @@ class DailyPortfolioResultTests(unittest.TestCase):
             "sum_decimal_values_for_snapshot_interval",
             namespace,
         )
+        namespace["normalize_operation_currency"] = load_function(
+            SERVICES_FILE,
+            "normalize_operation_currency",
+            namespace,
+        )
+        namespace["build_operation_cashflows_for_snapshot_interval"] = load_function(
+            SERVICES_FILE,
+            "build_operation_cashflows_for_snapshot_interval",
+            namespace,
+        )
         cls.build_rows = staticmethod(load_function(REPORT_PAYLOAD_FILE, "_build_timeseries_daily", namespace))
         cls.compute_period_pnl = staticmethod(load_function(REPORT_PAYLOAD_FILE, "_compute_period_pnl", namespace))
 
@@ -175,6 +185,100 @@ class DailyPortfolioResultTests(unittest.TestCase):
             daily_rows=daily_rows,
         )
         self.assertEqual((pnl_abs, pnl_pct), (Decimal("50"), Decimal("50")))
+
+    def test_gap_day_foreign_deposit_does_not_neutralize_base_currency_pnl(self):
+        first = date(2026, 4, 1)
+        flow_day = date(2026, 4, 2)
+        second = date(2026, 4, 3)
+        daily_rows = self.build_rows(
+            [
+                {"id": 1, "snapshot_date": first, "total_value": Decimal("100"), "currency": "RUB"},
+                {"id": 2, "snapshot_date": second, "total_value": Decimal("150"), "currency": "RUB"},
+            ],
+            deposits_by_day={},
+            iis_tax_deductions_by_day={},
+            withdrawals_by_day={},
+            income_net_by_day={},
+            commissions_by_day={},
+            taxes_by_day={},
+            income_tax_by_day={},
+            twr_by_date={},
+            base_currency="RUB",
+            operation_cashflows_by_currency_day={
+                "RUB": {"deposits": {flow_day: Decimal("50")}},
+                "USD": {"deposits": {flow_day: Decimal("10")}},
+                "UNKNOWN": {"withdrawals": {flow_day: Decimal("3")}},
+            },
+        )
+
+        result = daily_rows[-1]
+        self.assertEqual(result["deposits"], Decimal("50"))
+        self.assertEqual(result["withdrawals"], Decimal("0"))
+        self.assertEqual(result["day_pnl"], Decimal("0"))
+        self.assertEqual(
+            result["operation_cashflows_by_currency"],
+            [
+                {
+                    "currency": "RUB",
+                    "deposits": Decimal("50"),
+                    "withdrawals": Decimal("0"),
+                    "iis_tax_deduction_income": Decimal("0"),
+                    "commissions": Decimal("0"),
+                    "operation_taxes": Decimal("0"),
+                    "operation_tax_refunds": Decimal("0"),
+                    "net_external_flow": Decimal("50"),
+                },
+                {
+                    "currency": "UNKNOWN",
+                    "deposits": Decimal("0"),
+                    "withdrawals": Decimal("3"),
+                    "iis_tax_deduction_income": Decimal("0"),
+                    "commissions": Decimal("0"),
+                    "operation_taxes": Decimal("0"),
+                    "operation_tax_refunds": Decimal("0"),
+                    "net_external_flow": Decimal("-3"),
+                },
+                {
+                    "currency": "USD",
+                    "deposits": Decimal("10"),
+                    "withdrawals": Decimal("0"),
+                    "iis_tax_deduction_income": Decimal("0"),
+                    "commissions": Decimal("0"),
+                    "operation_taxes": Decimal("0"),
+                    "operation_tax_refunds": Decimal("0"),
+                    "net_external_flow": Decimal("10"),
+                },
+            ],
+        )
+        self.assertEqual(result["unsupported_operation_currencies"], ["UNKNOWN", "USD"])
+
+    def test_gap_day_usd_only_deposit_keeps_rub_performance(self):
+        first = date(2026, 4, 1)
+        flow_day = date(2026, 4, 2)
+        second = date(2026, 4, 3)
+        result = self.build_rows(
+            [
+                {"id": 1, "snapshot_date": first, "total_value": Decimal("100"), "currency": "RUB"},
+                {"id": 2, "snapshot_date": second, "total_value": Decimal("150"), "currency": "RUB"},
+            ],
+            deposits_by_day={},
+            iis_tax_deductions_by_day={},
+            withdrawals_by_day={},
+            income_net_by_day={},
+            commissions_by_day={},
+            taxes_by_day={},
+            income_tax_by_day={},
+            twr_by_date={},
+            base_currency="RUB",
+            operation_cashflows_by_currency_day={
+                "USD": {"deposits": {flow_day: Decimal("50")}},
+            },
+        )[-1]
+
+        self.assertEqual(result["deposits"], Decimal("0"))
+        self.assertEqual(result["net_external_flow"], Decimal("0"))
+        self.assertEqual(result["day_pnl"], Decimal("50"))
+        self.assertEqual(result["unsupported_operation_currencies"], ["USD"])
 
 
 class TodaySummaryContractTests(unittest.TestCase):

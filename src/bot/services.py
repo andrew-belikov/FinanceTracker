@@ -539,6 +539,55 @@ def sum_decimal_values_for_snapshot_interval(
     )
 
 
+def normalize_operation_currency(value: object) -> str:
+    currency = str(value or "").strip().upper()
+    return currency or "UNKNOWN"
+
+
+def add_operation_cashflow_by_currency_day(
+    aggregates: dict[str, dict[str, dict[date, Decimal]]],
+    *,
+    currency: object,
+    field: str,
+    flow_date: date,
+    amount: Decimal,
+) -> None:
+    currency_key = normalize_operation_currency(currency)
+    values_by_day = aggregates.setdefault(currency_key, {}).setdefault(field, {})
+    values_by_day[flow_date] = values_by_day.get(flow_date, Decimal("0")) + normalize_decimal(amount)
+
+
+def build_operation_cashflows_for_snapshot_interval(
+    aggregates: dict[str, dict[str, dict[date, Decimal]]],
+    previous_snapshot_date: date | None,
+    current_snapshot_date: date,
+) -> list[dict[str, object]]:
+    fields = (
+        "deposits",
+        "withdrawals",
+        "iis_tax_deduction_income",
+        "commissions",
+        "operation_taxes",
+        "operation_tax_refunds",
+    )
+    result: list[dict[str, object]] = []
+    for currency in sorted(aggregates):
+        currency_values = aggregates[currency]
+        fact: dict[str, object] = {"currency": currency}
+        for field in fields:
+            fact[field] = sum_decimal_values_for_snapshot_interval(
+                currency_values.get(field, {}),
+                previous_snapshot_date,
+                current_snapshot_date,
+            )
+        fact["net_external_flow"] = normalize_decimal(fact["deposits"]) - normalize_decimal(
+            fact["withdrawals"]
+        )
+        if any(normalize_decimal(fact[field]) != 0 for field in fields):
+            result.append(fact)
+    return result
+
+
 def rebase_twr_to_period(
     dates: list[date],
     twr: list[float],
