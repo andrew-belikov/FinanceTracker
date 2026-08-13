@@ -218,8 +218,16 @@ class StartupReadinessContractTests(unittest.TestCase):
                 pass
 
         calls: list[str] = []
+
+        class RuntimeConfigurationError(ValueError):
+            pass
+
         namespace = {
             "API_TOKEN": "synthetic-token",
+            "EXPLICIT_DB_DSN": "postgresql://synthetic.invalid/finance",
+            "DB_PASSWORD": "",
+            "RuntimeConfigurationError": RuntimeConfigurationError,
+            "validate_database_credentials": lambda **_kwargs: calls.append("validate"),
             "logger": Logger(),
             "clear_tracker_ready_state": lambda: calls.append("clear"),
             "init_db": lambda: calls.append("init"),
@@ -227,7 +235,7 @@ class StartupReadinessContractTests(unittest.TestCase):
         }
         main = load_function(SRC_ROOT / "tracker" / "app.py", "main", namespace)
         self.assertEqual(main(), 1)
-        self.assertEqual(calls, ["clear", "init"])
+        self.assertEqual(calls, ["clear", "validate", "init"])
 
     def test_tracker_initial_sync_failure_cannot_mark_ready(self):
         text = (SRC_ROOT / "tracker" / "app.py").read_text(encoding="utf-8")
