@@ -478,6 +478,7 @@ class MonthlyReportPayloadBuilderTests(unittest.TestCase):
             mock.patch.object(report_payload, "get_iis_tax_deductions_for_period", return_value=Decimal("52000")),
             mock.patch.object(report_payload, "get_commissions_for_period", return_value=Decimal("35")),
             mock.patch.object(report_payload, "get_taxes_for_period", return_value=Decimal("12.10")),
+            mock.patch.object(report_payload, "get_tax_refunds_for_period", return_value=Decimal("0")),
             mock.patch.object(
                 report_payload,
                 "get_rebalance_targets",

@@ -26,6 +26,7 @@ from queries import (
     get_commissions_for_period,
     get_deposits_for_period,
     get_taxes_for_period,
+    get_tax_refunds_for_period,
 )
 from runtime import (
     ACCOUNT_FRIENDLY_NAME,
@@ -54,6 +55,7 @@ from services import (
     compute_twr_timeseries,
     get_rebalance_targets,
     is_income_event_backed_tax_operation,
+    rebase_twr_to_period,
 )
 
 
@@ -284,6 +286,7 @@ def _build_operations_month_data(
     withdrawals_by_day: dict[date, Decimal] = {}
     commissions_by_day: dict[date, Decimal] = {}
     taxes_by_day: dict[date, Decimal] = {}
+    tax_refunds_by_day: dict[date, Decimal] = {}
     unknown_operation_group_count = 0
     mojibake_detected_count = 0
 
@@ -316,7 +319,10 @@ def _build_operations_month_data(
             elif operation_group == "commission":
                 commissions_by_day[local_date] = commissions_by_day.get(local_date, Decimal("0")) + amount_abs
             elif operation_group == "income_tax" and not is_income_event_backed_tax_operation(row.get("operation_type")):
-                taxes_by_day[local_date] = taxes_by_day.get(local_date, Decimal("0")) + amount_abs
+                if amount < 0:
+                    taxes_by_day[local_date] = taxes_by_day.get(local_date, Decimal("0")) + amount_abs
+                elif amount > 0:
+                    tax_refunds_by_day[local_date] = tax_refunds_by_day.get(local_date, Decimal("0")) + amount
 
         normalized_rows.append(
             {
@@ -350,6 +356,7 @@ def _build_operations_month_data(
         "withdrawals_by_day": withdrawals_by_day,
         "commissions_by_day": commissions_by_day,
         "taxes_by_day": taxes_by_day,
+        "tax_refunds_by_day": tax_refunds_by_day,
         "unknown_operation_group_count": unknown_operation_group_count,
         "mojibake_detected_count": mojibake_detected_count,
     }
@@ -358,10 +365,16 @@ def _build_operations_month_data(
 def _build_income_month_data(
     income_rows: list[dict[str, Any]],
     alias_by_figi: dict[str, dict[str, Any]],
-) -> tuple[list[dict[str, Any]], dict[str, Decimal], dict[str, Decimal]]:
+) -> tuple[
+    list[dict[str, Any]],
+    dict[date, Decimal],
+    dict[date, Decimal],
+    dict[date, Decimal],
+]:
     normalized_rows: list[dict[str, Any]] = []
     income_net_by_day: dict[date, Decimal] = {}
     income_tax_by_day: dict[date, Decimal] = {}
+    income_tax_refunds_by_day: dict[date, Decimal] = {}
 
     for row in income_rows:
         alias_row = alias_by_figi.get(row.get("figi")) if row.get("figi") else None
@@ -378,7 +391,12 @@ def _build_income_month_data(
         tax_amount = normalize_decimal(row.get("tax_amount"))
 
         income_net_by_day[event_date] = income_net_by_day.get(event_date, Decimal("0")) + net_amount
-        income_tax_by_day[event_date] = income_tax_by_day.get(event_date, Decimal("0")) + abs(tax_amount)
+        if tax_amount < 0:
+            income_tax_by_day[event_date] = income_tax_by_day.get(event_date, Decimal("0")) + abs(tax_amount)
+        elif tax_amount > 0:
+            income_tax_refunds_by_day[event_date] = (
+                income_tax_refunds_by_day.get(event_date, Decimal("0")) + tax_amount
+            )
 
         normalized_rows.append(
             {
@@ -397,7 +415,7 @@ def _build_income_month_data(
             }
         )
 
-    return normalized_rows, income_net_by_day, income_tax_by_day
+    return normalized_rows, income_net_by_day, income_tax_by_day, income_tax_refunds_by_day
 
 
 def _build_timeseries_daily(
@@ -411,6 +429,8 @@ def _build_timeseries_daily(
     taxes_by_day: dict[date, Decimal],
     income_tax_by_day: dict[date, Decimal],
     twr_by_date: dict[date, Decimal],
+    tax_refunds_by_day: dict[date, Decimal] | None = None,
+    income_tax_refunds_by_day: dict[date, Decimal] | None = None,
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     previous_value: Decimal | None = None
@@ -426,7 +446,10 @@ def _build_timeseries_daily(
         commissions = commissions_by_day.get(snapshot_date, Decimal("0"))
         operation_taxes = taxes_by_day.get(snapshot_date, Decimal("0"))
         income_taxes = income_tax_by_day.get(snapshot_date, Decimal("0"))
-        net_cashflow = deposits - withdrawals + income_net - commissions - operation_taxes
+        operation_tax_refunds = (tax_refunds_by_day or {}).get(snapshot_date, Decimal("0"))
+        income_tax_refunds = (income_tax_refunds_by_day or {}).get(snapshot_date, Decimal("0"))
+        net_external_flow = deposits - withdrawals
+        net_cashflow = net_external_flow
         day_pnl = Decimal("0")
         if previous_value is not None:
             day_pnl = portfolio_value - previous_value - net_cashflow
@@ -448,6 +471,10 @@ def _build_timeseries_daily(
                 "commissions": commissions,
                 "operation_taxes": operation_taxes,
                 "income_taxes": income_taxes,
+                "operation_tax_refunds": operation_tax_refunds,
+                "income_tax_refunds": income_tax_refunds,
+                "tax_refunds": operation_tax_refunds + income_tax_refunds,
+                "net_external_flow": net_external_flow,
                 "net_cashflow": net_cashflow,
                 "day_pnl": day_pnl,
                 "twr_pct": twr_by_date.get(snapshot_date),
@@ -491,8 +518,11 @@ def _compute_period_pnl(
     if start_snapshot is not None:
         period_pnl_abs = end_value - start_value - net_external_flow
     else:
-        month_net_cashflow = sum((normalize_decimal(row.get("net_cashflow")) for row in daily_rows[1:]), Decimal("0"))
-        period_pnl_abs = end_value - start_value - month_net_cashflow
+        month_external_flow = sum(
+            (normalize_decimal(row.get("net_external_flow", row.get("net_cashflow"))) for row in daily_rows[1:]),
+            Decimal("0"),
+        )
+        period_pnl_abs = end_value - start_value - month_external_flow
 
     if start_value == 0:
         return period_pnl_abs, None
@@ -847,6 +877,7 @@ def _build_summary_metrics(
     dividend_net: Decimal,
     commissions: Decimal,
     taxes: Decimal,
+    tax_refunds: Decimal,
     deposits_ytd: Decimal,
     plan_annual_contrib: Decimal,
     reconciliation_gap_abs: Decimal,
@@ -897,6 +928,7 @@ def _build_summary_metrics(
         "dividend_net": dividend_net,
         "commissions": commissions,
         "taxes": taxes,
+        "tax_refunds": tax_refunds,
         "deposits_ytd": deposits_ytd,
         "plan_annual_contrib": plan_annual_contrib,
         "plan_progress_pct": plan_progress_pct,
@@ -1325,7 +1357,12 @@ def build_monthly_report_payload(
         alias_by_instrument_uid,
         alias_by_figi,
     )
-    normalized_income_events, income_net_by_day, income_tax_by_day = _build_income_month_data(
+    (
+        normalized_income_events,
+        income_net_by_day,
+        income_tax_by_day,
+        income_tax_refunds_by_day,
+    ) = _build_income_month_data(
         income_event_rows,
         alias_by_figi,
     )
@@ -1334,10 +1371,15 @@ def build_monthly_report_payload(
     twr_by_date: dict[date, Decimal] = {}
     if twr_series is not None:
         series_dates, _values, series_returns = twr_series
+        period_twr_by_date = rebase_twr_to_period(
+            series_dates,
+            series_returns,
+            period_start,
+            period_end_exclusive,
+        )
         twr_by_date = {
             item_date: normalize_decimal(round(item_return * 100.0, 6))
-            for item_date, item_return in zip(series_dates, series_returns)
-            if period_start <= item_date < period_end_exclusive
+            for item_date, item_return in period_twr_by_date.items()
         }
 
     timeseries_daily = _build_timeseries_daily(
@@ -1350,6 +1392,8 @@ def build_monthly_report_payload(
         taxes_by_day=operation_aggregates["taxes_by_day"],
         income_tax_by_day=income_tax_by_day,
         twr_by_date=twr_by_date,
+        tax_refunds_by_day=operation_aggregates["tax_refunds_by_day"],
+        income_tax_refunds_by_day=income_tax_refunds_by_day,
     )
 
     deposits = normalize_decimal(get_deposits_for_period(session, report_account_id, period_start_dt, period_end_exclusive_dt))
@@ -1376,6 +1420,9 @@ def build_monthly_report_payload(
     )
     commissions = normalize_decimal(get_commissions_for_period(session, report_account_id, period_start_dt, period_end_dt))
     taxes = normalize_decimal(get_taxes_for_period(session, report_account_id, period_start_dt, period_end_dt))
+    tax_refunds = normalize_decimal(
+        get_tax_refunds_for_period(session, report_account_id, period_start_dt, period_end_dt)
+    )
     deposits_ytd = normalize_decimal(
         get_deposits_for_period(
             session,
@@ -1438,6 +1485,7 @@ def build_monthly_report_payload(
         dividend_net=dividend_net,
         commissions=commissions,
         taxes=taxes,
+        tax_refunds=tax_refunds,
         deposits_ytd=deposits_ytd,
         plan_annual_contrib=normalize_decimal(PLAN_ANNUAL_CONTRIB_RUB),
         reconciliation_gap_abs=reconciliation_gap_abs,

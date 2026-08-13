@@ -36,6 +36,7 @@ from services import (
     classify_operation_group,
     compute_twr_timeseries,
     is_income_event_backed_tax_operation,
+    rebase_twr_to_period,
 )
 
 
@@ -72,13 +73,20 @@ def build_dataset_export(session) -> tuple[dict, list[dict], list[dict], list[di
     twr_by_date: dict[date, float] = {}
     if twr_data is not None:
         dates, _values, twr_series = twr_data
-        twr_by_date = {dt: round(value * 100.0, 6) for dt, value in zip(dates, twr_series)}
+        period_twr = rebase_twr_to_period(
+            dates,
+            twr_series,
+            min_date,
+            max_date + timedelta(days=1),
+        )
+        twr_by_date = {dt: round(value * 100.0, 6) for dt, value in period_twr.items()}
 
     deposits_by_day: dict[date, Decimal] = {}
     iis_tax_deductions_by_day: dict[date, Decimal] = {}
     withdrawals_by_day: dict[date, Decimal] = {}
     commissions_by_day: dict[date, Decimal] = {}
     taxes_by_day: dict[date, Decimal] = {}
+    tax_refunds_by_day: dict[date, Decimal] = {}
     operations_csv_rows: list[dict] = []
     unknown_operation_groups = 0
     mojibake_detected_count = 0
@@ -123,7 +131,10 @@ def build_dataset_export(session) -> tuple[dict, list[dict], list[dict], list[di
             elif group == "commission":
                 commissions_by_day[local_date] = commissions_by_day.get(local_date, Decimal("0")) + amount_abs
             elif group == "income_tax" and not is_income_event_backed_tax_operation(row["operation_type"]):
-                taxes_by_day[local_date] = taxes_by_day.get(local_date, Decimal("0")) + amount_abs
+                if amount < 0:
+                    taxes_by_day[local_date] = taxes_by_day.get(local_date, Decimal("0")) + amount_abs
+                elif amount > 0:
+                    tax_refunds_by_day[local_date] = tax_refunds_by_day.get(local_date, Decimal("0")) + amount
 
         operations_csv_rows.append(
             {
@@ -153,6 +164,7 @@ def build_dataset_export(session) -> tuple[dict, list[dict], list[dict], list[di
 
     income_net_by_day: dict[date, Decimal] = {}
     income_tax_by_day: dict[date, Decimal] = {}
+    income_tax_refunds_by_day: dict[date, Decimal] = {}
     income_csv_rows: list[dict] = []
     for row in income_rows:
         event_date = row["event_date"]
@@ -166,7 +178,12 @@ def build_dataset_export(session) -> tuple[dict, list[dict], list[dict], list[di
         net_amount = normalize_decimal(row["net_amount"])
         tax_amount = normalize_decimal(row["tax_amount"])
         income_net_by_day[event_date] = income_net_by_day.get(event_date, Decimal("0")) + net_amount
-        income_tax_by_day[event_date] = income_tax_by_day.get(event_date, Decimal("0")) + abs(tax_amount)
+        if tax_amount < 0:
+            income_tax_by_day[event_date] = income_tax_by_day.get(event_date, Decimal("0")) + abs(tax_amount)
+        elif tax_amount > 0:
+            income_tax_refunds_by_day[event_date] = (
+                income_tax_refunds_by_day.get(event_date, Decimal("0")) + tax_amount
+            )
         income_csv_rows.append(
             {
                 "event_date": event_date,
@@ -197,7 +214,10 @@ def build_dataset_export(session) -> tuple[dict, list[dict], list[dict], list[di
         commissions = commissions_by_day.get(snapshot_date, Decimal("0"))
         taxes = taxes_by_day.get(snapshot_date, Decimal("0"))
         income_tax = income_tax_by_day.get(snapshot_date, Decimal("0"))
-        net_cashflow = deposits - withdrawals + income_net - commissions - taxes
+        operation_tax_refund = tax_refunds_by_day.get(snapshot_date, Decimal("0"))
+        income_tax_refund = income_tax_refunds_by_day.get(snapshot_date, Decimal("0"))
+        net_external_flow = deposits - withdrawals
+        net_cashflow = net_external_flow
         day_pnl = Decimal("0")
         if previous_value is not None:
             day_pnl = portfolio_value - previous_value - net_cashflow
@@ -218,6 +238,10 @@ def build_dataset_export(session) -> tuple[dict, list[dict], list[dict], list[di
                 "commissions": commissions,
                 "operation_taxes": taxes,
                 "income_taxes": income_tax,
+                "operation_tax_refunds": operation_tax_refund,
+                "income_tax_refunds": income_tax_refund,
+                "tax_refunds": operation_tax_refund + income_tax_refund,
+                "net_external_flow": net_external_flow,
                 "net_cashflow": net_cashflow,
                 "day_pnl": day_pnl,
                 "twr_pct": twr_by_date.get(snapshot_date),
@@ -274,6 +298,12 @@ def build_dataset_export(session) -> tuple[dict, list[dict], list[dict], list[di
     commissions_total = sum((row["commissions"] for row in daily_csv_rows), Decimal("0"))
     operation_taxes_total = sum((row["operation_taxes"] for row in daily_csv_rows), Decimal("0"))
     income_taxes_total = sum((row["income_taxes"] for row in daily_csv_rows), Decimal("0"))
+    operation_tax_refunds_total = sum(
+        (row["operation_tax_refunds"] for row in daily_csv_rows), Decimal("0")
+    )
+    income_tax_refunds_total = sum(
+        (row["income_tax_refunds"] for row in daily_csv_rows), Decimal("0")
+    )
     current_value = normalize_decimal(latest_snapshot["total_value"])
     net_contributions = deposits_total - withdrawals_total
     period_start_value = normalize_decimal(daily_csv_rows[0]["portfolio_value"])
@@ -316,6 +346,9 @@ def build_dataset_export(session) -> tuple[dict, list[dict], list[dict], list[di
             "income_taxes_total": income_taxes_total,
             "operation_taxes_total": operation_taxes_total,
             "taxes_total": income_taxes_total + operation_taxes_total,
+            "income_tax_refunds_total": income_tax_refunds_total,
+            "operation_tax_refunds_total": operation_tax_refunds_total,
+            "tax_refunds_total": income_tax_refunds_total + operation_tax_refunds_total,
             "period_start_value": period_start_value,
             "period_end_value": period_end_value,
             "period_net_cashflow": period_net_cashflow,
@@ -362,6 +395,7 @@ def build_dataset_export(session) -> tuple[dict, list[dict], list[dict], list[di
             "income_net в daily timeseries уже учитывает удержанный налог из income_events.",
             "iis_tax_deduction_income считается доходом портфеля и не входит во внешний денежный поток.",
             "operation_taxes_total не включает dividend/coupon tax, если тот же налог уже представлен в income_events.",
+            "Удержанный налог хранится как положительный расход, а положительный signed tax cashflow экспортируется отдельно как tax refund.",
             "Архив считается period-first: lifetime return не вычисляется без полной истории с нуля.",
             "reconciliation_by_asset_type строится от snapshot totals по классам активов; нераскрытый остаток остаётся residual.",
         ],
@@ -398,6 +432,7 @@ def build_dataset_readme(dataset: dict) -> str:
         f"- Total income net: {decimal_to_str(summary['total_income_net'])} {meta['base_currency']}\n"
         f"- Period pnl abs: {decimal_to_str(summary['period_pnl_abs'])} {meta['base_currency']}\n"
         f"- Period twr pct: {summary['period_twr_pct']}\n"
+        f"- Tax refunds: {decimal_to_str(summary['tax_refunds_total'])} {meta['base_currency']}\n"
         f"- Positions value sum: {decimal_to_str(summary['positions_value_sum'])} {meta['base_currency']}\n"
         f"- Reconciliation gap abs: {decimal_to_str(summary['reconciliation_gap_abs'])} {meta['base_currency']}\n"
         f"- Full history from zero: {summary['has_full_history_from_zero']}\n\n"
@@ -409,6 +444,7 @@ def build_dataset_readme(dataset: dict) -> str:
         "- `iis_tax_deduction_income` — отдельный доход; `total_income_net` включает его вместе с купонами и дивидендами.\n"
         "- В TWR и `period_external_cashflow` входят только собственные пополнения и выводы.\n"
         "- `taxes_total` дедуплицирован: dividend/coupon tax не суммируется второй раз из operations, если он уже попал в income_events.\n"
+        "- `tax_refunds_total` — отдельный возврат налога и не является отрицательным налоговым расходом.\n"
         "- Если `has_full_history_from_zero=false`, архив нельзя трактовать как полную lifetime-историю портфеля.\n"
         "- Если `reconciliation_gap_abs` не равен нулю, смотрите `reconciliation_by_asset_type`: это residual между snapshot totals и суммой позиционных оценок.\n"
         "- Для подробного анализа сначала читайте `dataset.json`, затем CSV-файлы как табличную детализацию.\n"
@@ -441,6 +477,10 @@ def create_dataset_archive() -> tuple[str, str]:
         "commissions",
         "operation_taxes",
         "income_taxes",
+        "operation_tax_refunds",
+        "income_tax_refunds",
+        "tax_refunds",
+        "net_external_flow",
         "net_cashflow",
         "day_pnl",
         "twr_pct",

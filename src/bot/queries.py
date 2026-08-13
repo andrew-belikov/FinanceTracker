@@ -139,6 +139,45 @@ def get_total_deposits(
     return float(row or 0)
 
 
+def get_net_external_contributions(session, account_id: str) -> float:
+    row = session.execute(
+        text(
+            f"""
+            {OPERATIONS_DEDUP_CTE}
+            SELECT COALESCE(
+                SUM(
+                    CASE
+                        WHEN operation_type IN :deposit_types
+                             AND COALESCE(cashflow_category, '') <> :deduction_category
+                        THEN ABS(amount)
+                        WHEN operation_type IN :withdrawal_types THEN -ABS(amount)
+                        ELSE 0
+                    END
+                ),
+                0
+            )
+            FROM operations_dedup
+            WHERE account_id = :account_id
+              AND operation_type IN :operation_types
+              AND state = :executed_state
+            """
+        ).bindparams(
+            bindparam("deposit_types", expanding=True),
+            bindparam("withdrawal_types", expanding=True),
+            bindparam("operation_types", expanding=True),
+        ),
+        {
+            "account_id": account_id,
+            "deposit_types": DEPOSIT_OPERATION_TYPES,
+            "withdrawal_types": WITHDRAWAL_OPERATION_TYPES,
+            "operation_types": DEPOSIT_OPERATION_TYPES + WITHDRAWAL_OPERATION_TYPES,
+            "deduction_category": IIS_TAX_DEDUCTION_CATEGORY,
+            "executed_state": EXECUTED_OPERATION_STATE,
+        },
+    ).scalar_one()
+    return float(row or 0)
+
+
 def get_deposits_for_period(
     session,
     account_id: str,
@@ -315,7 +354,10 @@ def get_taxes_for_period(db, account_id: str, start_date, end_date) -> Decimal:
         income_taxes_row = db.execute(
             text(
                 """
-                SELECT COALESCE(SUM(tax_amount), 0) AS total
+                SELECT COALESCE(
+                    SUM(CASE WHEN tax_amount < 0 THEN ABS(tax_amount) ELSE 0 END),
+                    0
+                ) AS total
                 FROM income_events
                 WHERE account_id = :account_id
                   AND event_date >= :start_date
@@ -324,7 +366,7 @@ def get_taxes_for_period(db, account_id: str, start_date, end_date) -> Decimal:
             ),
             {"account_id": account_id, "start_date": start_date, "end_date": end_date},
         ).scalar_one()
-        income_taxes = Decimal(income_taxes_row or 0)
+        income_taxes = abs(Decimal(income_taxes_row or 0))
     except Exception as exc:
         if not _is_undefined_table_error(exc, "income_events"):
             raise
@@ -333,7 +375,10 @@ def get_taxes_for_period(db, account_id: str, start_date, end_date) -> Decimal:
         text(
             f"""
             {OPERATIONS_DEDUP_CTE}
-            SELECT COALESCE(SUM(ABS(amount)), 0) AS total
+            SELECT COALESCE(
+                SUM(CASE WHEN amount < 0 THEN ABS(amount) ELSE 0 END),
+                0
+            ) AS total
             FROM operations_dedup
             WHERE account_id = :account_id
               AND date >= :start_date
@@ -350,7 +395,57 @@ def get_taxes_for_period(db, account_id: str, start_date, end_date) -> Decimal:
             "executed_state": EXECUTED_OPERATION_STATE,
         },
     ).scalar_one()
-    return income_taxes + Decimal(operation_taxes or 0)
+    return income_taxes + abs(Decimal(operation_taxes or 0))
+
+
+def get_tax_refunds_for_period(db, account_id: str, start_date, end_date) -> Decimal:
+    income_refunds = Decimal("0")
+    try:
+        income_refunds_row = db.execute(
+            text(
+                """
+                SELECT COALESCE(
+                    SUM(CASE WHEN tax_amount > 0 THEN tax_amount ELSE 0 END),
+                    0
+                ) AS total
+                FROM income_events
+                WHERE account_id = :account_id
+                  AND event_date >= :start_date
+                  AND event_date <= :end_date
+                """
+            ),
+            {"account_id": account_id, "start_date": start_date, "end_date": end_date},
+        ).scalar_one()
+        income_refunds = max(Decimal(income_refunds_row or 0), Decimal("0"))
+    except Exception as exc:
+        if not _is_undefined_table_error(exc, "income_events"):
+            raise
+
+    operation_refunds = db.execute(
+        text(
+            f"""
+            {OPERATIONS_DEDUP_CTE}
+            SELECT COALESCE(
+                SUM(CASE WHEN amount > 0 THEN amount ELSE 0 END),
+                0
+            ) AS total
+            FROM operations_dedup
+            WHERE account_id = :account_id
+              AND date >= :start_date
+              AND date <= :end_date
+              AND operation_type IN :operation_types
+              AND state = :executed_state
+            """
+        ).bindparams(bindparam("operation_types", expanding=True)),
+        {
+            "account_id": account_id,
+            "start_date": start_date,
+            "end_date": end_date,
+            "operation_types": TAX_OPERATION_TYPES,
+            "executed_state": EXECUTED_OPERATION_STATE,
+        },
+    ).scalar_one()
+    return income_refunds + max(Decimal(operation_refunds or 0), Decimal("0"))
 
 
 def get_month_snapshots(session, account_id: str, year: int, month: int):
@@ -1377,6 +1472,58 @@ def get_monthly_deposits(session, account_id: str, from_dt: datetime, to_dt: dat
         .all()
     )
     return rows
+
+
+def get_monthly_net_external_flows(
+    session,
+    account_id: str,
+    from_dt: datetime,
+    to_dt: datetime,
+):
+    return (
+        session.execute(
+            text(
+                f"""
+                {OPERATIONS_DEDUP_CTE}
+                SELECT
+                    date_trunc('month', date)::date AS month_start,
+                    SUM(
+                        CASE
+                            WHEN operation_type IN :deposit_types
+                                 AND COALESCE(cashflow_category, '') <> :deduction_category
+                            THEN ABS(amount)
+                            WHEN operation_type IN :withdrawal_types THEN -ABS(amount)
+                            ELSE 0
+                        END
+                    ) AS amount
+                FROM operations_dedup
+                WHERE account_id = :account_id
+                  AND date >= :from_dt
+                  AND date < :to_dt
+                  AND state = :executed_state
+                  AND operation_type IN :operation_types
+                GROUP BY month_start
+                ORDER BY month_start ASC
+                """
+            ).bindparams(
+                bindparam("deposit_types", expanding=True),
+                bindparam("withdrawal_types", expanding=True),
+                bindparam("operation_types", expanding=True),
+            ),
+            {
+                "account_id": account_id,
+                "from_dt": from_dt,
+                "to_dt": to_dt,
+                "deposit_types": DEPOSIT_OPERATION_TYPES,
+                "withdrawal_types": WITHDRAWAL_OPERATION_TYPES,
+                "operation_types": DEPOSIT_OPERATION_TYPES + WITHDRAWAL_OPERATION_TYPES,
+                "executed_state": EXECUTED_OPERATION_STATE,
+                "deduction_category": IIS_TAX_DEDUCTION_CATEGORY,
+            },
+        )
+        .mappings()
+        .all()
+    )
 
 
 def get_monthly_iis_tax_deductions(

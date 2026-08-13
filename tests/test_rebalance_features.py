@@ -2,7 +2,7 @@ import ast
 import unittest
 from copy import deepcopy
 from datetime import date
-from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+from decimal import Decimal, InvalidOperation, ROUND_FLOOR, ROUND_HALF_UP
 from pathlib import Path
 
 
@@ -77,6 +77,7 @@ def load_symbols():
             "Decimal": Decimal,
             "InvalidOperation": InvalidOperation,
             "ROUND_HALF_UP": ROUND_HALF_UP,
+            "ROUND_FLOOR": ROUND_FLOOR,
         },
     )
 
@@ -206,6 +207,31 @@ class RebalanceMathTests(unittest.TestCase):
         )
 
         self.assertEqual(sum(plan["allocations"].values()), Decimal("10001"))
+
+    def test_invest_plan_never_creates_negative_allocation_for_two_rubles(self):
+        plan = compute_invest_plan(
+            {asset_class: Decimal("0") for asset_class in SYMBOLS["REBALANCE_ASSET_CLASSES"]},
+            {asset_class: Decimal("25") for asset_class in SYMBOLS["REBALANCE_ASSET_CLASSES"]},
+            Decimal("2"),
+        )
+
+        self.assertEqual(sum(plan["allocations"].values()), Decimal("2"))
+        self.assertTrue(all(value >= 0 for value in plan["allocations"].values()))
+
+    def test_invest_plan_allocation_invariants_hold_across_small_deposits(self):
+        target_sets = (
+            {"stocks": Decimal("25"), "bonds": Decimal("25"), "etf": Decimal("25"), "currency": Decimal("25")},
+            {"stocks": Decimal("1"), "bonds": Decimal("2"), "etf": Decimal("3"), "currency": Decimal("94")},
+            {"stocks": Decimal("33"), "bonds": Decimal("33"), "etf": Decimal("34"), "currency": Decimal("0")},
+        )
+        empty = {asset_class: Decimal("0") for asset_class in SYMBOLS["REBALANCE_ASSET_CLASSES"]}
+
+        for amount in range(1, 101):
+            for targets in target_sets:
+                with self.subTest(amount=amount, targets=targets):
+                    allocations = compute_invest_plan(empty, targets, Decimal(amount))["allocations"]
+                    self.assertEqual(sum(allocations.values()), Decimal(amount))
+                    self.assertTrue(all(value >= 0 for value in allocations.values()))
 
     def test_diff_lines_render_fact_then_plan_with_status_emoji(self):
         lines = _build_rebalance_diff_lines(
