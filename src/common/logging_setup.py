@@ -82,32 +82,41 @@ _FINANCIAL_KEY_MARKERS = (
     "yield",
 )
 
-_SAFE_STRUCTURAL_TOTAL_KEYS = frozenset(
+_SAFE_STRUCTURAL_COUNTER_KEYS = frozenset(
     {
+        "alias_groups_count",
         "applied_total",
+        "asset_alias_rows_count",
+        "candidate_count",
+        "commands_count",
+        "count",
         "daily_failed_total",
         "daily_sent_total",
+        "deposit_count",
+        "eval_count",
         "failed_total",
+        "income_events_count",
         "loaded_total",
+        "mojibake_detected_count",
         "month_failed_total",
         "month_sent_total",
+        "operations_count",
+        "operations_top_count",
+        "page_items_count",
+        "pending_update_count",
+        "positions_count",
+        "positions_missing_label_count",
+        "processed_count",
+        "prompt_eval_count",
+        "recovery_confirmation_count",
         "sent_total",
+        "snapshot_count",
+        "source_snapshot_count",
+        "target_chat_count",
+        "triggers_count",
+        "unknown_operation_group_count",
+        "warnings_count",
     }
-)
-_COUNTER_KEY_FORBIDDEN_MARKERS = (
-    "account_id",
-    "authorization",
-    "chat_id",
-    "dsn",
-    "figi",
-    "identifier",
-    "operation_id",
-    "password",
-    "payload",
-    "raw",
-    "secret",
-    "token",
-    "user_id",
 )
 _MAX_SAFE_STRUCTURAL_COUNT = 1_000_000_000
 
@@ -155,13 +164,10 @@ def _is_bounded_structural_count(value: Any) -> bool:
 
 def _is_safe_structural_counter(key: str, value: Any) -> bool:
     normalized = key.strip().lower()
-    if not _is_bounded_structural_count(value):
-        return False
-    if normalized in _SAFE_STRUCTURAL_TOTAL_KEYS:
-        return True
-    if normalized != "count" and not normalized.endswith("_count"):
-        return False
-    return not any(marker in normalized for marker in _COUNTER_KEY_FORBIDDEN_MARKERS)
+    return (
+        normalized in _SAFE_STRUCTURAL_COUNTER_KEYS
+        and _is_bounded_structural_count(value)
+    )
 
 
 def _is_sensitive_key(key: str, value: Any) -> bool:
