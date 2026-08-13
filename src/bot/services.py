@@ -71,6 +71,7 @@ from runtime import (
     normalize_decimal,
     to_iso_datetime,
     to_local_market_date,
+    local_reporting_bounds_utc_naive,
 )
 from today_templates import TodayContext, render_today_text
 from week_templates import WeekContext, render_week_text
@@ -720,7 +721,7 @@ def get_year_period(year: int | None) -> tuple[datetime, datetime, str, bool]:
     is_ytd = year is None
     period_year = today.year if is_ytd else int(year)
 
-    from_dt = datetime(period_year, 1, 1)
+    period_start_date = date(period_year, 1, 1)
     if is_ytd:
         to_date_inclusive = today
         label = f"{period_year} YTD"
@@ -728,7 +729,10 @@ def get_year_period(year: int | None) -> tuple[datetime, datetime, str, bool]:
         to_date_inclusive = date(period_year, 12, 31)
         label = str(period_year)
 
-    to_dt = datetime.combine(to_date_inclusive + timedelta(days=1), time.min)
+    from_dt, to_dt = local_reporting_bounds_utc_naive(
+        period_start_date,
+        to_date_inclusive + timedelta(days=1),
+    )
     return from_dt, to_dt, label, is_ytd
 
 
@@ -966,8 +970,10 @@ def compute_positions_diff_grouped(
 
 def build_today_summary() -> str:
     now_local = datetime.now(TZ)
-    day_start = datetime.combine(now_local.date(), time.min)
-    day_end_exclusive = day_start + timedelta(days=1)
+    day_start, day_end_exclusive = local_reporting_bounds_utc_naive(
+        now_local.date(),
+        now_local.date() + timedelta(days=1),
+    )
     day_end = day_end_exclusive - timedelta(microseconds=1)
 
     with db_session() as session:
@@ -978,13 +984,9 @@ def build_today_summary() -> str:
         snaps = get_latest_snapshots(session, account_id, limit=2)
         net_external_flow_today = 0.0
         if len(snaps) >= 2:
-            interval_start = datetime.combine(
+            interval_start, interval_end_exclusive = local_reporting_bounds_utc_naive(
                 snaps[1]["snapshot_date"] + timedelta(days=1),
-                time.min,
-            )
-            interval_end_exclusive = datetime.combine(
                 snaps[0]["snapshot_date"] + timedelta(days=1),
-                time.min,
             )
             net_external_flow_today = get_net_external_flow_for_period(
                 session,
@@ -1054,8 +1056,10 @@ def build_week_summary() -> str:
     now_local = datetime.now(TZ)
     week_start_date = now_local.date() - timedelta(days=now_local.weekday())
     week_end_date = week_start_date + timedelta(days=4)
-    week_start = datetime.combine(week_start_date, time.min)
-    week_end_exclusive = datetime.combine(week_end_date + timedelta(days=1), time.min)
+    week_start, week_end_exclusive = local_reporting_bounds_utc_naive(
+        week_start_date,
+        week_end_date + timedelta(days=1),
+    )
     week_end = week_end_exclusive - timedelta(microseconds=1)
 
     with db_session() as session:
@@ -1110,7 +1114,10 @@ def build_week_summary() -> str:
         taxes = get_taxes_for_period(session, account_id, week_start, week_end)
         tax_refunds = get_tax_refunds_for_period(session, account_id, week_start, week_end)
 
-        year_start = datetime(week_end_date.year, 1, 1)
+        year_start, _ = local_reporting_bounds_utc_naive(
+            date(week_end_date.year, 1, 1),
+            date(week_end_date.year + 1, 1, 1),
+        )
         dep_year = get_deposits_for_period(session, account_id, year_start, week_end_exclusive)
 
         plan = PLAN_ANNUAL_CONTRIB_RUB
@@ -1145,8 +1152,10 @@ def build_month_summary() -> str:
     else:
         next_month_start = date(year, month + 1, 1)
 
-    month_start_dt = datetime.combine(month_start, time.min)
-    month_end_exclusive = datetime.combine(next_month_start, time.min)
+    month_start_dt, month_end_exclusive = local_reporting_bounds_utc_naive(
+        month_start,
+        next_month_start,
+    )
     month_end_dt = month_end_exclusive - timedelta(microseconds=1)
 
     year_start = date(year, 1, 1)
@@ -1179,7 +1188,7 @@ def build_month_summary() -> str:
         dep_year = get_deposits_for_period(
             session,
             account_id=account_id,
-            start_dt=datetime(year, 1, 1),
+            start_dt=local_reporting_bounds_utc_naive(year_start, next_year_start)[0],
             end_dt=month_end_exclusive,
         )
         start_snap, end_snap = get_month_snapshots(session, account_id, year, month)
@@ -1270,8 +1279,10 @@ def _resolve_month_report_period(
     else:
         period_end_date = calendar_month_end_date
 
-    period_start_dt = datetime.combine(period_start_date, time.min)
-    period_end_exclusive = datetime.combine(period_end_date + timedelta(days=1), time.min)
+    period_start_dt, period_end_exclusive = local_reporting_bounds_utc_naive(
+        period_start_date,
+        period_end_date + timedelta(days=1),
+    )
     period_label_ru = f"{MONTHS_RU.get(period_month, str(period_month))} {period_year}"
     return (
         period_year,
@@ -1636,19 +1647,20 @@ def build_monthly_report_payload(
     latest_snapshot = get_latest_snapshot_with_id(session, account_id)
     if latest_snapshot is None:
         raise ValueError("Пока нет снапшотов для monthly report.")
+    base_currency = normalize_operation_currency(latest_snapshot.get("currency"))
 
     start_snap, end_snap = get_period_snapshots(
         session,
         account_id,
         period_start_date,
-        period_end_exclusive.date(),
+        period_end_date + timedelta(days=1),
     )
     daily_rows = list(
         get_period_daily_snapshot_rows(
             session,
             account_id,
             period_start_date,
-            period_end_exclusive.date(),
+            period_end_date + timedelta(days=1),
         )
     )
     if not daily_rows:
@@ -1695,7 +1707,7 @@ def build_monthly_report_payload(
             session,
             account_id,
             period_start_date,
-            period_end_exclusive.date(),
+            period_end_date + timedelta(days=1),
         )
     )
 
@@ -1777,13 +1789,16 @@ def build_monthly_report_payload(
         )
         net_amount = normalize_decimal(row.get("net_amount"))
         tax_amount = normalize_decimal(row.get("tax_amount"))
-        income_net_by_day[event_date] = income_net_by_day.get(event_date, Decimal("0")) + net_amount
-        if tax_amount < 0:
-            income_tax_by_day[event_date] = income_tax_by_day.get(event_date, Decimal("0")) + abs(tax_amount)
+        income_currency = normalize_operation_currency(row.get("currency"))
+        if income_currency == base_currency and base_currency != "UNKNOWN":
+            income_net_by_day[event_date] = income_net_by_day.get(event_date, Decimal("0")) + net_amount
+            if tax_amount < 0:
+                income_tax_by_day[event_date] = income_tax_by_day.get(event_date, Decimal("0")) + abs(tax_amount)
         income_payload_rows.append(
             {
                 "event_date": event_date.isoformat(),
                 "event_type": row.get("event_type"),
+                "currency": income_currency,
                 "logical_asset_id": identity["logical_asset_id"],
                 "figi": row.get("figi"),
                 "ticker": identity["ticker"],
@@ -1805,7 +1820,7 @@ def build_monthly_report_payload(
             dates,
             twr_series,
             period_start_date,
-            period_end_exclusive.date(),
+            period_end_date + timedelta(days=1),
         )
         twr_by_date = {
             dt: decimal_to_str(round(value * 100.0, 6))
@@ -1878,7 +1893,10 @@ def build_monthly_report_payload(
     if twr_period_value is None:
         twr_period_value = twr_by_date.get(period_end_date)
 
-    year_start_dt = datetime(period_year, 1, 1)
+    year_start_dt = local_reporting_bounds_utc_naive(
+        date(period_year, 1, 1),
+        date(period_year + 1, 1, 1),
+    )[0]
     deposits_ytd = get_deposits_for_period(
         session,
         account_id=account_id,
@@ -2706,8 +2724,12 @@ def _format_asset_lines(rows: list[dict], total: Decimal, title: str, top_n: int
 
 def build_year_summary(year: int | None) -> tuple[str, str, str | None]:
     period_start_dt, period_end_dt_exclusive, label, _ = get_year_period(year)
-    period_start = period_start_dt.date()
-    period_end_inclusive = period_end_dt_exclusive.date() - timedelta(days=1)
+    period_year = datetime.now(TZ).year if year is None else int(year)
+    period_start = date(period_year, 1, 1)
+    period_end_inclusive = (
+        datetime.now(TZ).date() if year is None else date(period_year, 12, 31)
+    )
+    period_end_exclusive_date = period_end_inclusive + timedelta(days=1)
 
     with db_session() as session:
         account_id = resolve_reporting_account_id(session)
@@ -2726,7 +2748,12 @@ def build_year_summary(year: int | None) -> tuple[str, str, str | None]:
             period_start_dt,
             period_end_dt_exclusive,
         )
-        start_snap, end_snap = get_period_snapshots(session, account_id, period_start, period_end_dt_exclusive.date())
+        start_snap, end_snap = get_period_snapshots(
+            session,
+            account_id,
+            period_start,
+            period_end_exclusive_date,
+        )
         diff_lines, diff_error = compute_positions_diff_grouped(session, account_id, period_start_dt, period_end_dt_exclusive)
         realized_by_asset, realized_total = compute_realized_by_asset(
             session,
@@ -2917,9 +2944,14 @@ def build_triggers_messages() -> list[str]:
         if not snaps:
             return messages
 
-        year_start = datetime(year, 1, 1)
-        today_start = datetime(year, today.month, today.day)
-        tomorrow_start = today_start + timedelta(days=1)
+        year_start = local_reporting_bounds_utc_naive(
+            date(year, 1, 1),
+            date(year + 1, 1, 1),
+        )[0]
+        today_start, tomorrow_start = local_reporting_bounds_utc_naive(
+            today,
+            today + timedelta(days=1),
+        )
 
         dep_prev = get_deposits_for_period(session, account_id, year_start, today_start)
         dep_now = get_deposits_for_period(session, account_id, year_start, tomorrow_start)

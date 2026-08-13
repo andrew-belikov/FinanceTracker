@@ -339,6 +339,7 @@ class IncomeEventReconciliationTests(unittest.TestCase):
                     figi="FIGI1",
                     event_date=date(2026, 1, 15),
                     event_type="coupon",
+                    currency="RUB",
                     gross_amount=100,
                     tax_amount=0,
                     net_amount=100,
@@ -363,7 +364,7 @@ class IncomeEventReconciliationTests(unittest.TestCase):
                 stats = tracker_app._reconcile_income_events(
                     session,
                     "account",
-                    {("FIGI1", date(2026, 1, 15), "coupon")},
+                    {("FIGI1", date(2026, 1, 15), "coupon", "RUB")},
                 )
             session.commit()
 
@@ -391,6 +392,7 @@ class IncomeEventReconciliationTests(unittest.TestCase):
                     figi="FIGI1",
                     event_date=date(2026, 1, 15),
                     event_type="coupon",
+                    currency="RUB",
                     gross_amount=100,
                     tax_amount=0,
                     net_amount=100,
@@ -403,13 +405,14 @@ class IncomeEventReconciliationTests(unittest.TestCase):
             stats = tracker_app._reconcile_income_events(
                 session,
                 "account",
-                {("FIGI1", date(2026, 1, 15), "coupon")},
+                {("FIGI1", date(2026, 1, 15), "coupon", "RUB")},
             )
             session.commit()
 
-            self.assertEqual(session.query(tracker_app.IncomeEvent).count(), 1)
+            self.assertEqual(session.query(tracker_app.IncomeEvent).count(), 0)
             self.assertEqual(stats["income_created"], 0)
             self.assertEqual(stats["income_updated"], 0)
+            self.assertEqual(stats["income_deactivated"], 1)
 
     def test_active_sync_collects_income_key_for_reconciliation(self):
         operation_payload = {
@@ -439,7 +442,7 @@ class IncomeEventReconciliationTests(unittest.TestCase):
         self.assertEqual(stats["new"], 1)
         self.assertEqual(
             affected_keys,
-            {("FIGI1", date(2026, 1, 15), "coupon")},
+            {("FIGI1", date(2026, 1, 15), "coupon", "RUB")},
         )
 
     def test_unchanged_event_keeps_original_yield_and_notification_state(self):
@@ -457,6 +460,7 @@ class IncomeEventReconciliationTests(unittest.TestCase):
                     figi="FIGI1",
                     event_date=date(2026, 1, 15),
                     event_type="coupon",
+                    currency="RUB",
                     gross_amount=100,
                     tax_amount=0,
                     net_amount=100,
@@ -474,7 +478,7 @@ class IncomeEventReconciliationTests(unittest.TestCase):
                 stats = tracker_app._reconcile_income_events(
                     session,
                     "account",
-                    {("FIGI1", date(2026, 1, 15), "coupon")},
+                    {("FIGI1", date(2026, 1, 15), "coupon", "RUB")},
                 )
             session.commit()
 

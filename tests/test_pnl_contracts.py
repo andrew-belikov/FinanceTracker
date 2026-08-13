@@ -326,6 +326,10 @@ class TodaySummaryContractTests(unittest.TestCase):
             "fmt_decimal_rub": lambda value: value,
             "append_tax_refund_line": lambda text_value, _refunds: text_value,
             "REPORTING_ACCOUNT_UNAVAILABLE_TEXT": "unavailable",
+            "local_reporting_bounds_utc_naive": lambda start, end: (
+                datetime.combine(start, time.min),
+                datetime.combine(end, time.min),
+            ),
         }
         build_today = load_function(SERVICES_FILE, "build_today_summary", namespace)
         return build_today(), calls
@@ -448,6 +452,10 @@ class SequentialDb:
     def execute(self, *_args, **_kwargs):
         return FakeScalarResult(next(self.values))
 
+    @contextmanager
+    def begin_nested(self):
+        yield
+
 
 class TaxSignContractTests(unittest.TestCase):
     def _load_query(self, name):
@@ -459,6 +467,7 @@ class TaxSignContractTests(unittest.TestCase):
             "TAX_OPERATION_TYPES": ("OPERATION_TYPE_TAX",),
             "EXECUTED_OPERATION_STATE": "OPERATION_STATE_EXECUTED",
             "_is_undefined_table_error": lambda *_args: False,
+            "_optional_relation_savepoint": lambda db: db.begin_nested(),
         }
         return load_function(QUERIES_FILE, name, namespace)
 

@@ -13,6 +13,7 @@ from telegram import InputFile, Update
 from telegram.error import BadRequest
 
 from common.logging_setup import configure_logging, get_logger
+from common.time_utils import local_civil_bounds_to_utc_naive, utc_naive_to_local_date
 
 
 class RuntimeConfigurationError(ValueError):
@@ -275,6 +276,7 @@ WITH operations_dedup AS (
         operation_id,
         date,
         amount,
+        currency,
         operation_type,
         cashflow_category,
         state,
@@ -472,9 +474,14 @@ async def safe_send_document(
 def to_local_market_date(dt: datetime | None) -> date | None:
     if dt is None:
         return None
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(TZ).date()
+    return utc_naive_to_local_date(dt, TZ)
+
+
+def local_reporting_bounds_utc_naive(
+    start: date | datetime,
+    end_exclusive: date | datetime,
+) -> tuple[datetime, datetime]:
+    return local_civil_bounds_to_utc_naive(start, end_exclusive, TZ)
 
 
 def to_iso_datetime(dt: datetime | None) -> str | None:

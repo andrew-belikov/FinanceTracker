@@ -130,6 +130,10 @@ class DatasetSnapshotIntervalTests(unittest.TestCase):
             "normalize_decimal": lambda value: Decimal(str(value or 0)),
             "to_local_market_date": lambda value: value.date(),
             "to_iso_datetime": lambda value: value.isoformat() if value is not None else None,
+            "local_reporting_bounds_utc_naive": lambda start, end: (
+                datetime.combine(start, time.min),
+                datetime.combine(end, time.min),
+            ),
         }
         namespace["sum_decimal_values_for_snapshot_interval"] = load_interval_sum(namespace)
         namespace["normalize_operation_currency"] = load_service_function(

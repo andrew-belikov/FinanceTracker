@@ -47,6 +47,9 @@ def load_symbols():
     shared_namespace = {
         "os": os,
         "TZ": ZoneInfo("Europe/Moscow"),
+        "utc_naive_to_local_date": lambda value, zone: (
+            value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value
+        ).astimezone(zone).date(),
     }
     exec("from datetime import date, datetime, timezone\n", shared_namespace)
     shared_namespace["text"] = lambda sql: sql

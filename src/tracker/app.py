@@ -56,6 +56,7 @@ from sqlalchemy.orm import declarative_base, sessionmaker, relationship
 # Import unified JSON logging setup
 from common.logging_setup import configure_logging, get_logger
 from common.readiness_state import clear_ready_state, write_ready_state
+from common.time_utils import utc_naive_to_local_date
 from income_events import compute_income_net_amount, compute_income_net_yield_pct
 
 # Configure logging once at import
@@ -132,8 +133,9 @@ TINKOFF_ACCOUNT_ID = os.getenv("TINKOFF_ACCOUNT_ID", "")
 SNAPSHOT_HOUR = int(os.getenv("SNAPSHOT_HOUR", "23"))   # раньше было 23:30 по Москве
 SNAPSHOT_MINUTE = int(os.getenv("SNAPSHOT_MINUTE", "30"))
 SCHED_TZ = os.getenv("SCHED_TZ", "Europe/Moscow")
+TIMEZONE_NAME = os.getenv("TIMEZONE", SCHED_TZ).strip() or SCHED_TZ
 try:
-    LOCAL_TZ = ZoneInfo(SCHED_TZ)
+    LOCAL_TZ = ZoneInfo(TIMEZONE_NAME)
 except Exception:
     # Если в образе нет tzdata, ZoneInfo может не найти базу таймзон.
     # В таком случае не падаем, а работаем в UTC.
@@ -322,7 +324,8 @@ class IncomeEvent(Base):
             "figi",
             "event_date",
             "event_type",
-            name="uq_income_events_account_figi_date_type",
+            "currency",
+            name="uq_income_events_account_figi_date_type_currency",
         ),
     )
 
@@ -331,6 +334,7 @@ class IncomeEvent(Base):
     figi = Column(String, nullable=False)
     event_date = Column(Date, nullable=False)
     event_type = Column(String, nullable=False)
+    currency = Column(String, nullable=False)
     gross_amount = Column(Numeric(18, 2), nullable=False)
     tax_amount = Column(Numeric(18, 2), nullable=False)
     net_amount = Column(Numeric(18, 2), nullable=False)
@@ -1370,15 +1374,17 @@ def choose_account(accounts_data: dict) -> dict:
     if not accounts:
         raise RuntimeError("No accounts returned from API")
 
-    if TINKOFF_ACCOUNT_ID:
+    configured_account_id = (TINKOFF_ACCOUNT_ID or "").strip()
+    if configured_account_id and configured_account_id.lower() != "auto":
         for acc in accounts:
-            if str(acc.get("id")) == str(TINKOFF_ACCOUNT_ID):
+            if str(acc.get("id")) == configured_account_id:
                 return acc
+        raise RuntimeError("Configured TINKOFF_ACCOUNT_ID was not found")
 
     open_accounts = [a for a in accounts if a.get("status") == "ACCOUNT_STATUS_OPEN"]
-    if open_accounts:
+    if len(open_accounts) == 1:
         return open_accounts[0]
-    return accounts[0]
+    raise RuntimeError("Automatic account selection requires exactly one open account")
 
 
 def ensure_instrument(db, figi: str, instr_data: Optional[dict]) -> Instrument:
@@ -1411,14 +1417,25 @@ def compute_expected_yield_pct(
     return expected_yield / invested * 100.0
 
 
-def get_latest_cost_basis(db, account_id: str, figi: str) -> Optional[float]:
-    row = (
+def get_latest_cost_basis(
+    db,
+    account_id: str,
+    figi: str,
+    *,
+    as_of_date: Optional[date] = None,
+) -> Optional[float]:
+    query = (
         db.query(PortfolioPosition.position_value, PortfolioPosition.expected_yield)
         .join(PortfolioSnapshot, PortfolioSnapshot.id == PortfolioPosition.snapshot_id)
         .filter(
             PortfolioSnapshot.account_id == account_id,
             PortfolioPosition.figi == figi,
         )
+    )
+    if as_of_date is not None:
+        query = query.filter(PortfolioSnapshot.snapshot_date <= as_of_date)
+    row = (
+        query
         .order_by(PortfolioSnapshot.snapshot_date.desc(), PortfolioSnapshot.snapshot_at.desc())
         .first()
     )
@@ -1607,9 +1624,11 @@ def _upsert_operation(db, acc_id: str, op: dict) -> tuple[Optional[Operation], b
     op_type = get_json_value(op, "type") or get_json_value(op, "operation_type") or "OPERATION_TYPE_UNSPECIFIED"
     payment = get_json_value(op, "payment")
     payment_value = money_to_float(payment) or 0.0
-    payment_currency = ((payment or {}).get("currency") or PORTFOLIO_CURRENCY).upper()
+    payment_currency = ((payment or {}).get("currency") or "UNKNOWN").strip().upper()
 
-    op_dt_raw = parse_iso_dt(get_json_value(op, "date")) or datetime.now(timezone.utc)
+    op_dt_raw = parse_iso_dt(get_json_value(op, "date"))
+    if op_dt_raw is None:
+        raise ValueError("Operation timestamp is missing or malformed")
     if op_dt_raw.tzinfo is None:
         op_dt = op_dt_raw.replace(tzinfo=timezone.utc).replace(tzinfo=None)
     else:
@@ -1660,7 +1679,14 @@ def _upsert_operation(db, acc_id: str, op: dict) -> tuple[Optional[Operation], b
         seen_at=values["date"],
     )
 
-    existing = db.query(Operation).filter(Operation.operation_id == op_id).one_or_none()
+    existing = (
+        db.query(Operation)
+        .filter(
+            Operation.account_id == acc_id,
+            Operation.operation_id == op_id,
+        )
+        .one_or_none()
+    )
     if existing is None:
         operation = Operation(**values)
         db.add(operation)
@@ -1676,7 +1702,7 @@ def _sync_operations(
     account_id: str,
     from_date: Optional[str],
     *,
-    affected_income_keys: Optional[set[tuple[str, date, str]]] = None,
+    affected_income_keys: Optional[set[tuple[str, date, str, str]]] = None,
 ) -> dict:
     """Синхронизирует операции счёта через GetOperationsByCursor и upsert в БД."""
     count_new = 0
@@ -1698,10 +1724,19 @@ def _sync_operations(
                 affected_income_keys is not None
                 and operation.figi
                 and operation.operation_type in INCOME_OPERATION_TYPE_MAP
+                and operation.state in {
+                    EXECUTED_OPERATION_STATE,
+                    CANCELED_OPERATION_STATE,
+                }
             ):
                 event_type, _ = INCOME_OPERATION_TYPE_MAP[operation.operation_type]
                 affected_income_keys.add(
-                    (operation.figi, operation.date.date(), event_type)
+                    (
+                        operation.figi,
+                        utc_naive_to_local_date(operation.date, LOCAL_TZ),
+                        event_type,
+                        (operation.currency or "UNKNOWN").upper(),
+                    )
                 )
 
         logger.info(
@@ -1736,12 +1771,13 @@ INCOME_OPERATION_TYPE_MAP = {
     "OPERATION_TYPE_DIVIDEND_TAX_PROGRESSIVE": ("dividend", "tax"),
 }
 EXECUTED_OPERATION_STATE = "OPERATION_STATE_EXECUTED"
+CANCELED_OPERATION_STATE = "OPERATION_STATE_CANCELED"
 
 
 def _reconcile_income_events(
     db,
     account_id: str,
-    affected_keys: set[tuple[str, date, str]],
+    affected_keys: set[tuple[str, date, str, str]],
 ) -> dict:
     """
     Пересчитывает затронутые доходные события по полной локальной истории.
@@ -1750,9 +1786,9 @@ def _reconcile_income_events(
     API-окно может содержать налог, но не исходную выплату.
     """
     if not affected_keys:
-        return {"income_created": 0, "income_updated": 0}
+        return {"income_created": 0, "income_updated": 0, "income_deactivated": 0}
 
-    income_by_key: dict[tuple[str, date, str], dict[str, float]] = {}
+    income_by_key: dict[tuple[str, date, str, str], dict[str, float]] = {}
 
     rows = (
         db.query(Operation)
@@ -1767,7 +1803,13 @@ def _reconcile_income_events(
         if not row.figi:
             continue
         event_type, amount_kind = INCOME_OPERATION_TYPE_MAP[row.operation_type]
-        key = (row.figi, row.date.date(), event_type)
+        currency = (row.currency or "UNKNOWN").upper()
+        key = (
+            row.figi,
+            utc_naive_to_local_date(row.date, LOCAL_TZ),
+            event_type,
+            currency,
+        )
         if key not in affected_keys:
             continue
         if key not in income_by_key:
@@ -1780,20 +1822,26 @@ def _reconcile_income_events(
         .all()
     )
     existing_by_key = {
-        (row.figi, row.event_date, row.event_type): row
+        (row.figi, row.event_date, row.event_type, row.currency): row
         for row in existing_events
-        if (row.figi, row.event_date, row.event_type) in affected_keys
+        if (row.figi, row.event_date, row.event_type, row.currency) in affected_keys
     }
 
-    cost_basis_by_figi: dict[str, Optional[float]] = {}
+    cost_basis_by_event: dict[tuple[str, date], Optional[float]] = {}
     created = 0
     updated = 0
+    deactivated = 0
 
-    for (figi, event_date, event_type), amounts in income_by_key.items():
+    for (figi, event_date, event_type, currency), amounts in income_by_key.items():
         gross_sum = amounts["gross"]
         tax_sum = amounts["tax"]
         net_amount = compute_income_net_amount(gross_sum, tax_sum)
+        key = (figi, event_date, event_type, currency)
+        existing = existing_by_key.get(key)
         if net_amount <= 0:
+            if existing is not None:
+                db.delete(existing)
+                deactivated += 1
             continue
 
         expected_amounts = {
@@ -1801,14 +1849,18 @@ def _reconcile_income_events(
             "tax_amount": round(tax_sum, 2),
             "net_amount": round(net_amount, 2),
         }
-        key = (figi, event_date, event_type)
-        existing = existing_by_key.get(key)
         if existing is None:
-            if figi not in cost_basis_by_figi:
-                cost_basis_by_figi[figi] = get_latest_cost_basis(db, account_id, figi)
+            cost_key = (figi, event_date)
+            if cost_key not in cost_basis_by_event:
+                cost_basis_by_event[cost_key] = get_latest_cost_basis(
+                    db,
+                    account_id,
+                    figi,
+                    as_of_date=event_date,
+                )
             net_yield_pct = compute_income_net_yield_pct(
                 net_amount,
-                cost_basis_by_figi[figi],
+                cost_basis_by_event[cost_key],
             )
             db.add(
                 IncomeEvent(
@@ -1816,6 +1868,7 @@ def _reconcile_income_events(
                     figi=figi,
                     event_date=event_date,
                     event_type=event_type,
+                    currency=currency,
                     notified=False,
                     net_yield_pct=round(net_yield_pct, 4),
                     **expected_amounts,
@@ -1829,11 +1882,17 @@ def _reconcile_income_events(
             for field, value in expected_amounts.items()
         )
         if amounts_changed:
-            if figi not in cost_basis_by_figi:
-                cost_basis_by_figi[figi] = get_latest_cost_basis(db, account_id, figi)
+            cost_key = (figi, event_date)
+            if cost_key not in cost_basis_by_event:
+                cost_basis_by_event[cost_key] = get_latest_cost_basis(
+                    db,
+                    account_id,
+                    figi,
+                    as_of_date=event_date,
+                )
             net_yield_pct = compute_income_net_yield_pct(
                 net_amount,
-                cost_basis_by_figi[figi],
+                cost_basis_by_event[cost_key],
             )
             for field, value in expected_amounts.items():
                 setattr(existing, field, value)
@@ -1842,9 +1901,16 @@ def _reconcile_income_events(
             # сразу увидят исправленные суммы после commit.
             updated += 1
 
+    for key in affected_keys - set(income_by_key):
+        existing = existing_by_key.get(key)
+        if existing is not None:
+            db.delete(existing)
+            deactivated += 1
+
     return {
         "income_created": created,
         "income_updated": updated,
+        "income_deactivated": deactivated,
     }
 
 
@@ -1883,7 +1949,7 @@ def sync_operations_for_account(db, acc_data: dict):
             {"account_id": acc_id, "from": from_iso},
         )
 
-    affected_income_keys: set[tuple[str, date, str]] = set()
+    affected_income_keys: set[tuple[str, date, str, str]] = set()
     stats = _sync_operations(
         db,
         acc_id,

@@ -5,7 +5,7 @@ import hashlib
 import os
 from pathlib import Path
 
-from sqlalchemy import text
+from sqlalchemy import inspect, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import ArgumentError
 
@@ -121,6 +121,36 @@ def _validate_applied_checksums(
             )
 
 
+def _run_check_only(connection, Base, migrations: list[Path]) -> int:
+    ledger_exists = connection.execute(
+        text("SELECT to_regclass('public.schema_migrations')")
+    ).scalar_one_or_none()
+    if ledger_exists is None:
+        raise MigrationError("Migration ledger is missing")
+
+    missing_tables = sorted(
+        table.name
+        for table in Base.metadata.sorted_tables
+        if not inspect(connection).has_table(table.name)
+    )
+    if missing_tables:
+        raise MigrationError("Required tables are missing: " + ", ".join(missing_tables))
+
+    applied = _load_applied_migrations(connection)
+    _validate_applied_checksums(migrations, applied)
+    pending = [path for path in migrations if path.name not in applied]
+    if pending:
+        raise MigrationError(
+            "Pending migrations: " + ", ".join(path.name for path in pending)
+        )
+    logger.info(
+        "database_migrations_verified",
+        "Database migrations are up to date.",
+        {"applied_total": len(applied)},
+    )
+    return 0
+
+
 def run_migrations(*, check_only: bool = False) -> int:
     validate_database_credentials()
     Base, engine = _load_database_runtime()
@@ -128,6 +158,9 @@ def run_migrations(*, check_only: bool = False) -> int:
 
     applied_count = 0
     with engine.connect() as connection:
+        if check_only:
+            return _run_check_only(connection, Base, migrations)
+
         connection.execute(text(SCHEMA_MIGRATIONS_DDL))
         connection.commit()
         connection.execute(
@@ -141,18 +174,6 @@ def run_migrations(*, check_only: bool = False) -> int:
             applied = _load_applied_migrations(connection)
             _validate_applied_checksums(migrations, applied)
             pending = [path for path in migrations if path.name not in applied]
-
-            if check_only:
-                if pending:
-                    raise MigrationError(
-                        "Pending migrations: " + ", ".join(path.name for path in pending)
-                    )
-                logger.info(
-                    "database_migrations_verified",
-                    "Database migrations are up to date.",
-                    {"applied_total": len(applied)},
-                )
-                return 0
 
             for path in pending:
                 checksum = migration_checksum(path)
