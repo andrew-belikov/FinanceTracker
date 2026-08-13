@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
+from typing import TypedDict
 
 from sqlalchemy import bindparam, text
 from sqlalchemy.exc import ProgrammingError
@@ -18,6 +19,23 @@ from runtime import (
     decimal_to_str,
     normalize_decimal,
 )
+
+
+class IncomeNotificationRow(TypedDict):
+    id: int
+    figi: str
+    event_type: str
+    net_amount: Decimal
+    net_yield_pct: Decimal
+    coupon_period_days: int | None
+    instrument_name: str
+
+
+class InvestNotificationRow(TypedDict):
+    operation_id: str
+    date: datetime
+    amount: Decimal
+    cashflow_category: str | None
 
 
 def normalize_reporting_account_id(raw_value: str | None) -> str | None:
@@ -1915,7 +1933,10 @@ def bootstrap_invest_notifications(session, account_id: str) -> bool:
     return True
 
 
-def get_pending_invest_notifications(session, account_id: str) -> list[dict] | None:
+def get_pending_invest_notifications(
+    session,
+    account_id: str,
+) -> list[InvestNotificationRow] | None:
     bootstrapped = bootstrap_invest_notifications(session, account_id)
     if not bootstrapped:
         return None
@@ -2073,9 +2094,13 @@ def claim_daily_job_run(
     *,
     job_name: str,
     run_date: date,
+    attempt_id: str,
+    now_utc: datetime | None = None,
+    lease_timeout: timedelta = timedelta(minutes=15),
 ) -> bool | None:
     try:
-        created_at = datetime.now(timezone.utc).replace(tzinfo=None)
+        claimed_at = now_utc or datetime.now(timezone.utc).replace(tzinfo=None)
+        stale_before = claimed_at - lease_timeout
         result = session.execute(
             text(
                 """
@@ -2083,31 +2108,48 @@ def claim_daily_job_run(
                     job_name,
                     run_date,
                     status,
+                    attempt_id,
+                    claimed_at,
+                    heartbeat_at,
                     created_at
                 )
                 VALUES (
                     :job_name,
                     :run_date,
                     :status,
-                    :created_at
+                    :attempt_id,
+                    :claimed_at,
+                    :claimed_at,
+                    :claimed_at
                 )
-                ON CONFLICT (job_name, run_date) DO NOTHING
+                ON CONFLICT (job_name, run_date) DO UPDATE
+                SET status = 'started',
+                    attempt_id = EXCLUDED.attempt_id,
+                    claimed_at = EXCLUDED.claimed_at,
+                    heartbeat_at = EXCLUDED.heartbeat_at,
+                    completed_at = NULL
+                WHERE bot_daily_job_runs.status <> 'completed'
+                  AND bot_daily_job_runs.heartbeat_at < :stale_before
+                RETURNING attempt_id
                 """
             ),
             {
                 "job_name": job_name,
                 "run_date": run_date,
                 "status": "started",
-                "created_at": created_at,
+                "attempt_id": attempt_id,
+                "claimed_at": claimed_at,
+                "stale_before": stale_before,
             },
         )
+        claimed = result.mappings().first()
         session.commit()
     except Exception as exc:
         session.rollback()
         if _is_undefined_table_error(exc, "bot_daily_job_runs"):
             return None
         raise
-    return bool(result.rowcount)
+    return claimed is not None
 
 
 def complete_daily_job_run(
@@ -2115,6 +2157,7 @@ def complete_daily_job_run(
     *,
     job_name: str,
     run_date: date,
+    attempt_id: str,
     sent_total: int,
     failed_total: int,
 ) -> bool | None:
@@ -2130,15 +2173,54 @@ def complete_daily_job_run(
                     failed_total = :failed_total
                 WHERE job_name = :job_name
                   AND run_date = :run_date
+                  AND attempt_id = :attempt_id
+                  AND status = 'started'
                 """
             ),
             {
                 "job_name": job_name,
                 "run_date": run_date,
+                "attempt_id": attempt_id,
                 "status": "completed",
                 "completed_at": completed_at,
                 "sent_total": sent_total,
                 "failed_total": failed_total,
+            },
+        )
+        session.commit()
+    except Exception as exc:
+        session.rollback()
+        if _is_undefined_table_error(exc, "bot_daily_job_runs"):
+            return None
+        raise
+    return bool(result.rowcount)
+
+
+def heartbeat_daily_job_run(
+    session,
+    *,
+    job_name: str,
+    run_date: date,
+    attempt_id: str,
+) -> bool | None:
+    try:
+        heartbeat_at = datetime.now(timezone.utc).replace(tzinfo=None)
+        result = session.execute(
+            text(
+                """
+                UPDATE bot_daily_job_runs
+                SET heartbeat_at = :heartbeat_at
+                WHERE job_name = :job_name
+                  AND run_date = :run_date
+                  AND attempt_id = :attempt_id
+                  AND status = 'started'
+                """
+            ),
+            {
+                "job_name": job_name,
+                "run_date": run_date,
+                "attempt_id": attempt_id,
+                "heartbeat_at": heartbeat_at,
             },
         )
         session.commit()
@@ -2155,6 +2237,7 @@ def release_daily_job_run(
     *,
     job_name: str,
     run_date: date,
+    attempt_id: str,
 ) -> bool | None:
     try:
         result = session.execute(
@@ -2163,12 +2246,15 @@ def release_daily_job_run(
                 DELETE FROM bot_daily_job_runs
                 WHERE job_name = :job_name
                   AND run_date = :run_date
+                  AND attempt_id = :attempt_id
+                  AND status = 'started'
                   AND completed_at IS NULL
                 """
             ),
             {
                 "job_name": job_name,
                 "run_date": run_date,
+                "attempt_id": attempt_id,
             },
         )
         session.commit()
@@ -2180,7 +2266,285 @@ def release_daily_job_run(
     return bool(result.rowcount)
 
 
-def get_unnotified_income_events(session, account_id: str) -> list[dict]:
+def claim_notification_delivery(
+    session,
+    *,
+    notification_kind: str,
+    notification_key: str,
+    chat_id: int,
+    message_type: str,
+    attempt_id: str,
+    now_utc: datetime | None = None,
+    lease_timeout: timedelta = timedelta(minutes=15),
+    reclaim_stale: bool = True,
+) -> bool | None:
+    try:
+        claimed_at = now_utc or datetime.now(timezone.utc).replace(tzinfo=None)
+        stale_before = claimed_at - lease_timeout
+        result = session.execute(
+            text(
+                """
+                INSERT INTO bot_notification_deliveries (
+                    notification_kind,
+                    notification_key,
+                    chat_id,
+                    message_type,
+                    status,
+                    attempt_id,
+                    claimed_at,
+                    created_at,
+                    updated_at
+                )
+                VALUES (
+                    :notification_kind,
+                    :notification_key,
+                    :chat_id,
+                    :message_type,
+                    'started',
+                    :attempt_id,
+                    :claimed_at,
+                    :claimed_at,
+                    :claimed_at
+                )
+                ON CONFLICT (notification_kind, notification_key, chat_id, message_type)
+                DO UPDATE
+                SET status = 'started',
+                    attempt_id = EXCLUDED.attempt_id,
+                    claimed_at = EXCLUDED.claimed_at,
+                    delivered_at = NULL,
+                    updated_at = EXCLUDED.updated_at
+                WHERE :reclaim_stale
+                  AND bot_notification_deliveries.status = 'started'
+                  AND bot_notification_deliveries.claimed_at < :stale_before
+                RETURNING attempt_id
+                """
+            ),
+            {
+                "notification_kind": notification_kind,
+                "notification_key": notification_key,
+                "chat_id": chat_id,
+                "message_type": message_type,
+                "attempt_id": attempt_id,
+                "claimed_at": claimed_at,
+                "stale_before": stale_before,
+                "reclaim_stale": reclaim_stale,
+            },
+        )
+        claimed = result.mappings().first()
+        session.commit()
+    except Exception as exc:
+        session.rollback()
+        if _is_undefined_table_error(exc, "bot_notification_deliveries"):
+            return None
+        raise
+    return claimed is not None
+
+
+def complete_notification_delivery(
+    session,
+    *,
+    notification_kind: str,
+    notification_key: str,
+    chat_id: int,
+    message_type: str,
+    attempt_id: str,
+) -> bool | None:
+    try:
+        delivered_at = datetime.now(timezone.utc).replace(tzinfo=None)
+        result = session.execute(
+            text(
+                """
+                UPDATE bot_notification_deliveries
+                SET status = 'sent',
+                    delivered_at = :delivered_at,
+                    updated_at = :delivered_at
+                WHERE notification_kind = :notification_kind
+                  AND notification_key = :notification_key
+                  AND chat_id = :chat_id
+                  AND message_type = :message_type
+                  AND attempt_id = :attempt_id
+                  AND status = 'started'
+                """
+            ),
+            {
+                "notification_kind": notification_kind,
+                "notification_key": notification_key,
+                "chat_id": chat_id,
+                "message_type": message_type,
+                "attempt_id": attempt_id,
+                "delivered_at": delivered_at,
+            },
+        )
+        session.commit()
+    except Exception as exc:
+        session.rollback()
+        if _is_undefined_table_error(exc, "bot_notification_deliveries"):
+            return None
+        raise
+    return bool(result.rowcount)
+
+
+def release_notification_delivery(
+    session,
+    *,
+    notification_kind: str,
+    notification_key: str,
+    chat_id: int,
+    message_type: str,
+    attempt_id: str,
+) -> bool | None:
+    try:
+        result = session.execute(
+            text(
+                """
+                DELETE FROM bot_notification_deliveries
+                WHERE notification_kind = :notification_kind
+                  AND notification_key = :notification_key
+                  AND chat_id = :chat_id
+                  AND message_type = :message_type
+                  AND attempt_id = :attempt_id
+                  AND status = 'started'
+                """
+            ),
+            {
+                "notification_kind": notification_kind,
+                "notification_key": notification_key,
+                "chat_id": chat_id,
+                "message_type": message_type,
+                "attempt_id": attempt_id,
+            },
+        )
+        session.commit()
+    except Exception as exc:
+        session.rollback()
+        if _is_undefined_table_error(exc, "bot_notification_deliveries"):
+            return None
+        raise
+    return bool(result.rowcount)
+
+
+def mark_notification_delivery_uncertain(
+    session,
+    *,
+    notification_kind: str,
+    notification_key: str,
+    chat_id: int,
+    message_type: str,
+    attempt_id: str,
+) -> bool | None:
+    try:
+        updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
+        result = session.execute(
+            text(
+                """
+                UPDATE bot_notification_deliveries
+                SET status = 'uncertain',
+                    updated_at = :updated_at
+                WHERE notification_kind = :notification_kind
+                  AND notification_key = :notification_key
+                  AND chat_id = :chat_id
+                  AND message_type = :message_type
+                  AND attempt_id = :attempt_id
+                  AND status = 'started'
+                """
+            ),
+            {
+                "notification_kind": notification_kind,
+                "notification_key": notification_key,
+                "chat_id": chat_id,
+                "message_type": message_type,
+                "attempt_id": attempt_id,
+                "updated_at": updated_at,
+            },
+        )
+        session.commit()
+    except Exception as exc:
+        session.rollback()
+        if _is_undefined_table_error(exc, "bot_notification_deliveries"):
+            return None
+        raise
+    return bool(result.rowcount)
+
+
+def notification_deliveries_complete(
+    session,
+    *,
+    notification_kind: str,
+    notification_key: str,
+    chat_ids: set[int],
+    message_types: set[str],
+) -> bool | None:
+    if not chat_ids or not message_types:
+        return True
+    try:
+        sent_count = session.execute(
+            text(
+                """
+                SELECT COUNT(*)
+                FROM bot_notification_deliveries
+                WHERE notification_kind = :notification_kind
+                  AND notification_key = :notification_key
+                  AND chat_id IN :chat_ids
+                  AND message_type IN :message_types
+                  AND status = 'sent'
+                """
+            ).bindparams(
+                bindparam("chat_ids", expanding=True),
+                bindparam("message_types", expanding=True),
+            ),
+            {
+                "notification_kind": notification_kind,
+                "notification_key": notification_key,
+                "chat_ids": tuple(chat_ids),
+                "message_types": tuple(message_types),
+            },
+        ).scalar_one()
+    except Exception as exc:
+        if _is_undefined_table_error(exc, "bot_notification_deliveries"):
+            session.rollback()
+            return None
+        raise
+    return int(sent_count) == len(chat_ids) * len(message_types)
+
+
+def get_notification_delivery_status(
+    session,
+    *,
+    notification_kind: str,
+    notification_key: str,
+    chat_id: int,
+    message_type: str,
+) -> str | None:
+    try:
+        return session.execute(
+            text(
+                """
+                SELECT status
+                FROM bot_notification_deliveries
+                WHERE notification_kind = :notification_kind
+                  AND notification_key = :notification_key
+                  AND chat_id = :chat_id
+                  AND message_type = :message_type
+                """
+            ),
+            {
+                "notification_kind": notification_kind,
+                "notification_key": notification_key,
+                "chat_id": chat_id,
+                "message_type": message_type,
+            },
+        ).scalar_one_or_none()
+    except Exception as exc:
+        if _is_undefined_table_error(exc, "bot_notification_deliveries"):
+            session.rollback()
+            return None
+        raise
+
+
+def get_unnotified_income_events(
+    session,
+    account_id: str,
+) -> list[IncomeNotificationRow]:
     try:
         return (
             session.execute(

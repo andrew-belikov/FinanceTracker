@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from telegram import InputFile, Update
+from telegram.error import BadRequest
 
 from common.logging_setup import configure_logging, get_logger
 
@@ -399,8 +400,19 @@ async def safe_send_message(
             "Telegram message sent.",
             {"parse_mode": parse_mode},
         )
-    except Exception:
-        # Иногда ломается Markdown из-за динамических значений (тикеры с _ и т.п.)
+    except BadRequest as exc:
+        error_text = str(exc).lower()
+        is_parse_error = any(
+            marker in error_text
+            for marker in (
+                "can't parse entities",
+                "can't find end of the entity",
+                "unsupported start tag",
+            )
+        )
+        if not parse_mode or not is_parse_error:
+            raise
+        # Динамические значения могут ломать только форматирование Markdown.
         logger.exception(
             "bot_send_message_markdown_failed",
             "Telegram message send with parse_mode failed; retrying without parse mode.",
