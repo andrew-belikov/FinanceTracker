@@ -74,6 +74,8 @@ class LoggingPrivacyContractTests(unittest.TestCase):
                 {
                     "status": "completed",
                     "processed_count": 3,
+                    "income_events_count": 4,
+                    "deposit_count": 1,
                     "sent_total": 2,
                     "rows": [
                         {
@@ -112,7 +114,76 @@ class LoggingPrivacyContractTests(unittest.TestCase):
         payload = json.loads(rendered)
         self.assertEqual(payload["ctx"]["status"], "completed")
         self.assertEqual(payload["ctx"]["processed_count"], 3)
+        self.assertEqual(payload["ctx"]["income_events_count"], 4)
+        self.assertEqual(payload["ctx"]["deposit_count"], 1)
         self.assertEqual(payload["ctx"]["sent_total"], 2)
+
+    def test_counter_contract_rejects_deceptive_names_types_and_bounds(self):
+        raw_logger = logging.getLogger("tests.logging_privacy.counter_contract")
+        stream = io.StringIO()
+        handler = logging.StreamHandler(stream)
+        handler.setFormatter(_JsonLineFormatter())
+        previous = (list(raw_logger.handlers), raw_logger.level, raw_logger.propagate)
+        raw_logger.handlers = [handler]
+        raw_logger.setLevel(logging.INFO)
+        raw_logger.propagate = False
+        try:
+            StructuredLogger(raw_logger).info(
+                "counter_privacy_probe",
+                "Safe counter summary.",
+                {
+                    "count": 2,
+                    "rows_count": 3,
+                    "income_events_count": 4,
+                    "deposit_count": 5,
+                    "sent_total": 6,
+                    "failed_total": 0,
+                    "deposit_total": 700001,
+                    "income_total": 700002,
+                    "tax_total": 700003,
+                    "amount_total": 700004,
+                    "portfolio_value_total": 700005,
+                    "string_count": "700006",
+                    "float_count": 700007.0,
+                    "boolean_count": True,
+                    "negative_count": -1,
+                    "oversized_count": 1_000_000_001,
+                    "account_id_count": 700008,
+                    "token_count": 700009,
+                    "total": 700010,
+                    "unknown_total": 700008,
+                },
+            )
+        finally:
+            raw_logger.handlers, raw_logger.level, raw_logger.propagate = previous
+
+        ctx = json.loads(stream.getvalue())["ctx"]
+        for key, expected in {
+            "count": 2,
+            "rows_count": 3,
+            "income_events_count": 4,
+            "deposit_count": 5,
+            "sent_total": 6,
+            "failed_total": 0,
+        }.items():
+            self.assertEqual(ctx[key], expected)
+        for key in (
+            "deposit_total",
+            "income_total",
+            "tax_total",
+            "amount_total",
+            "portfolio_value_total",
+            "string_count",
+            "float_count",
+            "boolean_count",
+            "negative_count",
+            "oversized_count",
+            "account_id_count",
+            "token_count",
+            "total",
+            "unknown_total",
+        ):
+            self.assertEqual(ctx[key], "***REDACTED***")
 
 
 if __name__ == "__main__":

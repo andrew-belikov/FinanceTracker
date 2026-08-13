@@ -82,6 +82,35 @@ _FINANCIAL_KEY_MARKERS = (
     "yield",
 )
 
+_SAFE_STRUCTURAL_TOTAL_KEYS = frozenset(
+    {
+        "applied_total",
+        "daily_failed_total",
+        "daily_sent_total",
+        "failed_total",
+        "loaded_total",
+        "month_failed_total",
+        "month_sent_total",
+        "sent_total",
+    }
+)
+_COUNTER_KEY_FORBIDDEN_MARKERS = (
+    "account_id",
+    "authorization",
+    "chat_id",
+    "dsn",
+    "figi",
+    "identifier",
+    "operation_id",
+    "password",
+    "payload",
+    "raw",
+    "secret",
+    "token",
+    "user_id",
+)
+_MAX_SAFE_STRUCTURAL_COUNT = 1_000_000_000
+
 # Bearer <token>
 _RE_BEARER = _re.compile(r"(Bearer)\s+[A-Za-z0-9\-\._~\+\/]+=*", _re.IGNORECASE)
 
@@ -117,11 +146,33 @@ def _sanitize_string(s: str) -> str:
     return s
 
 
-def _is_sensitive_key(key: str) -> bool:
+def _is_bounded_structural_count(value: Any) -> bool:
+    return (
+        type(value) is int
+        and 0 <= value <= _MAX_SAFE_STRUCTURAL_COUNT
+    )
+
+
+def _is_safe_structural_counter(key: str, value: Any) -> bool:
+    normalized = key.strip().lower()
+    if not _is_bounded_structural_count(value):
+        return False
+    if normalized in _SAFE_STRUCTURAL_TOTAL_KEYS:
+        return True
+    if normalized != "count" and not normalized.endswith("_count"):
+        return False
+    return not any(marker in normalized for marker in _COUNTER_KEY_FORBIDDEN_MARKERS)
+
+
+def _is_sensitive_key(key: str, value: Any) -> bool:
     normalized = key.strip().lower()
     if normalized in _SENSITIVE_KEYS:
         return True
     if normalized.endswith("_id") and normalized not in _CORRELATION_FIELDS:
+        return True
+    if _is_safe_structural_counter(normalized, value):
+        return False
+    if normalized in {"count", "total"} or normalized.endswith(("_count", "_total")):
         return True
     return any(marker in normalized for marker in _FINANCIAL_KEY_MARKERS)
 
@@ -146,7 +197,7 @@ def _sanitize(value: Any) -> Any:
         out: Dict[str, Any] = {}
         for k, v in value.items():
             ks = _safe_str(k)
-            if _is_sensitive_key(ks):
+            if _is_sensitive_key(ks, v):
                 out[ks] = _REDACTED
             else:
                 out[ks] = _sanitize(v)
