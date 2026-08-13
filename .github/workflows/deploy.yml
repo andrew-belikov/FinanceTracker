@@ -1,27 +1,20 @@
 name: Deploy FinanceTracker
 
 on:
-  push:
+  workflow_run:
+    workflows:
+      - CI
+    types:
+      - completed
     branches:
       - main
-  workflow_dispatch:
-    inputs:
-      mode:
-        description: Deployment mode
-        required: true
-        default: smoke
-        type: choice
-        options:
-          - smoke
-          - deploy
-      ref:
-        description: Git ref to deploy from canonical server checkout
-        required: true
-        default: main
-        type: string
+
+permissions:
+  contents: read
 
 jobs:
   deploy:
+    if: ${{ github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'main' }}
     concurrency:
       group: financetracker-deploy
       cancel-in-progress: false
@@ -35,64 +28,104 @@ jobs:
 
     env:
       PROJECT_DIR: /home/andrey/projects/FinanceTracker
-      DEPLOY_MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.mode || 'deploy' }}
-      DEPLOY_REF: ${{ github.event_name == 'workflow_dispatch' && inputs.ref || github.ref_name }}
+      DEPLOY_SHA: ${{ github.event.workflow_run.head_sha }}
+      CI_RUN_ID: ${{ github.event.workflow_run.id }}
+      COMPOSE_PROJECT_NAME: financetracker
 
     steps:
-      - name: Show runner context
+      - name: Verify successful CI identity
         run: |
-          whoami
-          hostname
-          pwd
+          test "${{ github.event.workflow_run.name }}" = "CI"
+          test "${{ github.event.workflow_run.conclusion }}" = "success"
+          test "${{ github.event.workflow_run.event }}" = "push"
+          test "${{ github.event.workflow_run.head_branch }}" = "main"
+          test -n "$CI_RUN_ID"
+          printf '%s' "$DEPLOY_SHA" | grep -Eq '^[0-9a-f]{40}$'
 
-      - name: Verify canonical project directory
+      - name: Create clean disposable exact-SHA checkout
         run: |
-          test -d "$PROJECT_DIR"
-          ls -la "$PROJECT_DIR"
+          test -d "$PROJECT_DIR/.git"
+          test -z "$(git -C "$PROJECT_DIR" status --porcelain --untracked-files=all)"
+          remote_url="$(git -C "$PROJECT_DIR" remote get-url origin)"
+          test -n "$remote_url"
+          deploy_dir="$(mktemp -d /tmp/financetracker-deploy.XXXXXXXX)"
+          git clone --no-hardlinks --no-checkout "$remote_url" "$deploy_dir"
+          git -C "$deploy_dir" fetch origin "$DEPLOY_SHA"
+          git -C "$deploy_dir" checkout --detach "$DEPLOY_SHA"
+          test "$(git -C "$deploy_dir" rev-parse HEAD)" = "$DEPLOY_SHA"
+          test -z "$(git -C "$deploy_dir" status --porcelain --untracked-files=all)"
+          printf 'DEPLOY_DIR=%s\n' "$deploy_dir" >> "$GITHUB_ENV"
+          printf 'APP_ENV_FILE=%s/.env\n' "$PROJECT_DIR" >> "$GITHUB_ENV"
 
-      - name: Show repository context
+      - name: Run exact-SHA pre-deploy checks
         run: |
-          cd "$PROJECT_DIR"
-          git remote -v
-          git branch --show-current
-          git status --short
-
-      - name: Update canonical checkout
-        run: |
-          cd "$PROJECT_DIR"
-          git fetch origin
-          git checkout "$DEPLOY_REF"
-          git pull --ff-only origin "$DEPLOY_REF"
-
-      - name: Run pre-deploy checks
-        run: |
-          cd "$PROJECT_DIR"
+          cd "$DEPLOY_DIR"
+          test "$(git rev-parse HEAD)" = "$DEPLOY_SHA"
+          test -z "$(git status --porcelain --untracked-files=all)"
           python3 -m compileall src
-          docker compose config > /dev/null
-          docker compose ps
+          docker compose config --quiet
 
       - name: Prepare optional integration network
-        if: ${{ env.DEPLOY_MODE == 'deploy' }}
         run: |
-          docker network inspect localllm_localllm > /dev/null 2>&1 \
+          docker network inspect localllm_localllm >/dev/null 2>&1 \
             || docker network create localllm_localllm
 
-      - name: Apply deploy
-        if: ${{ env.DEPLOY_MODE == 'deploy' }}
+      - name: Build exact-SHA images
+        env:
+          BOT_IMAGE: financetracker-bot:git-${{ github.event.workflow_run.head_sha }}
+          TRACKER_IMAGE: financetracker-tracker:git-${{ github.event.workflow_run.head_sha }}
+          REPORTER_IMAGE: financetracker-reporter:git-${{ github.event.workflow_run.head_sha }}
+          XRAY_CLIENT_IMAGE: financetracker-xray-client:git-${{ github.event.workflow_run.head_sha }}
         run: |
-          cd "$PROJECT_DIR"
-          docker compose up -d --build --force-recreate --remove-orphans \
-            --wait --wait-timeout 180
+          cd "$DEPLOY_DIR"
+          test "$(git rev-parse HEAD)" = "$DEPLOY_SHA"
+          test -z "$(git status --porcelain --untracked-files=all)"
+          docker compose build
+          for image in "$BOT_IMAGE" "$TRACKER_IMAGE" "$REPORTER_IMAGE" "$XRAY_CLIENT_IMAGE"; do
+            docker image inspect --format '{{.Id}}' "$image"
+          done
 
-      - name: Verify database migrations
-        if: ${{ env.DEPLOY_MODE == 'deploy' }}
+      - name: Apply exact-SHA deploy
+        env:
+          BOT_IMAGE: financetracker-bot:git-${{ github.event.workflow_run.head_sha }}
+          TRACKER_IMAGE: financetracker-tracker:git-${{ github.event.workflow_run.head_sha }}
+          REPORTER_IMAGE: financetracker-reporter:git-${{ github.event.workflow_run.head_sha }}
+          XRAY_CLIENT_IMAGE: financetracker-xray-client:git-${{ github.event.workflow_run.head_sha }}
         run: |
-          cd "$PROJECT_DIR"
+          cd "$DEPLOY_DIR"
+          docker compose up -d --no-build --force-recreate --remove-orphans --wait --wait-timeout 180
           docker compose run --rm migrate --check
 
-      - name: Show post-deploy status
-        if: ${{ env.DEPLOY_MODE == 'deploy' }}
+      - name: Record deployed source and image identity
+        env:
+          BOT_IMAGE: financetracker-bot:git-${{ github.event.workflow_run.head_sha }}
+          TRACKER_IMAGE: financetracker-tracker:git-${{ github.event.workflow_run.head_sha }}
+          REPORTER_IMAGE: financetracker-reporter:git-${{ github.event.workflow_run.head_sha }}
+          XRAY_CLIENT_IMAGE: financetracker-xray-client:git-${{ github.event.workflow_run.head_sha }}
         run: |
-          cd "$PROJECT_DIR"
-          docker compose ps --all
-          docker compose logs --tail=200 migrate bot tracker reporter
+          {
+            printf '## FinanceTracker deploy identity\n\n'
+            printf -- '- CI run: `%s`\n' "$CI_RUN_ID"
+            printf -- '- Source SHA: `%s`\n' "$DEPLOY_SHA"
+            for image in "$BOT_IMAGE" "$TRACKER_IMAGE" "$REPORTER_IMAGE" "$XRAY_CLIENT_IMAGE"; do
+              image_id="$(docker image inspect --format '{{.Id}}' "$image")"
+              printf -- '- Image `%s`: `%s`\n' "$image" "$image_id"
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Show post-deploy status
+        if: ${{ always() }}
+        run: |
+          if test -n "${DEPLOY_DIR:-}" && test -d "$DEPLOY_DIR"; then
+            cd "$DEPLOY_DIR"
+            docker compose ps --all
+          fi
+
+      - name: Remove disposable checkout
+        if: ${{ always() }}
+        run: |
+          case "${DEPLOY_DIR:-}" in
+            /tmp/financetracker-deploy.*) rm -rf -- "$DEPLOY_DIR" ;;
+            "") ;;
+            *) echo "refusing to remove unexpected deploy path" >&2; exit 1 ;;
+          esac

@@ -140,7 +140,14 @@ def main() -> int:
             )
             return 1
 
-    run_startup_smoke()
+    smoke_exit_code = run_startup_smoke()
+    if smoke_exit_code != 0:
+        logger.error(
+            "bot_startup_smoke_blocked_polling",
+            "Bot startup smoke failed; polling will not start.",
+            {"exit_code": smoke_exit_code},
+        )
+        return smoke_exit_code
     attempt = 1
     while True:
         logger.info(

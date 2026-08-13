@@ -4,16 +4,21 @@ on:
   push:
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   checks:
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
         with:
           python-version: "3.12"
           cache: pip
@@ -22,10 +27,8 @@ jobs:
             requirements/reporter.txt
             requirements/tracker.txt
 
-      - name: Install Python dependencies
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install -r requirements/bot.txt -r requirements/reporter.txt -r requirements/tracker.txt
+      - name: Install hash-locked Python dependencies
+        run: python -m pip install --require-hashes -r requirements/bot.txt -r requirements/reporter.txt -r requirements/tracker.txt
 
       - name: Prepare CI environment file
         run: cp .env.example .env
@@ -36,5 +39,11 @@ jobs:
       - name: Run unit tests
         run: python -m unittest discover -s tests -p "test_*.py"
 
+      - name: Run workflow contract checks
+        run: python -m unittest tests.test_workflow_contract tests.test_dependency_lock_contract tests.test_compose_healthchecks tests.test_proxy_smoke_contract
+
+      - name: Run secret scan
+        run: python scripts/secret_scan.py --history
+
       - name: Validate docker compose configuration
-        run: docker compose config > /dev/null
+        run: docker compose config --quiet
