@@ -20,8 +20,25 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("--require-hashes", CI_TEXT)
         self.assertIn("Run workflow contract checks", CI_TEXT)
         self.assertIn("Run secret scan", CI_TEXT)
-        self.assertIn("docker compose config --quiet", CI_TEXT)
+        self.assertIn('docker compose --env-file "$APP_ENV_FILE" config --quiet', CI_TEXT)
         self.assertNotIn("docker compose config >", CI_TEXT)
+
+    def test_every_workflow_compose_call_uses_explicit_app_env_file(self):
+        compose_lines = [
+            line.strip()
+            for line in (CI_TEXT + "\n" + DEPLOY_TEXT).splitlines()
+            if line.strip().startswith("docker compose ")
+            or re.match(r"^\s*run:\s*docker compose\s", line)
+        ]
+        self.assertTrue(compose_lines)
+        for line in compose_lines:
+            with self.subTest(line=line):
+                self.assertIn('--env-file "$APP_ENV_FILE"', line)
+
+        self.assertIn("Verify Compose env interpolation", CI_TEXT)
+        self.assertIn("scripts/verify_compose_env.py", CI_TEXT)
+        self.assertIn('test -f "$APP_ENV_FILE"', CI_TEXT + DEPLOY_TEXT)
+        self.assertNotIn("cat \"$APP_ENV_FILE\"", CI_TEXT + DEPLOY_TEXT)
 
     def test_deploy_requires_successful_ci_run_for_same_exact_sha(self):
         self.assertNotRegex(DEPLOY_TEXT, r"(?m)^\s*push:\s*$")
@@ -47,6 +64,22 @@ class WorkflowContractTests(unittest.TestCase):
         clean_check = 'git -C "$PROJECT_DIR" status --porcelain --untracked-files=all'
         self.assertIn(clean_check, DEPLOY_TEXT)
         self.assertLess(DEPLOY_TEXT.index(clean_check), DEPLOY_TEXT.index("mktemp -d"))
+
+    def test_deploy_compares_running_container_images_with_captured_build_ids(self):
+        for service in ("bot", "tracker", "reporter", "xray-client", "migrate"):
+            with self.subTest(service=service):
+                self.assertIn(f'verify_container_image "{service}"', DEPLOY_TEXT)
+        self.assertIn("EXPECTED_BOT_IMAGE_ID", DEPLOY_TEXT)
+        self.assertIn("EXPECTED_TRACKER_IMAGE_ID", DEPLOY_TEXT)
+        self.assertIn("EXPECTED_REPORTER_IMAGE_ID", DEPLOY_TEXT)
+        self.assertIn("EXPECTED_XRAY_CLIENT_IMAGE_ID", DEPLOY_TEXT)
+        self.assertIn("docker inspect --format '{{.Image}}'", DEPLOY_TEXT)
+        self.assertIn('export BOT_IMAGE="$EXPECTED_BOT_IMAGE_ID"', DEPLOY_TEXT)
+        self.assertIn('export TRACKER_IMAGE="$EXPECTED_TRACKER_IMAGE_ID"', DEPLOY_TEXT)
+        self.assertLess(
+            DEPLOY_TEXT.index("docker compose --env-file \"$APP_ENV_FILE\" up"),
+            DEPLOY_TEXT.index('verify_container_image "bot"'),
+        )
 
 
 if __name__ == "__main__":

@@ -55,6 +55,7 @@ from sqlalchemy.orm import declarative_base, sessionmaker, relationship
 
 # Import unified JSON logging setup
 from common.logging_setup import configure_logging, get_logger
+from common.readiness_state import clear_ready_state, write_ready_state
 from income_events import compute_income_net_amount, compute_income_net_yield_pct
 
 # Configure logging once at import
@@ -144,6 +145,10 @@ SNAPSHOT_INTERVAL_MINUTES = int(os.getenv("SNAPSHOT_INTERVAL_MINUTES", "5"))
 
 # interval | cron
 SNAPSHOT_MODE = os.getenv("SNAPSHOT_MODE", "interval").strip().lower()
+TRACKER_READY_FILE = os.getenv(
+    "TRACKER_READY_FILE",
+    "/tmp/financetracker-tracker.ready",
+).strip()
 
 APP_ENV = os.getenv("APP_ENV", "dev")
 ALLOW_INSECURE_TLS_FOR_TESTS = (
@@ -1900,7 +1905,15 @@ def sync_operations_for_account(db, acc_data: dict):
     )
 
 
-def run_snapshot_and_operations_once():
+def clear_tracker_ready_state() -> None:
+    clear_ready_state(TRACKER_READY_FILE)
+
+
+def write_tracker_ready_state() -> None:
+    write_ready_state(TRACKER_READY_FILE)
+
+
+def run_snapshot_and_operations_once() -> bool:
     accounts_data = api_get_accounts()
     acc = choose_account(accounts_data)
 
@@ -1919,6 +1932,8 @@ def run_snapshot_and_operations_once():
                 "operations_sync_failed",
                 "Operations sync failed; snapshot remains saved.",
             )
+            return False
+    return True
 
 
 def run_payout_calendar_sync_once():
@@ -1937,7 +1952,7 @@ def run_payout_calendar_sync_once():
     )
 
 
-def job_with_retry():
+def job_with_retry() -> bool:
     """
     Обёртка для планировщика:
     - одна попытка на запуск;
@@ -1946,10 +1961,18 @@ def job_with_retry():
     """
     try:
         logger.info("snapshot_job_started", "Snapshot job started.")
-        run_snapshot_and_operations_once()
+        if not run_snapshot_and_operations_once():
+            logger.error(
+                "snapshot_job_incomplete",
+                "Snapshot job did not complete all required synchronization steps.",
+            )
+            return False
+        write_tracker_ready_state()
         logger.info("snapshot_job_completed", "Snapshot job completed successfully.")
+        return True
     except Exception:
         logger.exception("snapshot_job_failed", "Snapshot job failed.")
+        return False
 
 
 def payout_calendar_job_with_retry():
@@ -1968,6 +1991,7 @@ def payout_calendar_job_with_retry():
 
 
 def main() -> int:
+    clear_tracker_ready_state()
     if not API_TOKEN:
         logger.error(
             "missing_api_token",
@@ -1987,7 +2011,8 @@ def main() -> int:
     init_db()
 
     # Разовый запуск при старте — перезаписываем текущий день
-    job_with_retry()
+    if not job_with_retry():
+        return 1
     payout_calendar_job_with_retry()
 
     # Планировщик: запускаем job_with_retry каждые SNAPSHOT_INTERVAL_MINUTES минут
@@ -2056,6 +2081,7 @@ def main() -> int:
         scheduler.start()
     except (KeyboardInterrupt, SystemExit):
         logger.info("service_stopped", "Service stopped.")
+    clear_tracker_ready_state()
     return 0
 
 

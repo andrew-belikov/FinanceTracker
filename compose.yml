@@ -83,6 +83,8 @@ services:
       DB_NAME: ${POSTGRES_DB}
       DB_USER: ${POSTGRES_USER}
       DB_PASSWORD: ${POSTGRES_PASSWORD}
+      TRACKER_READY_FILE: /tmp/financetracker-tracker.ready
+      TRACKER_READY_MAX_AGE_SECONDS: ${TRACKER_READY_MAX_AGE_SECONDS:-}
     volumes:
       - ./docker/certs:/opt/finance/certs:ro
     healthcheck:
@@ -122,6 +124,9 @@ services:
       BOT_PROXY_ENABLED: ${BOT_PROXY_ENABLED:-false}
       BOT_PROXY_ENDPOINT: socks5h://xray-client:1080
       BOT_PROXY_NO_PROXY: localhost,127.0.0.1,db,tracker,reporter,xray-client
+      BOT_READY_FILE: /tmp/financetracker-bot.ready
+      BOT_READY_MAX_AGE_SECONDS: ${BOT_READY_MAX_AGE_SECONDS:-120}
+      BOT_READY_HEARTBEAT_SECONDS: ${BOT_READY_HEARTBEAT_SECONDS:-30}
     healthcheck:
       test: ["CMD", "python", "-u", "bot_healthcheck.py"]
       interval: 15s

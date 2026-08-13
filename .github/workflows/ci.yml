@@ -10,6 +10,8 @@ permissions:
 jobs:
   checks:
     runs-on: ubuntu-latest
+    env:
+      APP_ENV_FILE: ${{ github.workspace }}/.env
 
     steps:
       - name: Checkout repository
@@ -31,7 +33,15 @@ jobs:
         run: python -m pip install --require-hashes -r requirements/bot.txt -r requirements/reporter.txt -r requirements/tracker.txt
 
       - name: Prepare CI environment file
-        run: cp .env.example .env
+        run: |
+          test -n "$APP_ENV_FILE"
+          test "$APP_ENV_FILE" = "$GITHUB_WORKSPACE/.env"
+          install -m 600 .env.example "$APP_ENV_FILE"
+          test -f "$APP_ENV_FILE"
+          test ! -L "$APP_ENV_FILE"
+          test -r "$APP_ENV_FILE"
+          test "$(stat -c '%a' "$APP_ENV_FILE")" = "600"
+          test "$(stat -c '%u' "$APP_ENV_FILE")" = "$(id -u)"
 
       - name: Run compileall
         run: python -m compileall src
@@ -40,10 +50,13 @@ jobs:
         run: python -m unittest discover -s tests -p "test_*.py"
 
       - name: Run workflow contract checks
-        run: python -m unittest tests.test_workflow_contract tests.test_dependency_lock_contract tests.test_compose_healthchecks tests.test_proxy_smoke_contract
+        run: python -m unittest tests.test_workflow_contract tests.test_dependency_lock_contract tests.test_compose_healthchecks tests.test_proxy_smoke_contract tests.test_workflow_readiness tests.test_compose_env_contract
+
+      - name: Verify Compose env interpolation
+        run: python scripts/verify_compose_env.py
 
       - name: Run secret scan
         run: python scripts/secret_scan.py --history
 
       - name: Validate docker compose configuration
-        run: docker compose config --quiet
+        run: docker compose --env-file "$APP_ENV_FILE" config --quiet

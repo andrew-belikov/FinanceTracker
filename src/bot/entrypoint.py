@@ -9,6 +9,7 @@ from typing import Iterable
 from urllib.parse import urlparse
 
 from common.logging_setup import configure_logging, get_logger
+from common.readiness_state import clear_ready_state, write_ready_state
 from proxy_smoke import (
     RuntimeConfigurationError,
     run_startup_smoke,
@@ -19,6 +20,7 @@ from proxy_smoke import (
 PROXY_ENV_KEYS = ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY")
 REQUIRED_NO_PROXY = ("localhost", "127.0.0.1", "db", "tracker", "reporter", "xray-client")
 BOT_STARTUP_RETRY_EXIT_CODE = 76
+BOT_READY_FILE = os.getenv("BOT_READY_FILE", "/tmp/financetracker-bot.ready").strip()
 
 
 configure_logging()
@@ -95,12 +97,29 @@ def should_retry_bot_process(exit_code: int, retry_exit_code: int = BOT_STARTUP_
     return exit_code == retry_exit_code
 
 
+def clear_bot_ready_state() -> None:
+    clear_ready_state(BOT_READY_FILE)
+
+
+def write_bot_ready_state() -> None:
+    write_ready_state(BOT_READY_FILE)
+
+
 def run_bot_process() -> int:
-    completed = subprocess.run(["python", "-u", "bot.py"], check=False)
-    return completed.returncode
+    process = subprocess.Popen(["python", "-u", "bot.py"])
+    heartbeat_seconds = max(
+        1,
+        int(os.getenv("BOT_READY_HEARTBEAT_SECONDS", "30")),
+    )
+    while True:
+        try:
+            return process.wait(timeout=heartbeat_seconds)
+        except subprocess.TimeoutExpired:
+            write_bot_ready_state()
 
 
 def main() -> int:
+    clear_bot_ready_state()
     try:
         validate_database_credentials()
     except RuntimeConfigurationError as exc:
@@ -148,6 +167,7 @@ def main() -> int:
             {"exit_code": smoke_exit_code},
         )
         return smoke_exit_code
+    write_bot_ready_state()
     attempt = 1
     while True:
         logger.info(
