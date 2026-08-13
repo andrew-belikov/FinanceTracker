@@ -231,46 +231,51 @@ class RecipientLedgerBehaviorTests(unittest.IsolatedAsyncioTestCase):
         uncertain.assert_called_once()
         release.assert_not_called()
 
-    async def test_partial_scheduled_delivery_retries_only_failed_recipient(self):
-        state = set()
+    async def test_scheduled_timeout_is_uncertain_and_not_retried(self):
+        state = {}
         send_attempts = []
-        fail_once = {202}
 
         def claim_delivery(_session, **kwargs):
-            return (kwargs["notification_key"], kwargs["chat_id"], kwargs["message_type"]) not in state
+            key = (kwargs["notification_key"], kwargs["chat_id"], kwargs["message_type"])
+            return key not in state
 
         def complete_delivery(_session, **kwargs):
-            state.add((kwargs["notification_key"], kwargs["chat_id"], kwargs["message_type"]))
+            key = (kwargs["notification_key"], kwargs["chat_id"], kwargs["message_type"])
+            state[key] = "sent"
+            return True
+
+        def mark_uncertain(_session, **kwargs):
+            key = (kwargs["notification_key"], kwargs["chat_id"], kwargs["message_type"])
+            state[key] = "uncertain"
             return True
 
         def deliveries_complete(_session, **kwargs):
             return all(
-                (kwargs["notification_key"], chat_id, message_type) in state
+                state.get((kwargs["notification_key"], chat_id, message_type)) == "sent"
                 for chat_id in kwargs["chat_ids"]
                 for message_type in kwargs["message_types"]
             )
 
         def delivery_status(_session, **kwargs):
             key = (kwargs["notification_key"], kwargs["chat_id"], kwargs["message_type"])
-            return "sent" if key in state else "started"
+            return state.get(key, "started")
 
         async def send_message(bot, chat_id, text, parse_mode=None):
             send_attempts.append(chat_id)
-            if chat_id in fail_once:
-                fail_once.remove(chat_id)
-                raise TimedOut("timeout")
+            raise TimedOut("timeout")
 
         now_local = jobs.datetime(2026, 8, 14, 8, 0, tzinfo=jobs.TZ)
         with (
             patch.object(jobs, "db_session", side_effect=lambda: fake_db_session()),
-            patch.object(jobs, "TARGET_CHAT_IDS", {101, 202}),
+            patch.object(jobs, "TARGET_CHAT_IDS", {202}),
             patch.object(jobs, "claim_daily_job_run", return_value=True),
             patch.object(jobs, "complete_daily_job_run", return_value=True) as complete_run,
             patch.object(jobs, "release_daily_job_run", return_value=True) as release_run,
             patch.object(jobs, "_heartbeat_scheduled_job_run", return_value=True),
             patch.object(jobs, "claim_notification_delivery", side_effect=claim_delivery),
             patch.object(jobs, "complete_notification_delivery", side_effect=complete_delivery),
-            patch.object(jobs, "release_notification_delivery", return_value=True),
+            patch.object(jobs, "mark_notification_delivery_uncertain", side_effect=mark_uncertain) as uncertain,
+            patch.object(jobs, "release_notification_delivery", return_value=True) as release_delivery,
             patch.object(jobs, "notification_deliveries_complete", side_effect=deliveries_complete),
             patch.object(jobs, "get_notification_delivery_status", side_effect=delivery_status),
             patch.object(jobs, "build_yesterday_peak_alert_message", return_value="peak"),
@@ -287,10 +292,12 @@ class RecipientLedgerBehaviorTests(unittest.IsolatedAsyncioTestCase):
                 now_local=now_local,
             )
 
-        self.assertEqual(send_attempts.count(101), 1)
-        self.assertEqual(send_attempts.count(202), 2)
-        self.assertEqual(release_run.call_count, 1)
-        self.assertEqual(complete_run.call_count, 1)
+        self.assertEqual(send_attempts, [202])
+        self.assertEqual(next(iter(state.values())), "uncertain")
+        uncertain.assert_called_once()
+        release_delivery.assert_not_called()
+        self.assertEqual(release_run.call_count, 2)
+        complete_run.assert_not_called()
 
 
 class _RecordingResult:

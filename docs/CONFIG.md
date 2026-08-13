@@ -181,7 +181,7 @@ docker compose exec bot python proxy_smoke.py
 - Миграция `migrations/20260814_bot_notification_delivery_leases.sql` добавляет owner token, timestamps lease/heartbeat к `bot_daily_job_runs` и таблицу `bot_notification_deliveries`.
 - Свежий lease блокирует конкурентный запуск, просроченный lease разрешает fenced takeover, а `completed` остаётся терминальным. Старый owner не может завершить или освободить lease после takeover.
 - Результат доставки хранится отдельно для каждого `(notification_kind, notification_key, chat_id, message_type)`. После частичного сбоя повторяются только недоставленные сообщения; scheduled run завершается только после всех intended recipients.
-- Plain-text fallback выполняется ровно один раз только для Telegram `BadRequest`, однозначно указывающего на ошибку Markdown/форматирования. Timeout и network errors не запускают fallback-отправку; для event-уведомления такая неоднозначная попытка сохраняется как `uncertain` и автоматически не повторяется, чтобы не дублировать уже принятую Telegram доставку.
+- Plain-text fallback выполняется ровно один раз только для Telegram `BadRequest`, однозначно указывающего на ошибку Markdown/форматирования. Timeout и network errors не запускают fallback-отправку; для event-уведомления и плановой рассылки такая неоднозначная попытка сохраняется как `uncertain` и автоматически не повторяется, чтобы не дублировать уже принятую Telegram доставку.
 - Кнопка `Вычет` существует только у уведомления об исполненном пополнении. Разметка ручная, обратимая и идемпотентная; уведомления о купонах/дивидендах эту кнопку не получают.
 
 

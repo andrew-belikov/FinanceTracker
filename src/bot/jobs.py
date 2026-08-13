@@ -303,7 +303,11 @@ async def _send_tracked_notification(
                 chat_id=chat_id,
                 message_type=message_type,
             )
-        if delivery_status in {"sent", "uncertain"}:
+        if delivery_status == "sent":
+            return False
+        if delivery_status == "uncertain":
+            if reclaim_stale:
+                raise RuntimeError("Notification delivery has an ambiguous outcome")
             return False
         raise RuntimeError("Notification delivery is owned by another active worker")
 
@@ -311,7 +315,7 @@ async def _send_tracked_notification(
         await send()
     except Exception as exc:
         with db_session() as session:
-            if isinstance(exc, NetworkError) and not reclaim_stale:
+            if isinstance(exc, NetworkError):
                 mark_notification_delivery_uncertain(
                     session,
                     notification_kind=notification_kind,
