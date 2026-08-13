@@ -5,7 +5,7 @@ import os
 import uuid
 from datetime import datetime, timedelta, timezone
 
-from telegram.error import NetworkError
+from telegram.error import BadRequest, NetworkError
 from telegram.ext import ContextTypes
 
 from common.finance import annualize_simple_yield_pct
@@ -315,7 +315,7 @@ async def _send_tracked_notification(
         await send()
     except Exception as exc:
         with db_session() as session:
-            if isinstance(exc, NetworkError):
+            if isinstance(exc, NetworkError) and not isinstance(exc, BadRequest):
                 mark_notification_delivery_uncertain(
                     session,
                     notification_kind=notification_kind,

@@ -231,6 +231,66 @@ class RecipientLedgerBehaviorTests(unittest.IsolatedAsyncioTestCase):
         uncertain.assert_called_once()
         release.assert_not_called()
 
+    async def test_non_parse_bad_request_releases_delivery_for_retry(self):
+        state = {}
+        send = AsyncMock(side_effect=[BadRequest("chat not found"), None])
+
+        def claim(_session, **kwargs):
+            if state:
+                return False
+            state["status"] = "started"
+            return True
+
+        def release(_session, **kwargs):
+            state.clear()
+            return True
+
+        def uncertain_delivery(_session, **kwargs):
+            state["status"] = "uncertain"
+            return True
+
+        def complete(_session, **kwargs):
+            state["status"] = "sent"
+            return True
+
+        with (
+            patch.object(jobs, "db_session", side_effect=lambda: fake_db_session()),
+            patch.object(jobs, "claim_notification_delivery", side_effect=claim),
+            patch.object(jobs, "release_notification_delivery", side_effect=release) as released,
+            patch.object(
+                jobs,
+                "mark_notification_delivery_uncertain",
+                side_effect=uncertain_delivery,
+            ) as uncertain,
+            patch.object(jobs, "complete_notification_delivery", side_effect=complete),
+            patch.object(
+                jobs,
+                "get_notification_delivery_status",
+                side_effect=lambda *_args, **_kwargs: state.get("status"),
+            ),
+        ):
+            with self.assertRaises(BadRequest):
+                await jobs._send_tracked_notification(
+                    notification_kind="scheduled_job",
+                    notification_key="daily_summary:2026-08-14",
+                    chat_id=101,
+                    message_type="trigger:0",
+                    send=send,
+                )
+            second = await jobs._send_tracked_notification(
+                notification_kind="scheduled_job",
+                notification_key="daily_summary:2026-08-14",
+                chat_id=101,
+                message_type="trigger:0",
+                send=send,
+            )
+
+        self.assertTrue(second)
+        self.assertEqual(state["status"], "sent")
+        self.assertEqual(send.await_count, 2)
+        released.assert_called_once()
+        uncertain.assert_not_called()
+
     async def test_scheduled_timeout_is_uncertain_and_not_retried(self):
         state = {}
         send_attempts = []
