@@ -272,7 +272,7 @@ forward-миграции из `migrations/*.sql` до запуска `tracker`, 
 - `migrations/20260728_payout_calendar_events.sql` — создаёт кеш ожидаемых купонов и объявленных дивидендов для `/calendar` и понедельничной рассылки.
 - `migrations/20260805_operations_cashflow_category.sql` — добавляет ручную категорию денежного потока и индекс для налоговых вычетов ИИС.
 - `migrations/20260814_bot_notification_delivery_leases.sql` — добавляет fenced lease плановых jobs и recipient-level ledger уведомлений/рассылок.
-- `migrations/20260814_data_identity_and_currency.sql` — удаляет глобальную уникальность `operation_id`, закрепляет ключ `(account_id, operation_id)` и добавляет валюту в identity `income_events`. Однозначные legacy-события получают валюту из операций, неоднозначные сохраняются как `UNKNOWN`; строки не удаляются и FX-конвертация не выполняется. При дублях внутри одного account миграция останавливается для ручного разбора без молчаливой потери данных.
+- `migrations/20260814_data_identity_and_currency.sql` — удаляет глобальную уникальность `operation_id`, закрепляет ключ `(account_id, operation_id)` и добавляет валюту в identity `income_events`. Однозначные legacy-события получают валюту и локальную гражданскую дату из операций в настроенной `TIMEZONE`, неоднозначная валюта сохраняется как `UNKNOWN`; строки не удаляются и FX-конвертация не выполняется. При дублях внутри одного account либо collision после нормализации local date миграция целиком откатывается для ручного разбора без молчаливой потери данных.
 
 ### Историческая миграция со схемы `deposits`
 

@@ -1621,10 +1621,34 @@ def _upsert_operation(db, acc_id: str, op: dict) -> tuple[Optional[Operation], b
     if not op_id:
         return None, False
 
-    op_type = get_json_value(op, "type") or get_json_value(op, "operation_type") or "OPERATION_TYPE_UNSPECIFIED"
+    existing = (
+        db.query(Operation)
+        .filter(
+            Operation.account_id == acc_id,
+            Operation.operation_id == op_id,
+        )
+        .one_or_none()
+    )
+
+    op_type = (
+        get_json_value(op, "type")
+        or get_json_value(op, "operation_type")
+        or (existing.operation_type if existing is not None else None)
+        or "OPERATION_TYPE_UNSPECIFIED"
+    )
     payment = get_json_value(op, "payment")
-    payment_value = money_to_float(payment) or 0.0
-    payment_currency = ((payment or {}).get("currency") or "UNKNOWN").strip().upper()
+    parsed_payment_value = money_to_float(payment)
+    payment_value = (
+        parsed_payment_value
+        if parsed_payment_value is not None
+        else (float(existing.amount) if existing is not None else 0.0)
+    )
+    payment_currency_raw = (payment or {}).get("currency")
+    payment_currency = (
+        str(payment_currency_raw).strip().upper()
+        if payment_currency_raw
+        else ((existing.currency or "UNKNOWN").upper() if existing is not None else "UNKNOWN")
+    )
 
     op_dt_raw = parse_iso_dt(get_json_value(op, "date"))
     if op_dt_raw is None:
@@ -1650,7 +1674,7 @@ def _upsert_operation(db, acc_id: str, op: dict) -> tuple[Optional[Operation], b
         "state": get_json_value(op, "state"),
         "description": get_json_value(op, "description") or get_json_value(op, "asset_uid") or "",
         "instrument_uid": get_json_value(op, "instrument_uid"),
-        "figi": get_json_value(op, "figi"),
+        "figi": get_json_value(op, "figi") or (existing.figi if existing is not None else None),
         "instrument_type": get_json_value(op, "instrument_type"),
         "instrument_kind": get_json_value(op, "instrument_kind"),
         "position_uid": get_json_value(op, "position_uid"),
@@ -1679,14 +1703,6 @@ def _upsert_operation(db, acc_id: str, op: dict) -> tuple[Optional[Operation], b
         seen_at=values["date"],
     )
 
-    existing = (
-        db.query(Operation)
-        .filter(
-            Operation.account_id == acc_id,
-            Operation.operation_id == op_id,
-        )
-        .one_or_none()
-    )
     if existing is None:
         operation = Operation(**values)
         db.add(operation)

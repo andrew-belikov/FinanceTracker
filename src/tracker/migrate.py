@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import os
 from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sqlalchemy import inspect, text
 from sqlalchemy.engine import make_url
@@ -14,6 +15,9 @@ from common.logging_setup import configure_logging, get_logger
 
 MIGRATIONS_DIR = Path(os.getenv("MIGRATIONS_DIR", "/app/migrations"))
 MIGRATION_LOCK_ID = 1_731_904_221
+MIGRATION_TIMEZONE = (
+    os.getenv("TIMEZONE") or os.getenv("SCHED_TZ") or "Europe/Moscow"
+).strip()
 SCHEMA_MIGRATIONS_DDL = """
 CREATE TABLE IF NOT EXISTS schema_migrations (
     filename TEXT PRIMARY KEY,
@@ -55,6 +59,15 @@ def validate_database_credentials() -> None:
         or not str(parsed.password).strip()
     ):
         raise RuntimeConfigurationError("Database DSN is malformed")
+
+
+def validate_migration_timezone() -> None:
+    if not MIGRATION_TIMEZONE:
+        raise RuntimeConfigurationError("Migration timezone must be explicitly configured")
+    try:
+        ZoneInfo(MIGRATION_TIMEZONE)
+    except (ZoneInfoNotFoundError, ValueError):
+        raise RuntimeConfigurationError("Migration timezone is invalid") from None
 
 
 def _load_database_runtime():
@@ -153,6 +166,7 @@ def _run_check_only(connection, Base, migrations: list[Path]) -> int:
 
 def run_migrations(*, check_only: bool = False) -> int:
     validate_database_credentials()
+    validate_migration_timezone()
     Base, engine = _load_database_runtime()
     migrations = discover_migrations(MIGRATIONS_DIR)
 
@@ -184,6 +198,10 @@ def run_migrations(*, check_only: bool = False) -> int:
                     {"filename": path.name},
                 )
                 try:
+                    connection.execute(
+                        text("SELECT set_config('TimeZone', :timezone, true)"),
+                        {"timezone": MIGRATION_TIMEZONE},
+                    )
                     if sql:
                         connection.exec_driver_sql(sql)
                     connection.execute(

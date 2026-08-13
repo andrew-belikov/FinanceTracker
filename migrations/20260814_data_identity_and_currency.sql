@@ -40,16 +40,35 @@ BEGIN
 END;
 $$;
 
--- Legacy income events had no currency. The old reconciler grouped operations
--- by their UTC date, so that exact legacy identity is safe for backfill only
--- when it resolves to one currency. Ambiguous or missing provenance is kept as
--- UNKNOWN and remains separate; no FX conversion or row deletion is performed.
+-- The migration runner sets PostgreSQL TimeZone from the configured application
+-- TIMEZONE. Legacy events are matched by their old UTC date and normalized to
+-- the operation's local civil date. Already-normalized rows use their local date
+-- on rerun, so the transformation remains stable.
 ALTER TABLE public.income_events
     ADD COLUMN IF NOT EXISTS currency TEXT;
 
-WITH event_currencies AS (
+-- Remove both generations of the identity constraint before normalization.
+-- A collision check below aborts and rolls this DDL back with the whole file.
+ALTER TABLE public.income_events
+    DROP CONSTRAINT IF EXISTS uq_income_events_account_figi_date_type;
+
+ALTER TABLE public.income_events
+    DROP CONSTRAINT IF EXISTS uq_income_events_account_figi_date_type_currency;
+
+WITH event_resolution AS (
     SELECT
         ie.id,
+        CASE
+            WHEN COUNT(DISTINCT timezone(
+                current_setting('TimeZone'),
+                o.date AT TIME ZONE 'UTC'
+            )::date) = 1
+            THEN MAX(timezone(
+                current_setting('TimeZone'),
+                o.date AT TIME ZONE 'UTC'
+            )::date)
+            ELSE ie.event_date
+        END AS resolved_event_date,
         CASE
             WHEN COUNT(DISTINCT UPPER(NULLIF(o.currency, ''))) = 1
             THEN MAX(UPPER(NULLIF(o.currency, '')))
@@ -59,7 +78,14 @@ WITH event_currencies AS (
     LEFT JOIN public.operations o
       ON o.account_id = ie.account_id
      AND o.figi = ie.figi
-     AND o.date::date = ie.event_date
+     AND (
+         ((ie.currency IS NULL OR BTRIM(ie.currency) = '') AND o.date::date = ie.event_date)
+         OR
+         ((ie.currency IS NOT NULL AND BTRIM(ie.currency) <> '') AND timezone(
+             current_setting('TimeZone'),
+             o.date AT TIME ZONE 'UTC'
+         )::date = ie.event_date)
+     )
      AND o.state = 'OPERATION_STATE_EXECUTED'
      AND (
          (ie.event_type = 'coupon' AND o.operation_type IN (
@@ -75,13 +101,18 @@ WITH event_currencies AS (
              'OPERATION_TYPE_DIVIDEND_TAX_PROGRESSIVE'
          ))
      )
-    GROUP BY ie.id
+    GROUP BY ie.id, ie.event_date
 )
 UPDATE public.income_events ie
-SET currency = event_currencies.resolved_currency
-FROM event_currencies
-WHERE ie.id = event_currencies.id
-  AND ie.currency IS NULL;
+SET
+    event_date = event_resolution.resolved_event_date,
+    currency = CASE
+        WHEN ie.currency IS NULL OR BTRIM(ie.currency) = ''
+        THEN event_resolution.resolved_currency
+        ELSE UPPER(ie.currency)
+    END
+FROM event_resolution
+WHERE ie.id = event_resolution.id;
 
 UPDATE public.income_events
 SET currency = 'UNKNOWN'
@@ -90,8 +121,22 @@ WHERE currency IS NULL OR BTRIM(currency) = '';
 ALTER TABLE public.income_events
     ALTER COLUMN currency SET NOT NULL;
 
-ALTER TABLE public.income_events
-    DROP CONSTRAINT IF EXISTS uq_income_events_account_figi_date_type;
+-- Never aggregate or discard distinct financial rows. If local-date
+-- normalization produces a collision, abort the transaction for explicit
+-- manual remediation with every original row restored by rollback.
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1
+        FROM public.income_events
+        GROUP BY account_id, figi, event_date, event_type, currency
+        HAVING COUNT(*) > 1
+    ) THEN
+        RAISE EXCEPTION
+            'income_events local identity collision; manual remediation is required';
+    END IF;
+END;
+$$;
 
 DO $$
 BEGIN

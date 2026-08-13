@@ -360,6 +360,65 @@ class DataIntegrityRemediationTests(unittest.TestCase):
                 )
         self.assertEqual(affected, set())
 
+    def test_p2_04_sparse_cancel_preserves_currency_identity(self):
+        with self.Session() as session:
+            session.add(
+                tracker_app.Operation(
+                    account_id="account",
+                    operation_id="coupon",
+                    operation_type="OPERATION_TYPE_COUPON",
+                    state="OPERATION_STATE_EXECUTED",
+                    figi="FIGI1",
+                    date=datetime(2026, 1, 15, 12),
+                    amount=100,
+                    currency="RUB",
+                )
+            )
+            session.add(
+                tracker_app.IncomeEvent(
+                    account_id="account",
+                    figi="FIGI1",
+                    event_date=date(2026, 1, 15),
+                    event_type="coupon",
+                    currency="RUB",
+                    gross_amount=100,
+                    tax_amount=0,
+                    net_amount=100,
+                    net_yield_pct=10,
+                    notified=False,
+                )
+            )
+            session.commit()
+
+            affected = set()
+            with mock.patch.object(
+                tracker_app,
+                "_iter_operation_pages",
+                return_value=iter(
+                    [[{
+                        "id": "coupon",
+                        "type": "OPERATION_TYPE_COUPON",
+                        "state": "OPERATION_STATE_CANCELED",
+                        "figi": "FIGI1",
+                        "date": "2026-01-15T12:00:00Z",
+                        "payment": {},
+                    }]]
+                ),
+            ):
+                tracker_app._sync_operations(
+                    session,
+                    "account",
+                    None,
+                    affected_income_keys=affected,
+                )
+            tracker_app._reconcile_income_events(session, "account", affected)
+            session.commit()
+
+            operation = session.query(tracker_app.Operation).one()
+            self.assertEqual(operation.currency, "RUB")
+            self.assertEqual(affected, {("FIGI1", date(2026, 1, 15), "coupon", "RUB")})
+            self.assertEqual(session.query(tracker_app.IncomeEvent).count(), 0)
+
     def test_p2_10_missing_timestamp_aborts_before_any_write(self):
         with self.Session() as session:
             with self.assertRaisesRegex(ValueError, "timestamp"):
@@ -398,6 +457,32 @@ class DataIntegrityRemediationTests(unittest.TestCase):
 
 
 class MigrationReadOnlyContractTests(unittest.TestCase):
+    def test_p1_03_legacy_income_dates_are_normalized_collision_safe(self):
+        migration_source = (
+            PROJECT_ROOT / "migrations" / "20260814_data_identity_and_currency.sql"
+        ).read_text(encoding="utf-8")
+        migrate_source = (TRACKER_DIR / "migrate.py").read_text(encoding="utf-8")
+        self.assertIn("current_setting('TimeZone')", migration_source)
+        self.assertIn("resolved_event_date", migration_source)
+        self.assertIn("local identity collision; manual remediation is required", migration_source)
+        self.assertIn("set_config('TimeZone'", migrate_source)
+
+    def test_p1_03_invalid_migration_timezone_fails_closed(self):
+        migrate_path = TRACKER_DIR / "migrate.py"
+        spec = importlib.util.spec_from_file_location(
+            "tracker_migrate_timezone_under_test",
+            migrate_path,
+        )
+        migrate_module = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        spec.loader.exec_module(migrate_module)
+        with mock.patch.object(migrate_module, "MIGRATION_TIMEZONE", "Invalid/Timezone"):
+            with self.assertRaisesRegex(
+                migrate_module.RuntimeConfigurationError,
+                "timezone is invalid",
+            ):
+                migrate_module.validate_migration_timezone()
+
     def test_p2_08_check_mode_does_not_create_ledger_or_run_ddl(self):
         migrate_path = TRACKER_DIR / "migrate.py"
         source = migrate_path.read_text(encoding="utf-8")

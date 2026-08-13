@@ -23,6 +23,9 @@
   после применения блокирует deploy.
 - `migrate --check` выполняет только чтение catalog и `schema_migrations`: на
   пустой или отстающей схеме он возвращает ненулевой код и не создаёт объекты.
+- Write-режим `migrate` перед каждой forward-миграцией задаёт session-local
+  PostgreSQL `TimeZone` из проверенного `TIMEZONE` (fallback: `SCHED_TZ`, затем
+  `Europe/Moscow`). `--check` не меняет session settings.
 
 ## Расписание
 
