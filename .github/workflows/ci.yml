@@ -56,7 +56,7 @@ jobs:
         run: python scripts/verify_compose_env.py
 
       - name: Run secret scan
-        run: python scripts/secret_scan.py --history
+        run: python scripts/scan_secrets.py --history
 
       - name: Validate docker compose configuration
         run: docker compose --env-file "$APP_ENV_FILE" config --quiet

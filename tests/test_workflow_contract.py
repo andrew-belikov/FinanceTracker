@@ -20,6 +20,12 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("--require-hashes", CI_TEXT)
         self.assertIn("Run workflow contract checks", CI_TEXT)
         self.assertIn("Run secret scan", CI_TEXT)
+        self.assertIn("python scripts/scan_secrets.py --history", CI_TEXT)
+        self.assertNotIn("scripts/secret_scan.py", CI_TEXT)
+        self.assertFalse(
+            (PROJECT_ROOT / "scripts" / "secret_scan.py").exists(),
+            "legacy weaker scanner must not coexist with the canonical hardened scanner",
+        )
         self.assertIn('docker compose --env-file "$APP_ENV_FILE" config --quiet', CI_TEXT)
         self.assertNotIn("docker compose config >", CI_TEXT)
 

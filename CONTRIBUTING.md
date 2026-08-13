@@ -16,7 +16,7 @@ python3 -m unittest discover -s tests -p 'test_*.py'
 export APP_ENV_FILE=.env.example
 docker compose --env-file "$APP_ENV_FILE" config --quiet
 python3 scripts/verify_compose_env.py
-python3 scripts/secret_scan.py --history
+python3 scripts/scan_secrets.py --history
 ```
 
 GitHub Actions workflow `CI` дублирует базовую проверку на `push` и `pull_request`:
