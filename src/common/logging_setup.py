@@ -44,7 +44,43 @@ _SENSITIVE_KEYS = {
     "raw_payload",
     "request_body",
     "response_text",
+    "account_id",
+    "account_name",
+    "operation_id",
+    "income_event_id",
+    "figi",
+    "ticker",
+    "instrument_id",
+    "instrument_uid",
+    "position_id",
+    "order_id",
+    "id",
+    "cursor",
+    "next_cursor",
+    "proxy_endpoint",
+    "proxy_url",
+    "dsn",
 }
+
+_FINANCIAL_KEY_MARKERS = (
+    "amount",
+    "balance",
+    "cashflow",
+    "commission",
+    "cost",
+    "deposit",
+    "income",
+    "pnl",
+    "portfolio_value",
+    "position_value",
+    "price",
+    "profit",
+    "quantity",
+    "tax",
+    "value",
+    "withdrawal",
+    "yield",
+)
 
 # Bearer <token>
 _RE_BEARER = _re.compile(r"(Bearer)\s+[A-Za-z0-9\-\._~\+\/]+=*", _re.IGNORECASE)
@@ -81,6 +117,15 @@ def _sanitize_string(s: str) -> str:
     return s
 
 
+def _is_sensitive_key(key: str) -> bool:
+    normalized = key.strip().lower()
+    if normalized in _SENSITIVE_KEYS:
+        return True
+    if normalized.endswith("_id") and normalized not in _CORRELATION_FIELDS:
+        return True
+    return any(marker in normalized for marker in _FINANCIAL_KEY_MARKERS)
+
+
 def _sanitize(value: Any) -> Any:
     """
     Best-effort recursive sanitization to avoid leaking secrets in logs.
@@ -101,7 +146,7 @@ def _sanitize(value: Any) -> Any:
         out: Dict[str, Any] = {}
         for k, v in value.items():
             ks = _safe_str(k)
-            if ks.strip().lower() in _SENSITIVE_KEYS:
+            if _is_sensitive_key(ks):
                 out[ks] = _REDACTED
             else:
                 out[ks] = _sanitize(v)

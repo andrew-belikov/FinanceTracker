@@ -44,6 +44,34 @@ class SecretScanningTests(unittest.TestCase):
         rendered = "\n".join(scanner.format_finding(finding) for finding in findings)
         self.assertNotIn(secret, rendered)
 
+    def test_vless_scan_is_case_insensitive_and_accepts_uuid_v7_shape(self):
+        scanner = load_scanner()
+        secret = (
+            "VLESS:" + "//01958c7a-0000-7000-8000-000000000001"
+            "@203.0.114.10:443?security=reality"
+        )
+
+        findings = scanner.scan_text(secret, source="synthetic-source")
+
+        self.assertEqual(
+            [finding.rule for finding in findings],
+            ["vless_credential_uri"],
+        )
+
+    def test_finding_format_never_emits_raw_source(self):
+        scanner = load_scanner()
+        source_secret = (
+            "artifact-" + "123456789" + ":" + "abcdefghijklmnopqrstuvwxyzABCDE"
+        )
+        finding = scanner.Finding("telegram_bot_token", source_secret, 7)
+
+        rendered = scanner.format_finding(finding)
+
+        self.assertNotIn(source_secret, rendered)
+        self.assertNotIn("123456789", rendered)
+        self.assertRegex(rendered, r"source_sha256=[0-9a-f]{16}")
+        self.assertIn("line=7", rendered)
+
 
 if __name__ == "__main__":
     unittest.main()

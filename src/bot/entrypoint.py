@@ -9,7 +9,11 @@ from typing import Iterable
 from urllib.parse import urlparse
 
 from common.logging_setup import configure_logging, get_logger
-from proxy_smoke import run_startup_smoke
+from proxy_smoke import (
+    RuntimeConfigurationError,
+    run_startup_smoke,
+    validate_database_credentials,
+)
 
 
 PROXY_ENV_KEYS = ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY")
@@ -97,6 +101,16 @@ def run_bot_process() -> int:
 
 
 def main() -> int:
+    try:
+        validate_database_credentials()
+    except RuntimeConfigurationError as exc:
+        logger.error(
+            "bot_entrypoint_invalid_configuration",
+            "Required bot entrypoint configuration is missing or malformed.",
+            {"error_type": type(exc).__name__},
+        )
+        return 1
+
     proxy_enabled, proxy_endpoint, no_proxy = configure_proxy_env()
     startup_retry_delay_seconds = get_bot_startup_retry_delay_seconds()
     logger.info(

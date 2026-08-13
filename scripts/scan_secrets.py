@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import ipaddress
 import re
 import subprocess
@@ -20,8 +21,9 @@ class Finding(NamedTuple):
 
 
 VLESS_RE = re.compile(
-    r"vless://[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}"
-    r"@[^\s\"'<>]+"
+    r"vless://[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+    r"@[^\s\"'<>]+",
+    re.I,
 )
 PRIVATE_KEY_RE = re.compile(r"-----BEGIN (?:[A-Z0-9 ]+ )?PRIVATE KEY-----")
 TELEGRAM_TOKEN_RE = re.compile(r"\b\d{6,}:[A-Za-z0-9_-]{20,}\b")
@@ -108,10 +110,14 @@ def scan_git_history(repo: Path) -> list[Finding]:
 
 
 def format_finding(finding: Finding) -> str:
-    location = finding.source
-    if finding.line is not None and finding.source != "git_history":
-        location = f"{location}:{finding.line}"
-    return f"SECRET_SCAN finding rule={finding.rule} source={location} value=[REDACTED]"
+    source_digest = hashlib.sha256(
+        finding.source.encode("utf-8", errors="surrogatepass")
+    ).hexdigest()[:16]
+    line = f" line={finding.line}" if finding.line is not None else ""
+    return (
+        f"SECRET_SCAN finding rule={finding.rule} "
+        f"source_sha256={source_digest}{line} value=[REDACTED]"
+    )
 
 
 def main(argv: list[str] | None = None) -> int:

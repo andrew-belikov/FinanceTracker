@@ -6,8 +6,9 @@ import os
 from pathlib import Path
 
 from sqlalchemy import text
+from sqlalchemy.engine import make_url
+from sqlalchemy.exc import ArgumentError
 
-from app import Base, engine
 from common.logging_setup import configure_logging, get_logger
 
 
@@ -27,6 +28,39 @@ logger = get_logger("tracker_migrations")
 
 class MigrationError(RuntimeError):
     pass
+
+
+class RuntimeConfigurationError(ValueError):
+    """Raised when migration database credentials are absent or malformed."""
+
+
+def validate_database_credentials() -> None:
+    db_dsn = os.getenv("DB_DSN", "").strip()
+    db_password = os.getenv("DB_PASSWORD", "").strip()
+    if not db_dsn:
+        if not db_password:
+            raise RuntimeConfigurationError(
+                "Database credentials must be explicitly configured"
+            )
+        return
+    try:
+        parsed = make_url(db_dsn)
+    except (ArgumentError, ValueError):
+        raise RuntimeConfigurationError("Database DSN is malformed") from None
+    if parsed.get_backend_name() in {"postgres", "postgresql"} and (
+        not parsed.host
+        or not parsed.username
+        or not parsed.database
+        or parsed.password is None
+        or not str(parsed.password).strip()
+    ):
+        raise RuntimeConfigurationError("Database DSN is malformed")
+
+
+def _load_database_runtime():
+    from app import Base, engine
+
+    return Base, engine
 
 
 def discover_migrations(migrations_dir: Path) -> list[Path]:
@@ -88,6 +122,8 @@ def _validate_applied_checksums(
 
 
 def run_migrations(*, check_only: bool = False) -> int:
+    validate_database_credentials()
+    Base, engine = _load_database_runtime()
     migrations = discover_migrations(MIGRATIONS_DIR)
 
     applied_count = 0
@@ -171,14 +207,14 @@ def run_migrations(*, check_only: bool = False) -> int:
             connection.commit()
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Apply FinanceTracker SQL migrations.")
     parser.add_argument(
         "--check",
         action="store_true",
         help="Fail when a migration is pending or its checksum changed.",
     )
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     try:
         return run_migrations(check_only=args.check)
     except Exception:
