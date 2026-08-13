@@ -517,6 +517,28 @@ def compute_twr_series(
     return dates, values, twr
 
 
+def sum_decimal_values_for_snapshot_interval(
+    values_by_day: dict[date, Decimal],
+    previous_snapshot_date: date | None,
+    current_snapshot_date: date,
+) -> Decimal:
+    """Aggregate values over ``(previous_snapshot_date, current_snapshot_date]``.
+
+    The first snapshot is the fallback baseline, so only values dated exactly on
+    that baseline date are attached to its row and they are not used in P&L.
+    """
+    if previous_snapshot_date is None:
+        return normalize_decimal(values_by_day.get(current_snapshot_date))
+    return sum(
+        (
+            normalize_decimal(value)
+            for value_date, value in values_by_day.items()
+            if previous_snapshot_date < value_date <= current_snapshot_date
+        ),
+        Decimal("0"),
+    )
+
+
 def rebase_twr_to_period(
     dates: list[date],
     twr: list[float],

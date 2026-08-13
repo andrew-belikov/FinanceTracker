@@ -56,6 +56,7 @@ from services import (
     get_rebalance_targets,
     is_income_event_backed_tax_operation,
     rebase_twr_to_period,
+    sum_decimal_values_for_snapshot_interval,
 )
 
 
@@ -434,26 +435,38 @@ def _build_timeseries_daily(
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     previous_value: Decimal | None = None
+    previous_snapshot_date: date | None = None
 
     for row in snapshot_rows:
         snapshot_date = row["snapshot_date"]
         portfolio_value = normalize_decimal(row.get("total_value"))
-        deposits = deposits_by_day.get(snapshot_date, Decimal("0"))
-        withdrawals = withdrawals_by_day.get(snapshot_date, Decimal("0"))
-        income_net = income_net_by_day.get(snapshot_date, Decimal("0"))
-        iis_tax_deduction_income = iis_tax_deductions_by_day.get(snapshot_date, Decimal("0"))
+        interval_args = (previous_snapshot_date, snapshot_date)
+        deposits = sum_decimal_values_for_snapshot_interval(deposits_by_day, *interval_args)
+        withdrawals = sum_decimal_values_for_snapshot_interval(withdrawals_by_day, *interval_args)
+        income_net = sum_decimal_values_for_snapshot_interval(income_net_by_day, *interval_args)
+        iis_tax_deduction_income = sum_decimal_values_for_snapshot_interval(
+            iis_tax_deductions_by_day,
+            *interval_args,
+        )
         total_income_net = income_net + iis_tax_deduction_income
-        commissions = commissions_by_day.get(snapshot_date, Decimal("0"))
-        operation_taxes = taxes_by_day.get(snapshot_date, Decimal("0"))
-        income_taxes = income_tax_by_day.get(snapshot_date, Decimal("0"))
-        operation_tax_refunds = (tax_refunds_by_day or {}).get(snapshot_date, Decimal("0"))
-        income_tax_refunds = (income_tax_refunds_by_day or {}).get(snapshot_date, Decimal("0"))
+        commissions = sum_decimal_values_for_snapshot_interval(commissions_by_day, *interval_args)
+        operation_taxes = sum_decimal_values_for_snapshot_interval(taxes_by_day, *interval_args)
+        income_taxes = sum_decimal_values_for_snapshot_interval(income_tax_by_day, *interval_args)
+        operation_tax_refunds = sum_decimal_values_for_snapshot_interval(
+            tax_refunds_by_day or {},
+            *interval_args,
+        )
+        income_tax_refunds = sum_decimal_values_for_snapshot_interval(
+            income_tax_refunds_by_day or {},
+            *interval_args,
+        )
         net_external_flow = deposits - withdrawals
         net_cashflow = net_external_flow
         day_pnl = Decimal("0")
         if previous_value is not None:
             day_pnl = portfolio_value - previous_value - net_cashflow
         previous_value = portfolio_value
+        previous_snapshot_date = snapshot_date
 
         rows.append(
             {
@@ -986,6 +999,10 @@ def _build_overview_facts(payload: dict[str, Any]) -> dict[str, Any]:
         f"пополнения {fmt_decimal_rub(summary.get('deposits'), precision=0)}, "
         f"выводы {fmt_decimal_rub(summary.get('withdrawals'), precision=0)}."
     )
+    if _to_decimal(summary.get("tax_refunds")) != 0:
+        highlights.append(
+            f"Возврат налога: {fmt_decimal_rub(summary.get('tax_refunds'), precision=2)}."
+        )
     if summary.get("top_holding_name"):
         highlights.append(
             f"Крупнейшая позиция: {summary.get('top_holding_name')} "
@@ -1008,6 +1025,7 @@ def _build_overview_facts(payload: dict[str, Any]) -> dict[str, Any]:
         "total_income_net": _display_rub(summary.get("total_income_net"), precision=2),
         "commissions": _display_rub(summary.get("commissions"), precision=2),
         "taxes": _display_rub(summary.get("taxes"), precision=2),
+        "tax_refunds": _display_rub(summary.get("tax_refunds"), precision=2),
         "top_holding_name": summary.get("top_holding_name"),
         "top_holding_value": _display_rub(summary.get("top_holding_value"), precision=0),
         "top_holding_weight_pct": fmt_pct(float(_to_decimal(summary.get("top_holding_weight_pct"))), precision=1)
@@ -1196,6 +1214,7 @@ def _build_cashflow_facts(payload: dict[str, Any]) -> dict[str, Any]:
         "total_income_net": _display_rub(summary.get("total_income_net"), precision=2),
         "commissions": _display_rub(summary.get("commissions"), precision=2),
         "taxes": _display_rub(summary.get("taxes"), precision=2),
+        "tax_refunds": _display_rub(summary.get("tax_refunds"), precision=2),
         "operations_top": [
             {
                 "local_date": _format_display_date(row.get("local_date")),

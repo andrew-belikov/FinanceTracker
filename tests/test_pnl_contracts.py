@@ -39,6 +39,11 @@ class DailyPortfolioResultTests(unittest.TestCase):
             "normalize_decimal": normalize_decimal,
             "to_iso_datetime": lambda value: value.isoformat() if value is not None else None,
         }
+        namespace["sum_decimal_values_for_snapshot_interval"] = load_function(
+            SERVICES_FILE,
+            "sum_decimal_values_for_snapshot_interval",
+            namespace,
+        )
         cls.build_rows = staticmethod(load_function(REPORT_PAYLOAD_FILE, "_build_timeseries_daily", namespace))
         cls.compute_period_pnl = staticmethod(load_function(REPORT_PAYLOAD_FILE, "_compute_period_pnl", namespace))
 
@@ -109,6 +114,67 @@ class DailyPortfolioResultTests(unittest.TestCase):
 
         self.assertEqual(pnl_abs, Decimal("10"))
         self.assertEqual(pnl_pct, Decimal("10"))
+
+    def test_gap_day_deposit_is_assigned_to_next_snapshot_interval(self):
+        first = date(2026, 4, 1)
+        flow_day = date(2026, 4, 2)
+        second = date(2026, 4, 3)
+        daily_rows = self.build_rows(
+            [
+                {"id": 1, "snapshot_date": first, "total_value": Decimal("100")},
+                {"id": 2, "snapshot_date": second, "total_value": Decimal("150")},
+            ],
+            deposits_by_day={flow_day: Decimal("50")},
+            iis_tax_deductions_by_day={},
+            withdrawals_by_day={},
+            income_net_by_day={},
+            commissions_by_day={},
+            taxes_by_day={},
+            income_tax_by_day={},
+            twr_by_date={},
+        )
+
+        self.assertEqual(daily_rows[-1]["deposits"], Decimal("50"))
+        self.assertEqual(daily_rows[-1]["day_pnl"], Decimal("0"))
+        pnl_abs, pnl_pct = self.compute_period_pnl(
+            start_snapshot=None,
+            end_value=Decimal("150"),
+            start_value=Decimal("100"),
+            net_external_flow=Decimal("50"),
+            daily_rows=daily_rows,
+        )
+        self.assertEqual((pnl_abs, pnl_pct), (Decimal("0"), Decimal("0")))
+
+    def test_gap_day_iis_deduction_stays_in_result_for_no_start_fallback(self):
+        first = date(2026, 4, 1)
+        flow_day = date(2026, 4, 2)
+        second = date(2026, 4, 3)
+        daily_rows = self.build_rows(
+            [
+                {"id": 1, "snapshot_date": first, "total_value": Decimal("100")},
+                {"id": 2, "snapshot_date": second, "total_value": Decimal("150")},
+            ],
+            deposits_by_day={},
+            iis_tax_deductions_by_day={flow_day: Decimal("50")},
+            withdrawals_by_day={},
+            income_net_by_day={},
+            commissions_by_day={},
+            taxes_by_day={},
+            income_tax_by_day={},
+            twr_by_date={},
+        )
+
+        self.assertEqual(daily_rows[-1]["net_external_flow"], Decimal("0"))
+        self.assertEqual(daily_rows[-1]["iis_tax_deduction_income"], Decimal("50"))
+        self.assertEqual(daily_rows[-1]["day_pnl"], Decimal("50"))
+        pnl_abs, pnl_pct = self.compute_period_pnl(
+            start_snapshot=None,
+            end_value=Decimal("150"),
+            start_value=Decimal("100"),
+            net_external_flow=Decimal("0"),
+            daily_rows=daily_rows,
+        )
+        self.assertEqual((pnl_abs, pnl_pct), (Decimal("50"), Decimal("50")))
 
 
 class TodaySummaryContractTests(unittest.TestCase):

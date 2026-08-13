@@ -57,7 +57,16 @@ class FakePlot:
 
 
 class YearMonthlyDeltaContractTests(unittest.TestCase):
-    def _render_deltas(self, portfolio_values, monthly_external_flows, monthly_deposits=None):
+    def _render_deltas(
+        self,
+        portfolio_values,
+        monthly_external_flows,
+        monthly_deposits=None,
+        *,
+        first_snapshot_date=None,
+        pre_period_value=None,
+        external_flow_after_first_snapshot=0,
+    ):
         months = [date(2026, month, 1) for month in range(1, len(portfolio_values) + 1)]
         portfolio_rows = [
             {"month_start": month, "total_value": value}
@@ -91,12 +100,16 @@ class YearMonthlyDeltaContractTests(unittest.TestCase):
             "get_monthly_deposits": lambda *_args: deposit_rows,
             "get_monthly_net_external_flows": lambda *_args: flow_rows,
             "get_first_snapshot_in_period": lambda *_args: {
-                "snapshot_date": months[0],
+                "snapshot_date": first_snapshot_date or months[0],
                 "total_value": portfolio_values[0],
             },
-            "get_last_snapshot_before_date": lambda *_args: None,
+            "get_last_snapshot_before_date": lambda *_args: (
+                {"snapshot_date": months[0] - timedelta(days=1), "total_value": pre_period_value}
+                if pre_period_value is not None
+                else None
+            ),
             "get_deposits_sum_for_period": lambda *_args: 0,
-            "get_net_external_flow_for_period": lambda *_args: monthly_external_flows.get(months[0], 0),
+            "get_net_external_flow_for_period": lambda *_args: external_flow_after_first_snapshot,
             "plt": plot,
             "set_chart_header": lambda *_args, **_kwargs: None,
             "apply_chart_style": lambda *_args, **_kwargs: None,
@@ -128,6 +141,27 @@ class YearMonthlyDeltaContractTests(unittest.TestCase):
         )
 
         self.assertEqual(deltas, [0, 0])
+
+    def test_first_snapshot_on_period_start_is_baseline_and_does_not_reapply_its_deposit(self):
+        deltas = self._render_deltas(
+            [100],
+            {date(2026, 1, 1): 100},
+            first_snapshot_date=date(2026, 1, 1),
+            pre_period_value=None,
+            external_flow_after_first_snapshot=0,
+        )
+
+        self.assertEqual(deltas, [0])
+
+    def test_pre_period_baseline_includes_period_start_flow(self):
+        deltas = self._render_deltas(
+            [100],
+            {date(2026, 1, 1): 100},
+            first_snapshot_date=date(2026, 1, 1),
+            pre_period_value=0,
+        )
+
+        self.assertEqual(deltas, [0])
 
 
 if __name__ == "__main__":

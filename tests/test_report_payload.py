@@ -157,7 +157,7 @@ class ReportPayloadHelpersTests(unittest.TestCase):
 
 
 class MonthlyReportPayloadBuilderTests(unittest.TestCase):
-    def _build_payload(self):
+    def _build_payload(self, *, tax_refunds=Decimal("0")):
         fake_session = FakeSession()
         start_snapshot = {
             "id": 10,
@@ -478,7 +478,7 @@ class MonthlyReportPayloadBuilderTests(unittest.TestCase):
             mock.patch.object(report_payload, "get_iis_tax_deductions_for_period", return_value=Decimal("52000")),
             mock.patch.object(report_payload, "get_commissions_for_period", return_value=Decimal("35")),
             mock.patch.object(report_payload, "get_taxes_for_period", return_value=Decimal("12.10")),
-            mock.patch.object(report_payload, "get_tax_refunds_for_period", return_value=Decimal("0")),
+            mock.patch.object(report_payload, "get_tax_refunds_for_period", return_value=tax_refunds),
             mock.patch.object(
                 report_payload,
                 "get_rebalance_targets",
@@ -542,6 +542,20 @@ class MonthlyReportPayloadBuilderTests(unittest.TestCase):
         self.assertEqual(ai_input["meta"]["style"], "calm precise non-promotional")
         self.assertTrue(ai_input["overview_facts"]["highlights"])
         self.assertLessEqual(len(ai_input["cashflow_facts"]["operations_top"]), 5)
+
+    def test_tax_refund_is_a_separate_ai_overview_and_cashflow_fact(self):
+        payload = self._build_payload(tax_refunds=Decimal("18"))
+        ai_input = report_payload.build_monthly_ai_input(payload, max_input_chars=None)
+
+        self.assertEqual(payload["summary_metrics"]["taxes"], "12.10")
+        self.assertEqual(payload["summary_metrics"]["tax_refunds"], "18")
+        self.assertEqual(ai_input["overview_facts"]["taxes"], "12.10 ₽")
+        self.assertEqual(ai_input["overview_facts"]["tax_refunds"], "18.00 ₽")
+        self.assertEqual(ai_input["cashflow_facts"]["taxes"], "12.10 ₽")
+        self.assertEqual(ai_input["cashflow_facts"]["tax_refunds"], "18.00 ₽")
+        self.assertTrue(
+            any("Возврат налога" in item and "18.00 ₽" in item for item in ai_input["overview_facts"]["highlights"])
+        )
 
 
 if __name__ == "__main__":

@@ -686,14 +686,16 @@ def build_year_monthly_delta_chart(path: str, year: int, end_date_exclusive: dat
         first_snapshot = get_first_snapshot_in_period(session, account_id, first_month_start, first_month_end_exclusive)
         first_month_base = float(first_snapshot["total_value"] or 0) if first_snapshot is not None else values[0]
         first_period_start = first_snapshot["snapshot_date"] if first_snapshot is not None else first_month_start
+        has_pre_period_baseline = False
 
         if first_month_start.month == 1:
             prev_snapshot = get_last_snapshot_before_date(session, account_id, first_month_start)
             if prev_snapshot is not None:
                 first_month_base = float(prev_snapshot["total_value"] or 0)
                 first_period_start = first_month_start
+                has_pre_period_baseline = True
 
-        if first_period_start == first_month_start:
+        if has_pre_period_baseline:
             first_month_external_flow = external_flow_by_month.get(first_month_start, 0.0)
         else:
             first_month_external_flow = get_net_external_flow_for_period(

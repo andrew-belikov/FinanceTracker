@@ -37,6 +37,7 @@ from services import (
     compute_twr_timeseries,
     is_income_event_backed_tax_operation,
     rebase_twr_to_period,
+    sum_decimal_values_for_snapshot_interval,
 )
 
 
@@ -203,25 +204,37 @@ def build_dataset_export(session) -> tuple[dict, list[dict], list[dict], list[di
 
     daily_csv_rows: list[dict] = []
     previous_value: Decimal | None = None
+    previous_snapshot_date: date | None = None
     for row in daily_rows:
         snapshot_date = row["snapshot_date"]
         portfolio_value = normalize_decimal(row["total_value"])
-        deposits = deposits_by_day.get(snapshot_date, Decimal("0"))
-        withdrawals = withdrawals_by_day.get(snapshot_date, Decimal("0"))
-        income_net = income_net_by_day.get(snapshot_date, Decimal("0"))
-        iis_tax_deduction_income = iis_tax_deductions_by_day.get(snapshot_date, Decimal("0"))
+        interval_args = (previous_snapshot_date, snapshot_date)
+        deposits = sum_decimal_values_for_snapshot_interval(deposits_by_day, *interval_args)
+        withdrawals = sum_decimal_values_for_snapshot_interval(withdrawals_by_day, *interval_args)
+        income_net = sum_decimal_values_for_snapshot_interval(income_net_by_day, *interval_args)
+        iis_tax_deduction_income = sum_decimal_values_for_snapshot_interval(
+            iis_tax_deductions_by_day,
+            *interval_args,
+        )
         total_income_net = income_net + iis_tax_deduction_income
-        commissions = commissions_by_day.get(snapshot_date, Decimal("0"))
-        taxes = taxes_by_day.get(snapshot_date, Decimal("0"))
-        income_tax = income_tax_by_day.get(snapshot_date, Decimal("0"))
-        operation_tax_refund = tax_refunds_by_day.get(snapshot_date, Decimal("0"))
-        income_tax_refund = income_tax_refunds_by_day.get(snapshot_date, Decimal("0"))
+        commissions = sum_decimal_values_for_snapshot_interval(commissions_by_day, *interval_args)
+        taxes = sum_decimal_values_for_snapshot_interval(taxes_by_day, *interval_args)
+        income_tax = sum_decimal_values_for_snapshot_interval(income_tax_by_day, *interval_args)
+        operation_tax_refund = sum_decimal_values_for_snapshot_interval(
+            tax_refunds_by_day,
+            *interval_args,
+        )
+        income_tax_refund = sum_decimal_values_for_snapshot_interval(
+            income_tax_refunds_by_day,
+            *interval_args,
+        )
         net_external_flow = deposits - withdrawals
         net_cashflow = net_external_flow
         day_pnl = Decimal("0")
         if previous_value is not None:
             day_pnl = portfolio_value - previous_value - net_cashflow
         previous_value = portfolio_value
+        previous_snapshot_date = snapshot_date
 
         daily_csv_rows.append(
             {
