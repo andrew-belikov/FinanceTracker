@@ -13,13 +13,38 @@ from telegram import InputFile, Update
 
 from common.logging_setup import configure_logging, get_logger
 
+
+class RuntimeConfigurationError(ValueError):
+    """Raised when required runtime configuration is absent or unsafe."""
+
+
+def parse_required_id_allowlist(raw_value):
+    if raw_value is None or not raw_value.strip():
+        raise RuntimeConfigurationError("ALLOWED_USER_IDS must be explicitly configured")
+    parts = [part.strip() for part in raw_value.split(",")]
+    if any(
+        not part or not part.isascii() or not part.isdecimal() or int(part) <= 0
+        for part in parts
+    ):
+        raise RuntimeConfigurationError("ALLOWED_USER_IDS must contain positive decimal IDs")
+    return frozenset(int(part) for part in parts)
+
+
+def validate_database_credentials(*, db_dsn, db_password):
+    if not (db_dsn or "").strip() and not (db_password or "").strip():
+        raise RuntimeConfigurationError("Database credentials must be explicitly configured")
+
+
 # Telegram
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 
-ALLOWED_USER_IDS_STR = os.getenv("ALLOWED_USER_IDS", "365469")
-ALLOWED_USER_IDS = {
-    int(x.strip()) for x in ALLOWED_USER_IDS_STR.split(",") if x.strip()
-}
+ALLOWED_USER_IDS_STR = os.getenv("ALLOWED_USER_IDS")
+try:
+    ALLOWED_USER_IDS = parse_required_id_allowlist(ALLOWED_USER_IDS_STR)
+    ALLOWLIST_CONFIGURATION_ERROR = None
+except RuntimeConfigurationError as exc:
+    ALLOWED_USER_IDS = frozenset()
+    ALLOWLIST_CONFIGURATION_ERROR = exc
 
 # В какие чаты слать авто-отчёты. Для личных чатов chat_id == user_id,
 # так что можно использовать тот же список.
@@ -147,11 +172,10 @@ DB_HOST = os.getenv("DB_HOST", "db")
 DB_PORT = int(os.getenv("DB_PORT", "5432"))
 DB_NAME = os.getenv("DB_NAME", "fintracker")
 DB_USER = os.getenv("DB_USER", "aqua4")
-DB_PASSWORD = os.getenv("DB_PASSWORD", "change_me")
-
-DB_DSN = os.getenv(
-    "DB_DSN",
-    f"postgresql+psycopg2://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}",
+DB_PASSWORD = os.getenv("DB_PASSWORD", "").strip()
+EXPLICIT_DB_DSN = os.getenv("DB_DSN", "").strip()
+DB_DSN = EXPLICIT_DB_DSN or (
+    f"postgresql+psycopg2://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
 )
 
 # Русские названия месяцев
@@ -266,6 +290,7 @@ REBALANCE_FEATURE_UNAVAILABLE_TEXT = (
     "Функция таргетов пока недоступна: таблицы ещё не созданы. "
     "Перезапустите tracker и bot или примените миграцию, затем попробуйте снова."
 )
+PRIVATE_CHAT_REQUIRED_TEXT = "Финансовые команды доступны только в личном чате с ботом."
 REBALANCE_TARGETS_NOT_CONFIGURED_TEXT = (
     "Таргеты пока не настроены.\n\n"
     "Пример: `/targets set stocks=50 bonds=30 cash=20`"
@@ -361,7 +386,7 @@ async def safe_send_message(
         logger.info(
             "bot_send_message_started",
             "Sending Telegram message.",
-            {"chat_id": chat_id, "parse_mode": parse_mode, "text_preview": text[:120]},
+            {"parse_mode": parse_mode, "text_length": len(text)},
         )
         message = await bot.send_message(
             chat_id=chat_id,
@@ -372,20 +397,20 @@ async def safe_send_message(
         logger.info(
             "bot_send_message_succeeded",
             "Telegram message sent.",
-            {"chat_id": chat_id, "parse_mode": parse_mode},
+            {"parse_mode": parse_mode},
         )
     except Exception:
         # Иногда ломается Markdown из-за динамических значений (тикеры с _ и т.п.)
         logger.exception(
             "bot_send_message_markdown_failed",
             "Telegram message send with parse_mode failed; retrying without parse mode.",
-            {"chat_id": chat_id, "parse_mode": parse_mode},
+            {"parse_mode": parse_mode},
         )
         message = await bot.send_message(chat_id=chat_id, text=text, reply_markup=reply_markup)
         logger.info(
             "bot_send_message_plain_succeeded",
             "Telegram message sent without parse mode fallback.",
-            {"chat_id": chat_id},
+            None,
         )
     return message
 
@@ -402,7 +427,6 @@ async def safe_send_document(
         "bot_send_document_started",
         "Sending Telegram document.",
         {
-            "chat_id": chat_id,
             "filename": filename,
             "has_caption": caption is not None,
         },
@@ -419,7 +443,6 @@ async def safe_send_document(
             "bot_send_document_failed",
             "Telegram document send failed.",
             {
-                "chat_id": chat_id,
                 "filename": filename,
             },
         )
@@ -429,7 +452,6 @@ async def safe_send_document(
         "bot_send_document_succeeded",
         "Telegram document sent.",
         {
-            "chat_id": chat_id,
             "filename": filename,
         },
     )
@@ -498,23 +520,35 @@ def is_authorized(update: Update) -> bool:
         logger.warning(
             "bot_update_missing_user",
             "Received update without effective_user.",
-            {"update_id": getattr(update, "update_id", None)},
+            None,
         )
         return False
     if user.id not in ALLOWED_USER_IDS:
         logger.warning(
             "bot_update_unauthorized",
             "Ignored update from unauthorized user.",
-            {
-                "update_id": getattr(update, "update_id", None),
-                "user_id": user.id,
-                "username": user.username,
-                "chat_id": getattr(update.effective_chat, "id", None),
-                "message_text": getattr(update.effective_message, "text", None),
-            },
+            None,
+        )
+        return False
+    chat_type = getattr(getattr(update, "effective_chat", None), "type", None)
+    if chat_type != "private":
+        logger.warning(
+            "bot_update_non_private",
+            "Ignored authorized update outside a private chat.",
+            {"chat_type": chat_type or "unknown"},
         )
         return False
     return True
+
+
+def get_authorization_denial_text(update: Update) -> str | None:
+    user = getattr(update, "effective_user", None)
+    chat = getattr(update, "effective_chat", None)
+    if user is None or user.id not in ALLOWED_USER_IDS:
+        return None
+    if getattr(chat, "type", None) != "private":
+        return PRIVATE_CHAT_REQUIRED_TEXT
+    return None
 
 
 def reset_update_tracking_state() -> None:
@@ -541,12 +575,9 @@ def log_update_received(update: Update, command_name: str | None = None) -> None
         "bot_update_received",
         "Received Telegram update.",
         {
-            "update_id": getattr(update, "update_id", None),
-            "user_id": getattr(update.effective_user, "id", None),
-            "username": getattr(update.effective_user, "username", None),
-            "chat_id": getattr(update.effective_chat, "id", None),
             "command": command_name,
-            "message_text": getattr(update.effective_message, "text", None),
+            "message_length": len(getattr(update.effective_message, "text", None) or ""),
+            "chat_type": getattr(update.effective_chat, "type", None),
         },
     )
 

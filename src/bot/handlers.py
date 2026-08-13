@@ -29,12 +29,23 @@ from runtime import (
     TZ,
     db_session,
     fmt_decimal_rub,
+    get_authorization_denial_text,
     is_authorized,
     log_update_received,
     logger,
     safe_send_document,
     safe_send_message,
 )
+
+
+async def require_authorized_private_chat(update: Update) -> bool:
+    if is_authorized(update):
+        return True
+    denial_text = get_authorization_denial_text(update)
+    message = getattr(update, "effective_message", None)
+    if denial_text and message is not None:
+        await message.reply_text(denial_text)
+    return False
 from services import (
     build_help_text,
     build_invest_text_for_account,
@@ -114,7 +125,7 @@ async def handle_iis_tax_deduction_callback(update: Update, context: ContextType
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     log_update_received(update, command_name="/start")
-    if not is_authorized(update):
+    if not await require_authorized_private_chat(update):
         return
     text = (
         "Привет! Я слежу за вашим портфелем «Семейный капитал».\n\n"
@@ -135,7 +146,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     log_update_received(update, command_name="/help")
-    if not is_authorized(update):
+    if not await require_authorized_private_chat(update):
         return
 
     text = build_help_text()
@@ -144,7 +155,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_today(update: Update, context: ContextTypes.DEFAULT_TYPE):
     log_update_received(update, command_name="/today")
-    if not is_authorized(update):
+    if not await require_authorized_private_chat(update):
         return
     text = build_today_summary()
     await safe_send_message(context.bot, update.effective_chat.id, text, parse_mode="Markdown")
@@ -152,7 +163,7 @@ async def cmd_today(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_week(update: Update, context: ContextTypes.DEFAULT_TYPE):
     log_update_received(update, command_name="/week")
-    if not is_authorized(update):
+    if not await require_authorized_private_chat(update):
         return
     text = build_week_summary()
     await safe_send_message(context.bot, update.effective_chat.id, text, parse_mode="Markdown")
@@ -160,7 +171,7 @@ async def cmd_week(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_month(update: Update, context: ContextTypes.DEFAULT_TYPE):
     log_update_received(update, command_name="/month")
-    if not is_authorized(update):
+    if not await require_authorized_private_chat(update):
         return
     text = build_month_summary()
     await safe_send_message(context.bot, update.effective_chat.id, text, parse_mode="Markdown")
@@ -168,7 +179,7 @@ async def cmd_month(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_calendar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     log_update_received(update, command_name="/calendar")
-    if not is_authorized(update):
+    if not await require_authorized_private_chat(update):
         return
     if context.args:
         await update.message.reply_text("Формат: /calendar")
@@ -215,7 +226,7 @@ def _parse_monthpdf_args(args):
 
 async def cmd_monthpdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
     log_update_received(update, command_name="/monthpdf")
-    if not is_authorized(update):
+    if not await require_authorized_private_chat(update):
         return
 
     try:
@@ -262,7 +273,7 @@ async def cmd_monthpdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Failed to fetch monthly PDF report from reporter.",
             {
                 "chat_id": getattr(update.effective_chat, "id", None),
-                "error": str(exc),
+                "error_type": type(exc).__name__,
             },
         )
         await update.message.reply_text(str(exc))
@@ -292,7 +303,7 @@ async def cmd_monthpdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_year(update: Update, context: ContextTypes.DEFAULT_TYPE):
     log_update_received(update, command_name="/year")
-    if not is_authorized(update):
+    if not await require_authorized_private_chat(update):
         return
 
     args = context.args or []
@@ -371,7 +382,7 @@ async def cmd_year(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_dataset(update: Update, context: ContextTypes.DEFAULT_TYPE):
     log_update_received(update, command_name="/dataset")
-    if not is_authorized(update):
+    if not await require_authorized_private_chat(update):
         return
 
     if context.args:
@@ -397,7 +408,7 @@ async def cmd_dataset(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_structure(update: Update, context: ContextTypes.DEFAULT_TYPE):
     log_update_received(update, command_name="/structure")
-    if not is_authorized(update):
+    if not await require_authorized_private_chat(update):
         return
     text = build_structure_text()
     await safe_send_message(context.bot, update.effective_chat.id, text, parse_mode="Markdown")
@@ -405,7 +416,7 @@ async def cmd_structure(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
     log_update_received(update, command_name="/history")
-    if not is_authorized(update):
+    if not await require_authorized_private_chat(update):
         return
 
     path = "/tmp/history.png"
@@ -429,7 +440,7 @@ async def cmd_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_twr(update: Update, context: ContextTypes.DEFAULT_TYPE):
     log_update_received(update, command_name="/twr")
-    if not is_authorized(update):
+    if not await require_authorized_private_chat(update):
         return
 
     with db_session() as session:
@@ -473,7 +484,7 @@ async def cmd_twr(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_targets(update: Update, context: ContextTypes.DEFAULT_TYPE):
     log_update_received(update, command_name="/targets")
-    if not is_authorized(update):
+    if not await require_authorized_private_chat(update):
         return
 
     args = context.args or []
@@ -514,7 +525,7 @@ async def cmd_targets(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_rebalance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     log_update_received(update, command_name="/rebalance")
-    if not is_authorized(update):
+    if not await require_authorized_private_chat(update):
         return
     if context.args:
         await update.message.reply_text("Формат: /rebalance")
@@ -531,7 +542,7 @@ async def cmd_rebalance(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_invest(update: Update, context: ContextTypes.DEFAULT_TYPE):
     log_update_received(update, command_name="/invest")
-    if not is_authorized(update):
+    if not await require_authorized_private_chat(update):
         return
 
     args = context.args or []

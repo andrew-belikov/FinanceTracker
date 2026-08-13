@@ -16,7 +16,6 @@ import os as _os
 import re as _re
 import sys as _sys
 import threading as _threading
-import traceback as _traceback
 from typing import Any, Dict, Mapping, Optional, TextIO
 
 
@@ -31,6 +30,20 @@ _SENSITIVE_KEYS = {
     "access_token",
     "refresh_token",
     "authorization",
+    "chat_id",
+    "message_text",
+    "response_body",
+    "target_chat_ids",
+    "text_preview",
+    "user_id",
+    "username",
+    "update_id",
+    "error_message",
+    "error",
+    "payload",
+    "raw_payload",
+    "request_body",
+    "response_text",
 }
 
 # Bearer <token>
@@ -42,7 +55,7 @@ _RE_TG_URL = _re.compile(r"(https?://api\.telegram\.org/bot)([^/\s\"']+)", _re.I
 # Telegram token as standalone: bot<id>:<secret>
 _RE_TG_TOKEN = _re.compile(r"\bbot\d{6,}:[A-Za-z0-9_-]{20,}\b")
 
-_CORRELATION_FIELDS = ("trace_id", "request_id", "job_id", "update_id")
+_CORRELATION_FIELDS = ("trace_id", "request_id", "job_id")
 _FIRST_PARTY_LOGGER_PREFIXES = (
     "__main__",
     "proxy_smoke",
@@ -233,8 +246,6 @@ class _JsonLineFormatter(_logging.Formatter):
                 etype, evalue, etb = record.exc_info
                 payload["error"] = {
                     "type": getattr(etype, "__name__", "Exception"),
-                    "message": _safe_str(evalue),
-                    "stack": "".join(_traceback.format_exception(etype, evalue, etb)),
                     "where": f"{record.pathname}:{record.lineno} in {record.funcName}",
                 }
 

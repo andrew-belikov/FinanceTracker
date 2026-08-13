@@ -22,15 +22,14 @@ from xray_client.render_config import build_config
 
 
 TEST_VLESS_URL = (
-    "vless://00000000-0000-4000-8000-000000000000@192.0.2.1:443"
-    "?encryption=none&flow=xtls-rprx-vision&security=reality&sni=www.apple.com"
-    "&fp=chrome&pbk=TKApDiSXjLexhtMTrKNOlsdDOI96HPLjDnGpzMw8Ux4"
-    "&sid=3959d570c542874d&type=tcp#homeserver"
+    "vless://00000000-0000-4000-8000-000000000001@192.0.2.10:443"
+    "?encryption=none&flow=xtls-rprx-vision&security=reality&sni=example.invalid"
+    "&fp=chrome&pbk=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    "&sid=0000000000000001&type=tcp#synthetic-primary"
 )
 TEST_KCP_VLESS_URL = (
-    "vless://00000000-0000-4000-8000-000000000000@192.0.2.1:8443"
-    "?encryption=mlkem768x25519plus.native.0rtt.3VgZ4Sao-er_QQpT8rWtzH2QIsFado-wjv7_LL6Eymk"
-    "&security=none&type=kcp#homeserver-financetracker-udp"
+    "vless://00000000-0000-4000-8000-000000000002@198.51.100.20:8443"
+    "?encryption=synthetic-test-value&security=none&type=kcp#synthetic-fallback"
 )
 
 
@@ -94,7 +93,7 @@ class XrayProxyConfigTests(unittest.TestCase):
 
         self.assertEqual(
             user["encryption"],
-            "mlkem768x25519plus.native.0rtt.3VgZ4Sao-er_QQpT8rWtzH2QIsFado-wjv7_LL6Eymk",
+            "synthetic-test-value",
         )
         self.assertEqual(stream_settings["network"], "kcp")
         self.assertEqual(stream_settings["security"], "none")
