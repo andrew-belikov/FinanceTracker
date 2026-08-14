@@ -61,7 +61,7 @@ deployment, migration или security-последствия.
 | P1-11 | PR-10 | data | exact ID absent; `auto` с 0/1/2 open accounts | `330b48c` | REVIEWED | 287/287; exact/auto account contracts PASS | finance APPROVE | tracker sync без account fallback |
 | P1-12 | PR-05 | security | allowed user в group отклоняется до DB/PDF/dataset/chart | `51ed49c`, `29a9db3` | REVIEWED | 258/258; private-chat contracts PASS | finance APPROVE | отрицательный private-data smoke |
 | P1-13 | PR-05 | security | missing/empty/malformed allowlist останавливает startup | `51ed49c`, `29a9db3` | REVIEWED | 258/258; config fail-fast PASS | finance APPROVE | startup config evidence без ID |
-| P1-14 | PR-06 | security | no/wrong key → `401/403` до body/builder; correct key succeeds | pending | CONFIRMED | pending | ci-deploy | reporter negative/authorized smoke |
+| P1-14 | PR-06 | security | no/wrong key → `401/403` до body/builder; correct key succeeds | `ea87a16` | REVIEWED | 305/305; live auth ordering PASS | ci APPROVE | reporter negative/authorized smoke |
 | P2-01 | PR-11 | finance | property cases: allocations >= 0 и сумма равна deposit | `b1a81ab` | REVIEWED | 258/258; allocation properties PASS | ci APPROVE | N/A после unit evidence |
 | P2-02 | PR-11 | finance | единый cost-basis denominator для position/group/total | `b1a81ab` | REVIEWED | 258/258; cost-basis contracts PASS | ci APPROVE | `/structure` безопасный smoke владельцем |
 | P2-03 | PR-10 | data | cost basis snapshot до/после event; late tax сохраняет as-of basis | `330b48c` | REVIEWED | 287/287; as-of basis PASS | finance APPROVE | reconciliation smoke |
@@ -76,16 +76,16 @@ deployment, migration или security-последствия.
 | P2-12 | PR-02 | ci-deploy | dirty canonical checkout останавливается до build; exact HEAD/image | `55d11f2`, `545449a` | REVIEWED | 258/258; exact-image contracts PASS | security APPROVE | clean exact-SHA deployment |
 | P2-13 | PR-02 | ci-deploy | HTTP 401/invalid JSON/`ok=false`; bot/tracker health readiness | `55d11f2`, `545449a`, `81d8642` | REVIEWED | 258/258; readiness contracts PASS | security APPROVE | healthy services без restart loop |
 | P2-14 | PR-12 | security | logs не содержат raw message/username/stable IDs/upstream payload | `29a9db3`, `b4e3fa3`, `5697a7c` | REVIEWED | 258/258; adversarial redaction PASS | finance APPROVE | очищенный ERROR/CRITICAL scan |
-| P2-15 | PR-06 | security | concurrency budget, overload response и slow-client timeout | pending | CONFIRMED | pending | ci-deploy | reporter load/health smoke |
-| P2-16 | PR-06 | security | bot видит SOCKS, контейнер default network не видит | pending | CONFIRMED | pending | ci-deploy | Docker network isolation evidence |
+| P2-15 | PR-06 | security | concurrency budget, overload response и slow-client timeout | `ea87a16` | REVIEWED | 305/305; live concurrency/slow-body PASS | ci APPROVE | reporter load/health smoke |
+| P2-16 | PR-06 | security | bot видит SOCKS, контейнер default network не видит | `ea87a16` | REVIEWED | disposable Docker isolation PASS/cleaned | ci APPROVE | Docker network isolation evidence |
 | P2-17 | PR-12 | security | неверный Xray SHA-256 ломает build | `51ed49c` | REVIEWED | bad SHA fails before unzip; pinned amd64 build PASS | ci APPROVE | image build identity |
 | P2-18 | PR-05 | security | missing DB secret fail-fast без DSN в логах | `51ed49c`, `29a9db3`, `81d8642` | REVIEWED | 258/258; entrypoint fail-fast PASS | ci APPROVE | startup config evidence без секрета |
-| P2-19 | PR-13 | security | concurrent history/TWR paths уникальны; cleanup success/error | pending | CONFIRMED | pending | notifications | temp-artifact absence после smoke |
-| P2-20 | PR-13 | security | slow builder не блокирует heartbeat; timeout освобождает budget | pending | CONFIRMED | pending | notifications | bot responsiveness smoke |
+| P2-19 | PR-13 | security | concurrent history/TWR paths уникальны; cleanup success/error | `ea87a16`, `5610a5f` | REVIEWED | 305/305; concurrent/error cleanup PASS | ci APPROVE | temp-artifact absence после smoke |
+| P2-20 | PR-13 | security | slow builder не блокирует heartbeat; timeout освобождает budget | `ea87a16`, `5610a5f` | REVIEWED | 305/305; heartbeat/budget/late cleanup PASS | ci APPROVE | bot responsiveness smoke |
 | P2-21 | PR-04 | notifications | partial recipients: retry только failed, затем complete | `7a75ad7`, `90bd645`, `c947ff3` | REVIEWED | 270/270; recipient ledger contracts PASS | security APPROVE | recipient delivery ledger; disposable PostgreSQL pending |
 | P3-01 | PR-01 | ci-deploy | clean locked install с hashes; action refs immutable | `55d11f2`, `3633f03` | REVIEWED | locked Python 3.12; 258/258; hash contracts PASS | security APPROVE | CI exact dependency evidence |
-| P3-02 | PR-13 | security | protected debug dir, retention и cleanup | pending | CONFIRMED | pending | adversarial | отсутствие persistent debug artifacts |
-| P3-03 | PR-13 | security | CSV cells `=`, `+`, `-`, `@` нейтрализуются | pending | CONFIRMED | pending | finance | dataset archive inspection без данных пользователя |
+| P3-02 | PR-13 | security | protected debug dir, retention и cleanup | `ea87a16`, `5610a5f` | REVIEWED | 1000-write race + symlink/traversal PASS | ci APPROVE | отсутствие persistent debug artifacts |
+| P3-03 | PR-13 | security | CSV cells `=`, `+`, `-`, `@` нейтрализуются | `ea87a16`, `5610a5f` | REVIEWED | CSV Cc/Cf neutralized; JSON raw PASS | ci APPROVE | dataset archive inspection без данных пользователя |
 
 ## Обязательная объединённая приёмка
 
