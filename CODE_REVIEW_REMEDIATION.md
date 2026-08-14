@@ -47,7 +47,7 @@ deployment, migration или security-последствия.
 
 | ID | Пакет | Ответственный агент | Воспроизводящий тест / автоматическая проверка | PR / commit | Статус | Локальные проверки | Независимое review | Production-доказательство |
 |---|---|---|---|---|---|---|---|---|
-| P0-01 | IR-00 | security | secret scan текущих файлов и Git history; синтетические VLESS fixtures | PR #27, #33 | EXTERNAL_BLOCKED: branches/local clean; GitHub `refs/pull/1..25/head` pending Support purge | 317/317; tracked/local history 0; fresh GitHub mirror: 2 DB fallback findings только в read-only pull refs | finance: repository part APPROVE | старая VLESS identity отсутствует; новая активна на обоих маршрутах `ru_hop`; homeserver xray healthy; значения не раскрывались |
+| P0-01 | IR-00 | security | secret scan текущих файлов и Git history; синтетические VLESS fixtures | PR #27, #33 | EXTERNAL_BLOCKED: branches/local clean; GitHub `refs/pull/1..25/head` pending Support purge | 317/317; tracked/local history 0; fresh GitHub mirror: 2 DB fallback findings только в read-only pull refs | finance: repository part APPROVE | VLESS identity заменена; legacy DB fallback совпадал с production и отозван ротацией; local/production env синхронизированы; DB/app probes и xray health PASS; значения не раскрывались |
 | P1-01 | PR-03 | notifications | точные query-row contracts для income/invest jobs и callback markup | PR #30 | REVIEWED | 317/317; row/markup contracts PASS | security APPROVE | bot job smoke без `KeyError`; кнопка только у пополнения |
 | P1-02 | PR-02 | ci-deploy | workflow contract: green CI и равенство CI/deploy SHA | PR #28 | REVIEWED | 317/317; workflow contracts PASS | security APPROVE | CI/deploy run одного SHA |
 | P1-03 | PR-07 | data | table-driven day/month/year/DST local bounds → UTC `[start,end)` | PR #31, #33 | REVIEWED | 317/317; timezone/DST и year-chart boundary contracts PASS | adversarial final APPROVE | disposable PostgreSQL 16 подтвердил локальную границу года; production pending |
@@ -114,6 +114,15 @@ credentials в доказательствах не сохраняются.
 legacy DB fallback. Ветки и `refs/pull/26..33` чисты. Обычным push эти refs не
 изменяются; для удаления cached views, PR refs и server-side объектов требуется
 GitHub Support purge по официальной процедуре sensitive-data removal.
+
+Сверка через `homeserver_external` без вывода значений подтвердила, что этот
+legacy fallback совпадал с действующим production-паролем PostgreSQL. Пароль
+роли и `.env` был атомарно заменён; `db`, `migrate`, `tracker`, `bot` и
+`reporter` получили новый credential, а локальный `.env` синхронизирован и
+приведён к режиму `0600`. После ротации DB probes для трёх приложений, health
+`db`/`reporter`/`xray-client`, отсутствие restart loop и неизменность container
+identity `xray-client` подтверждены. Старый fallback больше не аутентифицирует
+production, временные файлы с credential удалены.
 
 До отдельного разрешения владельца по-прежнему запрещены merge в `main` и
 production deploy remediation-кода. После такого разрешения production-
