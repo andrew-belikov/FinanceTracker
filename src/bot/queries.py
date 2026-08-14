@@ -428,6 +428,108 @@ def get_income_for_period(
     return Decimal(row["coupons"] or 0), Decimal(row["dividends"] or 0)
 
 
+def get_income_currency_breakdown_for_period(
+    db,
+    account_id: str,
+    start_date,
+    end_date,
+) -> list[dict[str, Decimal | str]]:
+    """Return nominal income/tax facts per currency without FX conversion."""
+    local_start = (
+        utc_naive_to_local_date(start_date, TZ)
+        if isinstance(start_date, datetime)
+        else start_date
+    )
+    local_end = (
+        utc_naive_to_local_date(end_date, TZ)
+        if isinstance(end_date, datetime)
+        else end_date
+    )
+    totals: dict[str, dict[str, Decimal | str]] = {}
+
+    try:
+        with _optional_relation_savepoint(db):
+            income_rows = db.execute(
+                text(
+                    """
+                    SELECT
+                        COALESCE(NULLIF(UPPER(currency), ''), 'UNKNOWN') AS currency,
+                        COALESCE(SUM(CASE WHEN event_type = 'coupon' THEN net_amount ELSE 0 END), 0) AS coupons,
+                        COALESCE(SUM(CASE WHEN event_type = 'dividend' THEN net_amount ELSE 0 END), 0) AS dividends,
+                        COALESCE(SUM(CASE WHEN tax_amount < 0 THEN ABS(tax_amount) ELSE 0 END), 0) AS taxes,
+                        COALESCE(SUM(CASE WHEN tax_amount > 0 THEN tax_amount ELSE 0 END), 0) AS tax_refunds
+                    FROM income_events
+                    WHERE account_id = :account_id
+                      AND event_date >= :start_date
+                      AND event_date <= :end_date
+                    GROUP BY COALESCE(NULLIF(UPPER(currency), ''), 'UNKNOWN')
+                    """
+                ),
+                {
+                    "account_id": account_id,
+                    "start_date": local_start,
+                    "end_date": local_end,
+                },
+            ).mappings().all()
+    except Exception as exc:
+        if _is_undefined_table_error(exc, "income_events"):
+            income_rows = []
+        else:
+            raise
+
+    for row in income_rows:
+        currency = str(row["currency"] or "UNKNOWN").upper()
+        totals[currency] = {
+            "currency": currency,
+            "coupons": Decimal(row["coupons"] or 0),
+            "dividends": Decimal(row["dividends"] or 0),
+            "taxes": Decimal(row["taxes"] or 0),
+            "tax_refunds": Decimal(row["tax_refunds"] or 0),
+        }
+
+    operation_rows = db.execute(
+        text(
+            f"""
+            {OPERATIONS_DEDUP_CTE}
+            SELECT
+                COALESCE(NULLIF(UPPER(currency), ''), 'UNKNOWN') AS currency,
+                COALESCE(SUM(CASE WHEN amount < 0 THEN ABS(amount) ELSE 0 END), 0) AS taxes,
+                COALESCE(SUM(CASE WHEN amount > 0 THEN amount ELSE 0 END), 0) AS tax_refunds
+            FROM operations_dedup
+            WHERE account_id = :account_id
+              AND date >= :start_date
+              AND date <= :end_date
+              AND operation_type IN :operation_types
+              AND state = :executed_state
+            GROUP BY COALESCE(NULLIF(UPPER(currency), ''), 'UNKNOWN')
+            """
+        ).bindparams(bindparam("operation_types", expanding=True)),
+        {
+            "account_id": account_id,
+            "start_date": start_date,
+            "end_date": end_date,
+            "operation_types": TAX_OPERATION_TYPES,
+            "executed_state": EXECUTED_OPERATION_STATE,
+        },
+    ).mappings().all()
+    for row in operation_rows:
+        currency = str(row["currency"] or "UNKNOWN").upper()
+        values = totals.setdefault(
+            currency,
+            {
+                "currency": currency,
+                "coupons": Decimal("0"),
+                "dividends": Decimal("0"),
+                "taxes": Decimal("0"),
+                "tax_refunds": Decimal("0"),
+            },
+        )
+        values["taxes"] = Decimal(values["taxes"]) + Decimal(row["taxes"] or 0)
+        values["tax_refunds"] = Decimal(values["tax_refunds"]) + Decimal(row["tax_refunds"] or 0)
+
+    return [totals[currency] for currency in sorted(totals)]
+
+
 def get_commissions_for_period(
     db, account_id: str, start_date, end_date, currency: str | None = None
 ) -> Decimal:
