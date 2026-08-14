@@ -47,6 +47,9 @@ def load_symbols():
     shared_namespace = {
         "os": os,
         "TZ": ZoneInfo("Europe/Moscow"),
+        "utc_naive_to_local_date": lambda value, zone: (
+            value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value
+        ).astimezone(zone).date(),
     }
     exec("from datetime import date, datetime, timezone\n", shared_namespace)
     shared_namespace["text"] = lambda sql: sql
@@ -227,6 +230,46 @@ class TWRComputationTests(unittest.TestCase):
         self.assertIsNotNone(data)
         _dates, _values, twr = data
         self.assertEqual(twr, [0.0, 0.0, 0.0])
+
+    def test_compute_twr_series_includes_gap_day_deposit_in_snapshot_interval(self):
+        rows = [
+            {"snapshot_date": date(2026, 8, 1), "total_value": 100.0},
+            {"snapshot_date": date(2026, 8, 3), "total_value": 150.0},
+        ]
+
+        data = compute_twr_series(rows, {date(2026, 8, 2): 50.0})
+
+        self.assertIsNotNone(data)
+        self.assertAlmostEqual(data[2][-1], 0.0, places=8)
+
+    def test_compute_twr_series_includes_gap_day_withdrawal_in_snapshot_interval(self):
+        rows = [
+            {"snapshot_date": date(2026, 8, 1), "total_value": 100.0},
+            {"snapshot_date": date(2026, 8, 4), "total_value": 70.0},
+        ]
+
+        data = compute_twr_series(rows, {date(2026, 8, 2): -20.0, date(2026, 8, 3): -10.0})
+
+        self.assertIsNotNone(data)
+        self.assertAlmostEqual(data[2][-1], 0.0, places=8)
+
+    def test_compute_twr_series_sums_multiple_flows_across_snapshot_interval(self):
+        rows = [
+            {"snapshot_date": date(2026, 8, 1), "total_value": 100.0},
+            {"snapshot_date": date(2026, 8, 5), "total_value": 125.0},
+        ]
+
+        data = compute_twr_series(
+            rows,
+            {
+                date(2026, 8, 2): 20.0,
+                date(2026, 8, 3): -5.0,
+                date(2026, 8, 5): 10.0,
+            },
+        )
+
+        self.assertIsNotNone(data)
+        self.assertAlmostEqual(data[2][-1], 0.0, places=8)
 
 
 class PeriodDeltaCalculationTests(unittest.TestCase):

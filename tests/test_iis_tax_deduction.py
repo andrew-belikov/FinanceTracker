@@ -6,6 +6,8 @@ from types import SimpleNamespace
 from unittest import mock
 from unittest.mock import AsyncMock
 
+from telegram.error import BadRequest
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
@@ -108,7 +110,11 @@ class IisTaxDeductionCallbackTests(unittest.IsolatedAsyncioTestCase):
 class SafeSendMessageMarkupTests(unittest.IsolatedAsyncioTestCase):
     async def test_markdown_fallback_preserves_inline_keyboard(self):
         markup = build_iis_tax_deduction_markup("123", marked=False)
-        bot = SimpleNamespace(send_message=AsyncMock(side_effect=[RuntimeError("bad markdown"), "sent"]))
+        bot = SimpleNamespace(
+            send_message=AsyncMock(
+                side_effect=[BadRequest("Can't parse entities: bad markdown"), "sent"]
+            )
+        )
 
         result = await runtime.safe_send_message(
             bot,

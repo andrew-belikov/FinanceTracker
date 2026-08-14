@@ -16,7 +16,6 @@ import os as _os
 import re as _re
 import sys as _sys
 import threading as _threading
-import traceback as _traceback
 from typing import Any, Dict, Mapping, Optional, TextIO
 
 
@@ -31,7 +30,95 @@ _SENSITIVE_KEYS = {
     "access_token",
     "refresh_token",
     "authorization",
+    "chat_id",
+    "message_text",
+    "response_body",
+    "target_chat_ids",
+    "text_preview",
+    "user_id",
+    "username",
+    "update_id",
+    "error_message",
+    "error",
+    "payload",
+    "raw_payload",
+    "request_body",
+    "response_text",
+    "account_id",
+    "account_name",
+    "operation_id",
+    "income_event_id",
+    "figi",
+    "ticker",
+    "instrument_id",
+    "instrument_uid",
+    "position_id",
+    "order_id",
+    "id",
+    "cursor",
+    "next_cursor",
+    "proxy_endpoint",
+    "proxy_url",
+    "dsn",
 }
+
+_FINANCIAL_KEY_MARKERS = (
+    "amount",
+    "balance",
+    "cashflow",
+    "commission",
+    "cost",
+    "deposit",
+    "income",
+    "pnl",
+    "portfolio_value",
+    "position_value",
+    "price",
+    "profit",
+    "quantity",
+    "tax",
+    "value",
+    "withdrawal",
+    "yield",
+)
+
+_SAFE_STRUCTURAL_COUNTER_KEYS = frozenset(
+    {
+        "alias_groups_count",
+        "applied_total",
+        "asset_alias_rows_count",
+        "candidate_count",
+        "commands_count",
+        "count",
+        "daily_failed_total",
+        "daily_sent_total",
+        "deposit_count",
+        "eval_count",
+        "failed_total",
+        "income_events_count",
+        "loaded_total",
+        "mojibake_detected_count",
+        "month_failed_total",
+        "month_sent_total",
+        "operations_count",
+        "operations_top_count",
+        "page_items_count",
+        "pending_update_count",
+        "positions_count",
+        "positions_missing_label_count",
+        "processed_count",
+        "prompt_eval_count",
+        "recovery_confirmation_count",
+        "sent_total",
+        "snapshot_count",
+        "source_snapshot_count",
+        "target_chat_count",
+        "triggers_count",
+        "unknown_operation_group_count",
+        "warnings_count",
+    }
+)
+_MAX_SAFE_STRUCTURAL_COUNT = 1_000_000_000
 
 # Bearer <token>
 _RE_BEARER = _re.compile(r"(Bearer)\s+[A-Za-z0-9\-\._~\+\/]+=*", _re.IGNORECASE)
@@ -42,7 +129,7 @@ _RE_TG_URL = _re.compile(r"(https?://api\.telegram\.org/bot)([^/\s\"']+)", _re.I
 # Telegram token as standalone: bot<id>:<secret>
 _RE_TG_TOKEN = _re.compile(r"\bbot\d{6,}:[A-Za-z0-9_-]{20,}\b")
 
-_CORRELATION_FIELDS = ("trace_id", "request_id", "job_id", "update_id")
+_CORRELATION_FIELDS = ("trace_id", "request_id", "job_id")
 _FIRST_PARTY_LOGGER_PREFIXES = (
     "__main__",
     "proxy_smoke",
@@ -68,6 +155,34 @@ def _sanitize_string(s: str) -> str:
     return s
 
 
+def _is_bounded_structural_count(value: Any) -> bool:
+    return (
+        type(value) is int
+        and 0 <= value <= _MAX_SAFE_STRUCTURAL_COUNT
+    )
+
+
+def _is_safe_structural_counter(key: str, value: Any) -> bool:
+    normalized = key.strip().lower()
+    return (
+        normalized in _SAFE_STRUCTURAL_COUNTER_KEYS
+        and _is_bounded_structural_count(value)
+    )
+
+
+def _is_sensitive_key(key: str, value: Any) -> bool:
+    normalized = key.strip().lower()
+    if normalized in _SENSITIVE_KEYS:
+        return True
+    if normalized.endswith("_id") and normalized not in _CORRELATION_FIELDS:
+        return True
+    if _is_safe_structural_counter(normalized, value):
+        return False
+    if normalized in {"count", "total"} or normalized.endswith(("_count", "_total")):
+        return True
+    return any(marker in normalized for marker in _FINANCIAL_KEY_MARKERS)
+
+
 def _sanitize(value: Any) -> Any:
     """
     Best-effort recursive sanitization to avoid leaking secrets in logs.
@@ -88,7 +203,7 @@ def _sanitize(value: Any) -> Any:
         out: Dict[str, Any] = {}
         for k, v in value.items():
             ks = _safe_str(k)
-            if ks.strip().lower() in _SENSITIVE_KEYS:
+            if _is_sensitive_key(ks, v):
                 out[ks] = _REDACTED
             else:
                 out[ks] = _sanitize(v)
@@ -233,8 +348,6 @@ class _JsonLineFormatter(_logging.Formatter):
                 etype, evalue, etb = record.exc_info
                 payload["error"] = {
                     "type": getattr(etype, "__name__", "Exception"),
-                    "message": _safe_str(evalue),
-                    "stack": "".join(_traceback.format_exception(etype, evalue, etb)),
                     "where": f"{record.pathname}:{record.lineno} in {record.funcName}",
                 }
 

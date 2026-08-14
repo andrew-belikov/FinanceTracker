@@ -1,0 +1,8 @@
+python-telegram-bot==21.6
+requests
+urllib3
+APScheduler==3.10.4
+SQLAlchemy
+greenlet
+psycopg2-binary
+tzdata

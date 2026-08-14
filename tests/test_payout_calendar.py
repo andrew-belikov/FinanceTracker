@@ -42,6 +42,11 @@ from queries import get_payout_calendar_events
 import jobs as bot_jobs
 
 
+async def deliver_now(**kwargs):
+    await kwargs["send"]()
+    return True
+
+
 class PayoutCalendarSyncTests(unittest.TestCase):
     def setUp(self):
         self.engine = create_engine("sqlite:///:memory:", future=True)
@@ -484,7 +489,7 @@ class WeeklyPayoutDeliveryTests(unittest.TestCase):
             mock.patch.object(
                 bot_jobs,
                 "_claim_scheduled_job_run",
-                return_value=(True, True),
+                return_value=(True, True, "attempt"),
             ),
             mock.patch.object(bot_jobs, "db_session", fake_db_session),
             mock.patch.object(
@@ -502,7 +507,13 @@ class WeeklyPayoutDeliveryTests(unittest.TestCase):
                 "safe_send_message",
                 new=mock.AsyncMock(),
             ) as send_message,
+            mock.patch.object(
+                bot_jobs,
+                "_send_tracked_notification",
+                new=mock.AsyncMock(side_effect=deliver_now),
+            ),
             mock.patch.object(bot_jobs, "_finalize_scheduled_job_run") as finalize,
+            mock.patch.object(bot_jobs, "_heartbeat_scheduled_job_run", return_value=True),
             mock.patch.object(bot_jobs, "TARGET_CHAT_IDS", {1, 2}),
         ):
             asyncio.run(

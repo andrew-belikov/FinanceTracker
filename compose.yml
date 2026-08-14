@@ -23,7 +23,7 @@ services:
     build:
       context: .
       dockerfile: docker/Dockerfile.xray-client
-    image: financetracker-xray-client
+    image: ${XRAY_CLIENT_IMAGE:-financetracker-xray-client}
     container_name: financetracker-xray-client-1
     environment:
       APP_ENV: ${APP_ENV:-dev}
@@ -41,16 +41,19 @@ services:
       timeout: 15s
       retries: 6
       start_period: 10s
+    networks:
+      - bot_proxy_internal
+      - xray_egress
     restart: unless-stopped
 
   migrate:
-    image: financetracker-tracker
+    image: ${TRACKER_IMAGE:-financetracker-tracker}
     entrypoint: ["python", "-u", "migrate.py"]
     depends_on:
       db:
         condition: service_healthy
     env_file:
-      - .env
+      - ${APP_ENV_FILE:-.env}
     environment:
       APP_ENV: ${APP_ENV:-dev}
       APP_SERVICE: iis_tracker_migrate
@@ -66,7 +69,7 @@ services:
     build:
       context: .
       dockerfile: docker/Dockerfile.tracker
-    image: financetracker-tracker
+    image: ${TRACKER_IMAGE:-financetracker-tracker}
     container_name: financetracker-tracker-1
     depends_on:
       db:
@@ -74,7 +77,7 @@ services:
       migrate:
         condition: service_completed_successfully
     env_file:
-      - .env
+      - ${APP_ENV_FILE:-.env}
     environment:
       APP_ENV: ${APP_ENV:-dev}
       APP_SERVICE: ${APP_SERVICE_TRACKER:-iis_tracker}
@@ -83,15 +86,23 @@ services:
       DB_NAME: ${POSTGRES_DB}
       DB_USER: ${POSTGRES_USER}
       DB_PASSWORD: ${POSTGRES_PASSWORD}
+      TRACKER_READY_FILE: /tmp/financetracker-tracker.ready
+      TRACKER_READY_MAX_AGE_SECONDS: ${TRACKER_READY_MAX_AGE_SECONDS:-}
     volumes:
       - ./docker/certs:/opt/finance/certs:ro
+    healthcheck:
+      test: ["CMD", "python", "-u", "tracker_healthcheck.py"]
+      interval: 15s
+      timeout: 5s
+      retries: 4
+      start_period: 30s
     restart: unless-stopped
 
   bot:
     build:
       context: .
       dockerfile: docker/Dockerfile.bot
-    image: financetracker-bot
+    image: ${BOT_IMAGE:-financetracker-bot}
     container_name: financetracker-bot-1
     depends_on:
       db:
@@ -99,9 +110,9 @@ services:
       migrate:
         condition: service_completed_successfully
       xray-client:
-        condition: service_started
+        condition: service_healthy
     env_file:
-      - .env
+      - ${APP_ENV_FILE:-.env}
     environment:
       APP_ENV: ${APP_ENV:-dev}
       APP_SERVICE: ${APP_SERVICE_BOT:-iis_tracker_bot}
@@ -113,16 +124,30 @@ services:
       DB_PASSWORD: ${POSTGRES_PASSWORD}
       REPORTER_INTERNAL_URL: ${REPORTER_INTERNAL_URL:-http://reporter:8088}
       REPORTER_REQUEST_TIMEOUT_SECONDS: ${REPORTER_REQUEST_TIMEOUT_SECONDS:-180}
+      REPORTER_SERVICE_KEY: ${REPORTER_SERVICE_KEY:?REPORTER_SERVICE_KEY must be set}
       BOT_PROXY_ENABLED: ${BOT_PROXY_ENABLED:-false}
       BOT_PROXY_ENDPOINT: socks5h://xray-client:1080
       BOT_PROXY_NO_PROXY: localhost,127.0.0.1,db,tracker,reporter,xray-client
+      BOT_READY_FILE: /tmp/financetracker-bot.ready
+      BOT_READY_MAX_AGE_SECONDS: ${BOT_READY_MAX_AGE_SECONDS:-120}
+      BOT_READY_HEARTBEAT_SECONDS: ${BOT_READY_HEARTBEAT_SECONDS:-30}
+    healthcheck:
+      test: ["CMD", "python", "-u", "bot_healthcheck.py"]
+      interval: 15s
+      timeout: 5s
+      retries: 4
+      start_period: 30s
+    networks:
+      - default
+      - bot_proxy_internal
+      - bot_reporter_internal
     restart: unless-stopped
 
   reporter:
     build:
       context: .
       dockerfile: docker/Dockerfile.reporter
-    image: financetracker-reporter
+    image: ${REPORTER_IMAGE:-financetracker-reporter}
     container_name: financetracker-reporter-1
     depends_on:
       db:
@@ -130,7 +155,7 @@ services:
       migrate:
         condition: service_completed_successfully
     env_file:
-      - .env
+      - ${APP_ENV_FILE:-.env}
     environment:
       APP_ENV: ${APP_ENV:-dev}
       APP_SERVICE: ${APP_SERVICE_REPORTER:-iis_tracker_reporter}
@@ -143,10 +168,17 @@ services:
       REPORTER_HOST: 0.0.0.0
       REPORTER_PORT: ${REPORTER_PORT:-8088}
       REPORTER_MAX_BODY_BYTES: ${REPORTER_MAX_BODY_BYTES:-65536}
+      REPORTER_SERVICE_KEY: ${REPORTER_SERVICE_KEY:?REPORTER_SERVICE_KEY must be set}
+      REPORTER_MAX_CONCURRENT_REQUESTS: ${REPORTER_MAX_CONCURRENT_REQUESTS:-2}
+      REPORTER_SOCKET_TIMEOUT_SECONDS: ${REPORTER_SOCKET_TIMEOUT_SECONDS:-10}
+      REPORTER_REQUEST_TIMEOUT_SECONDS: ${REPORTER_REQUEST_TIMEOUT_SECONDS:-180}
       REPORTER_INTERNAL_URL: ${REPORTER_INTERNAL_URL:-http://reporter:8088}
       REPORT_PDF_ENGINE: ${REPORT_PDF_ENGINE:-weasyprint}
       REPORT_DEBUG_SAVE_HTML: ${REPORT_DEBUG_SAVE_HTML:-false}
       REPORT_DEBUG_SAVE_PAYLOAD: ${REPORT_DEBUG_SAVE_PAYLOAD:-false}
+      REPORT_DEBUG_DIR: ${REPORT_DEBUG_DIR:-}
+      REPORT_DEBUG_MAX_FILES: ${REPORT_DEBUG_MAX_FILES:-10}
+      REPORT_DEBUG_MAX_AGE_SECONDS: ${REPORT_DEBUG_MAX_AGE_SECONDS:-86400}
       OLLAMA_ENABLED: ${OLLAMA_ENABLED:-false}
       OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://ollama:11434}
       OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen2.5:1.5b}
@@ -164,6 +196,7 @@ services:
       start_period: 5s
     networks:
       - default
+      - bot_reporter_internal
       - localllm_localllm
     restart: unless-stopped
 
@@ -173,6 +206,11 @@ volumes:
     name: financetracker_fintracker-db
 
 networks:
+  bot_proxy_internal:
+    internal: true
+  bot_reporter_internal:
+    internal: true
+  xray_egress: {}
   localllm_localllm:
     external: true
     name: localllm_localllm

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import random
 from datetime import date, datetime, time, timedelta, timezone
-from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+from decimal import Decimal, InvalidOperation, ROUND_FLOOR, ROUND_HALF_UP
 
 from common.finance import annualize_simple_yield_pct
 from month_templates import MonthContext, render_month_text
@@ -16,6 +16,7 @@ from queries import (
     get_instrument_eod_rows,
     get_deposits_for_period,
     get_external_cashflows_raw,
+    get_income_currency_breakdown_for_period,
     get_income_for_period,
     get_iis_tax_deductions_for_period,
     get_last_snapshot_before_date,
@@ -24,6 +25,7 @@ from queries import (
     get_max_snapshot_before_date,
     get_net_external_flow_for_period,
     get_month_snapshots,
+    get_net_external_contributions,
     get_period_daily_snapshot_rows,
     get_period_snapshots,
     get_portfolio_timeseries_agg_by_date,
@@ -34,7 +36,7 @@ from queries import (
     get_rebalance_targets as query_get_rebalance_targets,
     get_snapshot_for_date,
     get_taxes_for_period,
-    get_total_deposits,
+    get_tax_refunds_for_period,
     get_unrealized_at_period_end,
     get_year_financials_from_operations,
     replace_rebalance_targets as query_replace_rebalance_targets,
@@ -70,6 +72,7 @@ from runtime import (
     normalize_decimal,
     to_iso_datetime,
     to_local_market_date,
+    local_reporting_bounds_utc_naive,
 )
 from today_templates import TodayContext, render_today_text
 from week_templates import WeekContext, render_week_text
@@ -459,6 +462,58 @@ def compute_period_delta_excluding_external_flow(
     return delta_abs, delta_pct
 
 
+def compute_cost_basis_pnl_pct(
+    current_value: Decimal | float | int,
+    pnl: Decimal | float | int,
+) -> float | None:
+    value = float(current_value)
+    pnl_value = float(pnl)
+    cost_basis = value - pnl_value
+    if cost_basis <= 0:
+        return None
+    return pnl_value / cost_basis * 100.0
+
+
+def append_tax_refund_line(text_value: str, tax_refunds: Decimal | float | int) -> str:
+    normalized_refunds = normalize_decimal(tax_refunds)
+    if normalized_refunds <= 0:
+        return text_value
+    return f"{text_value}\nВозврат налога: {fmt_decimal_rub(normalized_refunds)}."
+
+
+def append_income_currency_breakdown(
+    text_value: str,
+    rows: list[dict[str, Decimal | str]],
+) -> str:
+    if not rows:
+        return text_value
+
+    lines = [text_value, "", "💱 Доходы и налоги по валютам"]
+    has_unknown = False
+    for row in rows:
+        currency = str(row.get("currency") or "UNKNOWN").strip().upper() or "UNKNOWN"
+        has_unknown = has_unknown or currency == "UNKNOWN"
+
+        def amount(field: str) -> str:
+            value = normalize_decimal(row.get(field))
+            if currency == "RUB":
+                return fmt_decimal_rub(value)
+            return f"{value:,.2f} {currency}".replace(",", " ")
+
+        lines.append(
+            f"• {currency}: купоны {amount('coupons')}; "
+            f"дивиденды {amount('dividends')}; "
+            f"налоги {amount('taxes')}; "
+            f"возвраты {amount('tax_refunds')}"
+        )
+    if has_unknown:
+        lines.append(
+            "⚠️ UNKNOWN: валюта не определена; сумма не включена "
+            "в базовые итоги."
+        )
+    return "\n".join(lines)
+
+
 def compute_twr_series(
     snapshot_rows: list[dict],
     net_external_flow_by_day: dict[date, float],
@@ -478,7 +533,13 @@ def compute_twr_series(
     for idx in range(1, len(dates)):
         previous_value = values[idx - 1]
         current_value = values[idx]
-        net_external_flow = net_external_flow_by_day.get(dates[idx], 0.0)
+        previous_date = dates[idx - 1]
+        current_date = dates[idx]
+        net_external_flow = sum(
+            flow
+            for flow_date, flow in net_external_flow_by_day.items()
+            if previous_date < flow_date <= current_date
+        )
 
         if previous_value in (None, 0) or current_value is None:
             twr.append(cumulative_multiplier - 1.0)
@@ -489,6 +550,115 @@ def compute_twr_series(
         twr.append(cumulative_multiplier - 1.0)
 
     return dates, values, twr
+
+
+def sum_decimal_values_for_snapshot_interval(
+    values_by_day: dict[date, Decimal],
+    previous_snapshot_date: date | None,
+    current_snapshot_date: date,
+) -> Decimal:
+    """Aggregate values over ``(previous_snapshot_date, current_snapshot_date]``.
+
+    The first snapshot is the fallback baseline, so only values dated exactly on
+    that baseline date are attached to its row and they are not used in P&L.
+    """
+    if previous_snapshot_date is None:
+        return normalize_decimal(values_by_day.get(current_snapshot_date))
+    return sum(
+        (
+            normalize_decimal(value)
+            for value_date, value in values_by_day.items()
+            if previous_snapshot_date < value_date <= current_snapshot_date
+        ),
+        Decimal("0"),
+    )
+
+
+def normalize_operation_currency(value: object) -> str:
+    currency = str(value or "").strip().upper()
+    return currency or "UNKNOWN"
+
+
+def add_operation_cashflow_by_currency_day(
+    aggregates: dict[str, dict[str, dict[date, Decimal]]],
+    *,
+    currency: object,
+    field: str,
+    flow_date: date,
+    amount: Decimal,
+) -> None:
+    currency_key = normalize_operation_currency(currency)
+    values_by_day = aggregates.setdefault(currency_key, {}).setdefault(field, {})
+    values_by_day[flow_date] = values_by_day.get(flow_date, Decimal("0")) + normalize_decimal(amount)
+
+
+def build_operation_cashflows_for_snapshot_interval(
+    aggregates: dict[str, dict[str, dict[date, Decimal]]],
+    previous_snapshot_date: date | None,
+    current_snapshot_date: date,
+) -> list[dict[str, object]]:
+    fields = (
+        "deposits",
+        "withdrawals",
+        "iis_tax_deduction_income",
+        "commissions",
+        "operation_taxes",
+        "operation_tax_refunds",
+    )
+    result: list[dict[str, object]] = []
+    for currency in sorted(aggregates):
+        currency_values = aggregates[currency]
+        fact: dict[str, object] = {"currency": currency}
+        for field in fields:
+            fact[field] = sum_decimal_values_for_snapshot_interval(
+                currency_values.get(field, {}),
+                previous_snapshot_date,
+                current_snapshot_date,
+            )
+        fact["net_external_flow"] = normalize_decimal(fact["deposits"]) - normalize_decimal(
+            fact["withdrawals"]
+        )
+        if any(normalize_decimal(fact[field]) != 0 for field in fields):
+            result.append(fact)
+    return result
+
+
+def rebase_twr_to_period(
+    dates: list[date],
+    twr: list[float],
+    period_start: date,
+    period_end_exclusive: date,
+) -> dict[date, float]:
+    points = [
+        (item_date, item_return)
+        for item_date, item_return in zip(dates, twr)
+        if item_date < period_end_exclusive
+    ]
+    period_points = [
+        (item_date, item_return)
+        for item_date, item_return in points
+        if item_date >= period_start
+    ]
+    if not period_points:
+        return {}
+
+    pre_period_returns = [
+        item_return
+        for item_date, item_return in points
+        if item_date < period_start
+    ]
+    if pre_period_returns:
+        base_multiplier = 1.0 + pre_period_returns[-1]
+    else:
+        base_multiplier = 1.0 + period_points[0][1]
+
+    if base_multiplier == 0:
+        return {}
+
+    return {
+        item_date: (1.0 + item_return) / base_multiplier - 1.0
+        for item_date, item_return in period_points
+    }
 
 
 def compute_xnpv(rate: float, cashflows: list[tuple[datetime, float]]) -> float:
@@ -585,7 +755,7 @@ def get_year_period(year: int | None) -> tuple[datetime, datetime, str, bool]:
     is_ytd = year is None
     period_year = today.year if is_ytd else int(year)
 
-    from_dt = datetime(period_year, 1, 1)
+    period_start_date = date(period_year, 1, 1)
     if is_ytd:
         to_date_inclusive = today
         label = f"{period_year} YTD"
@@ -593,7 +763,10 @@ def get_year_period(year: int | None) -> tuple[datetime, datetime, str, bool]:
         to_date_inclusive = date(period_year, 12, 31)
         label = str(period_year)
 
-    to_dt = datetime.combine(to_date_inclusive + timedelta(days=1), time.min)
+    from_dt, to_dt = local_reporting_bounds_utc_naive(
+        period_start_date,
+        to_date_inclusive + timedelta(days=1),
+    )
     return from_dt, to_dt, label, is_ytd
 
 
@@ -831,8 +1004,10 @@ def compute_positions_diff_grouped(
 
 def build_today_summary() -> str:
     now_local = datetime.now(TZ)
-    day_start = datetime.combine(now_local.date(), time.min)
-    day_end_exclusive = day_start + timedelta(days=1)
+    day_start, day_end_exclusive = local_reporting_bounds_utc_naive(
+        now_local.date(),
+        now_local.date() + timedelta(days=1),
+    )
     day_end = day_end_exclusive - timedelta(microseconds=1)
 
     with db_session() as session:
@@ -841,19 +1016,29 @@ def build_today_summary() -> str:
             return REPORTING_ACCOUNT_UNAVAILABLE_TEXT
 
         snaps = get_latest_snapshots(session, account_id, limit=2)
-        net_external_flow_today = get_net_external_flow_for_period(
-            session,
-            account_id,
-            day_start,
-            day_end_exclusive,
-        )
-        total_deposits = get_total_deposits(session, account_id)
+        net_external_flow_today = 0.0
+        if len(snaps) >= 2:
+            interval_start, interval_end_exclusive = local_reporting_bounds_utc_naive(
+                snaps[1]["snapshot_date"] + timedelta(days=1),
+                snaps[0]["snapshot_date"] + timedelta(days=1),
+            )
+            net_external_flow_today = get_net_external_flow_for_period(
+                session,
+                account_id,
+                interval_start,
+                interval_end_exclusive,
+            )
+        net_external_contributions = get_net_external_contributions(session, account_id)
         coupons, dividends = get_income_for_period(session, account_id, day_start, day_end)
         iis_tax_deductions = get_iis_tax_deductions_for_period(
             session, account_id, day_start, day_end_exclusive
         )
         commissions = get_commissions_for_period(session, account_id, day_start, day_end)
         taxes = get_taxes_for_period(session, account_id, day_start, day_end)
+        tax_refunds = get_tax_refunds_for_period(session, account_id, day_start, day_end)
+        income_by_currency = get_income_currency_breakdown_for_period(
+            session, account_id, day_start, day_end
+        )
 
     if not snaps:
         return "Пока нет ни одного снапшота портфеля."
@@ -882,9 +1067,10 @@ def build_today_summary() -> str:
 
     pnl_abs = None
     pnl_pct = None
-    if last_value is not None and total_deposits > 0:
-        pnl_abs = last_value - total_deposits
-        pnl_pct = pnl_abs / total_deposits * 100.0
+    if last_value is not None:
+        pnl_abs = last_value - net_external_contributions
+    if pnl_abs is not None and net_external_contributions > 0:
+        pnl_pct = pnl_abs / net_external_contributions * 100.0
 
     ctx = TodayContext(
         snapshot_dt=snapshot_dt_str,
@@ -900,15 +1086,20 @@ def build_today_summary() -> str:
         taxes=fmt_decimal_rub(taxes),
     )
 
-    return render_today_text(ctx)
+    return append_income_currency_breakdown(
+        append_tax_refund_line(render_today_text(ctx), tax_refunds),
+        income_by_currency,
+    )
 
 
 def build_week_summary() -> str:
     now_local = datetime.now(TZ)
     week_start_date = now_local.date() - timedelta(days=now_local.weekday())
     week_end_date = week_start_date + timedelta(days=4)
-    week_start = datetime.combine(week_start_date, time.min)
-    week_end_exclusive = datetime.combine(week_end_date + timedelta(days=1), time.min)
+    week_start, week_end_exclusive = local_reporting_bounds_utc_naive(
+        week_start_date,
+        week_end_date + timedelta(days=1),
+    )
     week_end = week_end_exclusive - timedelta(microseconds=1)
 
     with db_session() as session:
@@ -961,8 +1152,15 @@ def build_week_summary() -> str:
         )
         commissions = get_commissions_for_period(session, account_id, week_start, week_end)
         taxes = get_taxes_for_period(session, account_id, week_start, week_end)
+        tax_refunds = get_tax_refunds_for_period(session, account_id, week_start, week_end)
+        income_by_currency = get_income_currency_breakdown_for_period(
+            session, account_id, week_start, week_end
+        )
 
-        year_start = datetime(week_end_date.year, 1, 1)
+        year_start, _ = local_reporting_bounds_utc_naive(
+            date(week_end_date.year, 1, 1),
+            date(week_end_date.year + 1, 1, 1),
+        )
         dep_year = get_deposits_for_period(session, account_id, year_start, week_end_exclusive)
 
         plan = PLAN_ANNUAL_CONTRIB_RUB
@@ -982,7 +1180,10 @@ def build_week_summary() -> str:
         taxes=fmt_decimal_rub(taxes),
     )
 
-    return render_week_text(ctx)
+    return append_income_currency_breakdown(
+        append_tax_refund_line(render_week_text(ctx), tax_refunds),
+        income_by_currency,
+    )
 
 
 def build_month_summary() -> str:
@@ -997,8 +1198,10 @@ def build_month_summary() -> str:
     else:
         next_month_start = date(year, month + 1, 1)
 
-    month_start_dt = datetime.combine(month_start, time.min)
-    month_end_exclusive = datetime.combine(next_month_start, time.min)
+    month_start_dt, month_end_exclusive = local_reporting_bounds_utc_naive(
+        month_start,
+        next_month_start,
+    )
     month_end_dt = month_end_exclusive - timedelta(microseconds=1)
 
     year_start = date(year, 1, 1)
@@ -1027,10 +1230,14 @@ def build_month_summary() -> str:
         )
         commissions = get_commissions_for_period(session, account_id, month_start_dt, month_end_dt)
         taxes = get_taxes_for_period(session, account_id, month_start_dt, month_end_dt)
+        tax_refunds = get_tax_refunds_for_period(session, account_id, month_start_dt, month_end_dt)
+        income_by_currency = get_income_currency_breakdown_for_period(
+            session, account_id, month_start_dt, month_end_dt
+        )
         dep_year = get_deposits_for_period(
             session,
             account_id=account_id,
-            start_dt=datetime(year, 1, 1),
+            start_dt=local_reporting_bounds_utc_naive(year_start, next_year_start)[0],
             end_dt=month_end_exclusive,
         )
         start_snap, end_snap = get_month_snapshots(session, account_id, year, month)
@@ -1093,7 +1300,10 @@ def build_month_summary() -> str:
         taxes=fmt_decimal_rub(taxes),
     )
 
-    month_text = render_month_text(ctx)
+    month_text = append_income_currency_breakdown(
+        append_tax_refund_line(render_month_text(ctx), tax_refunds),
+        income_by_currency,
+    )
     if end_snap:
         diff_lines = compute_positions_diff_lines(start_positions, end_positions)
         if diff_lines:
@@ -1121,8 +1331,10 @@ def _resolve_month_report_period(
     else:
         period_end_date = calendar_month_end_date
 
-    period_start_dt = datetime.combine(period_start_date, time.min)
-    period_end_exclusive = datetime.combine(period_end_date + timedelta(days=1), time.min)
+    period_start_dt, period_end_exclusive = local_reporting_bounds_utc_naive(
+        period_start_date,
+        period_end_date + timedelta(days=1),
+    )
     period_label_ru = f"{MONTHS_RU.get(period_month, str(period_month))} {period_year}"
     return (
         period_year,
@@ -1487,19 +1699,20 @@ def build_monthly_report_payload(
     latest_snapshot = get_latest_snapshot_with_id(session, account_id)
     if latest_snapshot is None:
         raise ValueError("Пока нет снапшотов для monthly report.")
+    base_currency = normalize_operation_currency(latest_snapshot.get("currency"))
 
     start_snap, end_snap = get_period_snapshots(
         session,
         account_id,
         period_start_date,
-        period_end_exclusive.date(),
+        period_end_date + timedelta(days=1),
     )
     daily_rows = list(
         get_period_daily_snapshot_rows(
             session,
             account_id,
             period_start_date,
-            period_end_exclusive.date(),
+            period_end_date + timedelta(days=1),
         )
     )
     if not daily_rows:
@@ -1546,7 +1759,7 @@ def build_monthly_report_payload(
             session,
             account_id,
             period_start_date,
-            period_end_exclusive.date(),
+            period_end_date + timedelta(days=1),
         )
     )
 
@@ -1586,13 +1799,16 @@ def build_monthly_report_payload(
         description = row.get("description")
         if local_date is not None:
             bucket = _day_bucket(local_date)
-            if operation_group == "deposit":
+            if (
+                operation_group == "deposit"
+                and row.get("cashflow_category") != IIS_TAX_DEDUCTION_CATEGORY
+            ):
                 bucket["deposits"] += amount
             elif operation_group == "withdrawal":
                 bucket["withdrawals"] += abs(amount)
             elif operation_group == "commission":
                 bucket["commissions"] += abs(amount)
-            elif operation_group == "income_tax":
+            elif operation_group == "income_tax" and amount < 0:
                 bucket["operation_taxes"] += abs(amount)
 
         if description and has_mojibake(str(description)):
@@ -1625,12 +1841,16 @@ def build_monthly_report_payload(
         )
         net_amount = normalize_decimal(row.get("net_amount"))
         tax_amount = normalize_decimal(row.get("tax_amount"))
-        income_net_by_day[event_date] = income_net_by_day.get(event_date, Decimal("0")) + net_amount
-        income_tax_by_day[event_date] = income_tax_by_day.get(event_date, Decimal("0")) + abs(tax_amount)
+        income_currency = normalize_operation_currency(row.get("currency"))
+        if income_currency == base_currency and base_currency != "UNKNOWN":
+            income_net_by_day[event_date] = income_net_by_day.get(event_date, Decimal("0")) + net_amount
+            if tax_amount < 0:
+                income_tax_by_day[event_date] = income_tax_by_day.get(event_date, Decimal("0")) + abs(tax_amount)
         income_payload_rows.append(
             {
                 "event_date": event_date.isoformat(),
                 "event_type": row.get("event_type"),
+                "currency": income_currency,
                 "logical_asset_id": identity["logical_asset_id"],
                 "figi": row.get("figi"),
                 "ticker": identity["ticker"],
@@ -1648,9 +1868,15 @@ def build_monthly_report_payload(
     twr_by_date: dict[date, str] = {}
     if twr_data is not None:
         dates, _values, twr_series = twr_data
+        period_twr = rebase_twr_to_period(
+            dates,
+            twr_series,
+            period_start_date,
+            period_end_date + timedelta(days=1),
+        )
         twr_by_date = {
             dt: decimal_to_str(round(value * 100.0, 6))
-            for dt, value in zip(dates, twr_series)
+            for dt, value in period_twr.items()
         }
 
     previous_value = normalize_decimal(start_snap["total_value"]) if start_snap and start_snap.get("total_value") is not None else None
@@ -1667,7 +1893,7 @@ def build_monthly_report_payload(
         operation_taxes = bucket.get("operation_taxes", Decimal("0"))
         income_net = income_net_by_day.get(snapshot_date, Decimal("0"))
         income_taxes = income_tax_by_day.get(snapshot_date, Decimal("0"))
-        net_cashflow = deposits - withdrawals + income_net - commissions - operation_taxes
+        net_cashflow = deposits - withdrawals
         if previous_value is None:
             day_pnl = Decimal("0")
         else:
@@ -1707,19 +1933,22 @@ def build_monthly_report_payload(
     income_tax_total = sum(income_tax_by_day.values(), Decimal("0"))
     taxes_total = operation_taxes_total + income_tax_total
     net_external_flow = deposits_total - withdrawals_total
-    period_net_cashflow = net_external_flow + income_net_total - commissions_total - operation_taxes_total
+    period_net_cashflow = net_external_flow
 
     start_value = normalize_decimal(start_snap["total_value"]) if start_snap and start_snap.get("total_value") is not None else normalize_decimal(daily_rows_payload[0]["portfolio_value"])
     end_value = normalize_decimal(end_snap["total_value"]) if end_snap and end_snap.get("total_value") is not None else normalize_decimal(daily_rows_payload[-1]["portfolio_value"])
     current_value = normalize_decimal(latest_snapshot.get("total_value"))
-    period_pnl_abs = end_value - start_value - period_net_cashflow
+    period_pnl_abs = end_value - start_value - net_external_flow
     period_pnl_pct = (period_pnl_abs / start_value * Decimal("100")) if start_value != 0 else None
 
     twr_period_value = twr_by_date.get(daily_rows[-1]["snapshot_date"])
     if twr_period_value is None:
         twr_period_value = twr_by_date.get(period_end_date)
 
-    year_start_dt = datetime(period_year, 1, 1)
+    year_start_dt = local_reporting_bounds_utc_naive(
+        date(period_year, 1, 1),
+        date(period_year + 1, 1, 1),
+    )[0]
     deposits_ytd = get_deposits_for_period(
         session,
         account_id=account_id,
@@ -2162,19 +2391,24 @@ def compute_invest_plan(
                 deficits[asset_class] = raw_allocations[asset_class]
 
     allocations = {
-        asset_class: quantize_ruble_amount(raw_allocations.get(asset_class))
+        asset_class: normalize_decimal(raw_allocations.get(asset_class)).to_integral_value(
+            rounding=ROUND_FLOOR
+        )
         for asset_class in REBALANCE_ASSET_CLASSES
     }
-    residue = rounded_deposit - sum(allocations.values())
-    if residue != 0:
-        residue_asset_class = max(
-            REBALANCE_ASSET_CLASSES,
-            key=lambda asset_class: (
-                deficits.get(asset_class, Decimal("0")),
-                normalize_decimal(target_weights.get(asset_class)),
-            ),
-        )
-        allocations[residue_asset_class] += residue
+    residue_rubles = int(rounded_deposit - sum(allocations.values()))
+    remainder_order = sorted(
+        REBALANCE_ASSET_CLASSES,
+        key=lambda asset_class: (
+            normalize_decimal(raw_allocations.get(asset_class)) - allocations[asset_class],
+            deficits.get(asset_class, Decimal("0")),
+            normalize_decimal(target_weights.get(asset_class)),
+            -REBALANCE_ASSET_CLASSES.index(asset_class),
+        ),
+        reverse=True,
+    )
+    for idx in range(residue_rubles):
+        allocations[remainder_order[idx % len(remainder_order)]] += Decimal("1")
 
     return {
         "deposit_amount": rounded_deposit,
@@ -2418,7 +2652,7 @@ def build_structure_text() -> str:
         price = float(pos["current_price"]) if pos["current_price"] is not None else 0.0
         value = float(pos["position_value"]) if pos["position_value"] is not None else 0.0
         pl = float(pos["expected_yield"]) if pos["expected_yield"] is not None else 0.0
-        pl_pct = float(pos["expected_yield_pct"]) if pos["expected_yield_pct"] is not None else 0.0
+        pl_pct = compute_cost_basis_pnl_pct(value, pl)
         weight = float(pos["weight_pct"]) if pos["weight_pct"] is not None else None
 
         ticker = pos["ticker"] or pos["figi"]
@@ -2451,7 +2685,7 @@ def build_structure_text() -> str:
         group_value = group["total_value"]
         group_pl = group["total_pl"]
         share_pct = group_value / total_value * 100.0 if total_value > 0 else 0.0
-        pl_pct = group_pl / group_value * 100.0 if group_value > 0 else 0.0
+        pl_pct = compute_cost_basis_pnl_pct(group_value, group_pl)
         group_list.append(
             {
                 "name": group_name,
@@ -2476,10 +2710,15 @@ def build_structure_text() -> str:
     lines.append("Сводка по типам:")
 
     for group in group_list:
+        group_pl_pct = (
+            f"{group['pl_pct']:+.1f} %"
+            if group["pl_pct"] is not None
+            else "—"
+        )
         lines.append(
             f"- {group['name']} — {fmt_rub(group['value'])} "
             f"({group['share_pct']:.1f} % портфеля), "
-            f"P&L: {fmt_rub(group['pl'])} ({group['pl_pct']:+.1f} %)"
+            f"P&L: {fmt_rub(group['pl'])} ({group_pl_pct})"
         )
 
     lines.append("")
@@ -2501,7 +2740,7 @@ def build_structure_text() -> str:
             price_str = fmt_rub(price, precision=2)
             value_str = fmt_rub(value, precision=0)
             pl_str = fmt_rub(pl, precision=0)
-            pl_pct_str = f"{pl_pct:+.1f} %"
+            pl_pct_str = f"{pl_pct:+.1f} %" if pl_pct is not None else "—"
 
             lines.append(f"- {name} [{ticker}]")
             lines.append(
@@ -2509,14 +2748,16 @@ def build_structure_text() -> str:
             )
 
     total_pl = sum(group["pl"] for group in group_list)
-    total_pl_pct = total_pl / total_value * 100.0 if total_value > 0 else 0.0
+    positions_total_value = sum(group["value"] for group in group_list)
+    total_pl_pct = compute_cost_basis_pnl_pct(positions_total_value, total_pl)
 
     lines.append("")
     lines.append("Итог:")
     lines.append(f"- Общая стоимость портфеля: *{fmt_rub(total_value)}*")
     lines.append(
         f"- Совокупный результат по всем бумагам: "
-        f"{fmt_rub(total_pl)} ({total_pl_pct:+.1f} %)"
+        f"{fmt_rub(total_pl)} "
+        f"({f'{total_pl_pct:+.1f} %' if total_pl_pct is not None else '—'})"
     )
 
     return "\n".join(lines)
@@ -2535,8 +2776,12 @@ def _format_asset_lines(rows: list[dict], total: Decimal, title: str, top_n: int
 
 def build_year_summary(year: int | None) -> tuple[str, str, str | None]:
     period_start_dt, period_end_dt_exclusive, label, _ = get_year_period(year)
-    period_start = period_start_dt.date()
-    period_end_inclusive = period_end_dt_exclusive.date() - timedelta(days=1)
+    period_year = datetime.now(TZ).year if year is None else int(year)
+    period_start = date(period_year, 1, 1)
+    period_end_inclusive = (
+        datetime.now(TZ).date() if year is None else date(period_year, 12, 31)
+    )
+    period_end_exclusive_date = period_end_inclusive + timedelta(days=1)
 
     with db_session() as session:
         account_id = resolve_reporting_account_id(session)
@@ -2555,7 +2800,12 @@ def build_year_summary(year: int | None) -> tuple[str, str, str | None]:
             period_start_dt,
             period_end_dt_exclusive,
         )
-        start_snap, end_snap = get_period_snapshots(session, account_id, period_start, period_end_dt_exclusive.date())
+        start_snap, end_snap = get_period_snapshots(
+            session,
+            account_id,
+            period_start,
+            period_end_exclusive_date,
+        )
         diff_lines, diff_error = compute_positions_diff_grouped(session, account_id, period_start_dt, period_end_dt_exclusive)
         realized_by_asset, realized_total = compute_realized_by_asset(
             session,
@@ -2746,9 +2996,14 @@ def build_triggers_messages() -> list[str]:
         if not snaps:
             return messages
 
-        year_start = datetime(year, 1, 1)
-        today_start = datetime(year, today.month, today.day)
-        tomorrow_start = today_start + timedelta(days=1)
+        year_start = local_reporting_bounds_utc_naive(
+            date(year, 1, 1),
+            date(year + 1, 1, 1),
+        )[0]
+        today_start, tomorrow_start = local_reporting_bounds_utc_naive(
+            today,
+            today + timedelta(days=1),
+        )
 
         dep_prev = get_deposits_for_period(session, account_id, year_start, today_start)
         dep_now = get_deposits_for_period(session, account_id, year_start, tomorrow_start)

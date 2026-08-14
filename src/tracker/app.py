@@ -55,6 +55,8 @@ from sqlalchemy.orm import declarative_base, sessionmaker, relationship
 
 # Import unified JSON logging setup
 from common.logging_setup import configure_logging, get_logger
+from common.readiness_state import clear_ready_state, write_ready_state
+from common.time_utils import utc_naive_to_local_date
 from income_events import compute_income_net_amount, compute_income_net_yield_pct
 
 # Configure logging once at import
@@ -62,7 +64,26 @@ configure_logging()
 
 logger = get_logger(__name__)
 
-MAX_LOG_RESPONSE_BODY_CHARS = 4000
+class RuntimeConfigurationError(ValueError):
+    """Raised when required runtime configuration is absent or unsafe."""
+
+
+def parse_verify_ssl(raw_value, *, app_env, allow_insecure_test):
+    normalized = "true" if raw_value is None else raw_value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized not in {"0", "false", "no", "off"}:
+        raise RuntimeConfigurationError("VERIFY_SSL must be a strict boolean")
+    if app_env.strip().lower() != "test" or not allow_insecure_test:
+        raise RuntimeConfigurationError(
+            "VERIFY_SSL=false is allowed only with explicit test break-glass"
+        )
+    return False
+
+
+def validate_database_credentials(*, db_dsn, db_password):
+    if not (db_dsn or "").strip() and not (db_password or "").strip():
+        raise RuntimeConfigurationError("Database credentials must be explicitly configured")
 
 # ============ CONFIG из окружения ============
 
@@ -112,8 +133,9 @@ TINKOFF_ACCOUNT_ID = os.getenv("TINKOFF_ACCOUNT_ID", "")
 SNAPSHOT_HOUR = int(os.getenv("SNAPSHOT_HOUR", "23"))   # раньше было 23:30 по Москве
 SNAPSHOT_MINUTE = int(os.getenv("SNAPSHOT_MINUTE", "30"))
 SCHED_TZ = os.getenv("SCHED_TZ", "Europe/Moscow")
+TIMEZONE_NAME = os.getenv("TIMEZONE", SCHED_TZ).strip() or SCHED_TZ
 try:
-    LOCAL_TZ = ZoneInfo(SCHED_TZ)
+    LOCAL_TZ = ZoneInfo(TIMEZONE_NAME)
 except Exception:
     # Если в образе нет tzdata, ZoneInfo может не найти базу таймзон.
     # В таком случае не падаем, а работаем в UTC.
@@ -125,10 +147,22 @@ SNAPSHOT_INTERVAL_MINUTES = int(os.getenv("SNAPSHOT_INTERVAL_MINUTES", "5"))
 
 # interval | cron
 SNAPSHOT_MODE = os.getenv("SNAPSHOT_MODE", "interval").strip().lower()
+TRACKER_READY_FILE = os.getenv(
+    "TRACKER_READY_FILE",
+    "/tmp/financetracker-tracker.ready",
+).strip()
 
-# SSL-проверка (у тебя сейчас нужен режим БЕЗ проверки)
-VERIFY_SSL_ENV = os.getenv("VERIFY_SSL", "false").lower()
-VERIFY_SSL = VERIFY_SSL_ENV in ("1", "true", "yes")
+APP_ENV = os.getenv("APP_ENV", "dev")
+ALLOW_INSECURE_TLS_FOR_TESTS = (
+    os.getenv("ALLOW_INSECURE_TLS_FOR_TESTS", "false").strip().lower()
+    in {"1", "true", "yes", "on"}
+)
+VERIFY_SSL_ENV = os.getenv("VERIFY_SSL")
+VERIFY_SSL = parse_verify_ssl(
+    VERIFY_SSL_ENV,
+    app_env=APP_ENV,
+    allow_insecure_test=ALLOW_INSECURE_TLS_FOR_TESTS,
+)
 
 if not VERIFY_SSL:
     urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -144,11 +178,10 @@ DB_HOST = os.getenv("DB_HOST", "db")
 DB_PORT = int(os.getenv("DB_PORT", "5432"))
 DB_NAME = os.getenv("DB_NAME", "fintracker")
 DB_USER = os.getenv("DB_USER", "aqua4")
-DB_PASSWORD = os.getenv("DB_PASSWORD", "change_me")
-
-DB_DSN = os.getenv(
-    "DB_DSN",
-    f"postgresql+psycopg2://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}",
+DB_PASSWORD = os.getenv("DB_PASSWORD", "").strip()
+EXPLICIT_DB_DSN = os.getenv("DB_DSN", "").strip()
+DB_DSN = EXPLICIT_DB_DSN or (
+    f"postgresql+psycopg2://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
 )
 
 Base = declarative_base()
@@ -291,7 +324,8 @@ class IncomeEvent(Base):
             "figi",
             "event_date",
             "event_type",
-            name="uq_income_events_account_figi_date_type",
+            "currency",
+            name="uq_income_events_account_figi_date_type_currency",
         ),
     )
 
@@ -300,6 +334,7 @@ class IncomeEvent(Base):
     figi = Column(String, nullable=False)
     event_date = Column(Date, nullable=False)
     event_type = Column(String, nullable=False)
+    currency = Column(String, nullable=False)
     gross_amount = Column(Numeric(18, 2), nullable=False)
     tax_amount = Column(Numeric(18, 2), nullable=False)
     net_amount = Column(Numeric(18, 2), nullable=False)
@@ -542,27 +577,16 @@ def _url_path(url: str) -> str:
     return "/" + parts[3] if len(parts) > 3 else "/"
 
 
-def _truncate_log_text(value: str, limit: int = MAX_LOG_RESPONSE_BODY_CHARS) -> tuple[str, bool]:
-    if len(value) <= limit:
-        return value, False
-    return value[:limit] + "...<truncated>", True
-
-
 def _build_response_body_ctx(resp, base_ctx: Optional[dict] = None) -> dict:
+    """Return allowlisted response metadata without serializing an upstream body."""
     ctx = dict(base_ctx or {})
     content_type = resp.headers.get("Content-Type")
     if content_type:
         ctx["content_type"] = content_type
-
-    try:
-        ctx["response_body"] = resp.json()
-        ctx["response_body_truncated"] = False
-        return ctx
-    except Exception:
-        truncated_body, truncated = _truncate_log_text(resp.text)
-        ctx["response_body"] = truncated_body
-        ctx["response_body_truncated"] = truncated
-        return ctx
+    content_length = resp.headers.get("Content-Length")
+    if content_length and content_length.isdecimal():
+        ctx["response_body_bytes"] = int(content_length)
+    return ctx
 
 
 def _build_api_session() -> requests.Session:
@@ -747,8 +771,8 @@ def post_api(method_path: str, payload: dict) -> dict:
             error_ctx,
         )
         logger.error(
-            "api_http_error_body",
-            "Logged T-Invest API error response body.",
+            "api_http_error_metadata",
+            "Logged allowlisted T-Invest API error response metadata.",
             _build_response_body_ctx(resp, error_ctx),
         )
         raise RuntimeError(f"API HTTP {resp.status_code}")
@@ -768,8 +792,8 @@ def post_api(method_path: str, payload: dict) -> dict:
             error_ctx,
         )
         logger.error(
-            "api_json_decode_error_body",
-            "Logged non-JSON T-Invest API response body.",
+            "api_json_decode_error_metadata",
+            "Logged allowlisted non-JSON response metadata.",
             _build_response_body_ctx(resp, error_ctx),
         )
         raise
@@ -1350,15 +1374,17 @@ def choose_account(accounts_data: dict) -> dict:
     if not accounts:
         raise RuntimeError("No accounts returned from API")
 
-    if TINKOFF_ACCOUNT_ID:
+    configured_account_id = (TINKOFF_ACCOUNT_ID or "").strip()
+    if configured_account_id and configured_account_id.lower() != "auto":
         for acc in accounts:
-            if str(acc.get("id")) == str(TINKOFF_ACCOUNT_ID):
+            if str(acc.get("id")) == configured_account_id:
                 return acc
+        raise RuntimeError("Configured TINKOFF_ACCOUNT_ID was not found")
 
     open_accounts = [a for a in accounts if a.get("status") == "ACCOUNT_STATUS_OPEN"]
-    if open_accounts:
+    if len(open_accounts) == 1:
         return open_accounts[0]
-    return accounts[0]
+    raise RuntimeError("Automatic account selection requires exactly one open account")
 
 
 def ensure_instrument(db, figi: str, instr_data: Optional[dict]) -> Instrument:
@@ -1391,14 +1417,25 @@ def compute_expected_yield_pct(
     return expected_yield / invested * 100.0
 
 
-def get_latest_cost_basis(db, account_id: str, figi: str) -> Optional[float]:
-    row = (
+def get_latest_cost_basis(
+    db,
+    account_id: str,
+    figi: str,
+    *,
+    as_of_date: Optional[date] = None,
+) -> Optional[float]:
+    query = (
         db.query(PortfolioPosition.position_value, PortfolioPosition.expected_yield)
         .join(PortfolioSnapshot, PortfolioSnapshot.id == PortfolioPosition.snapshot_id)
         .filter(
             PortfolioSnapshot.account_id == account_id,
             PortfolioPosition.figi == figi,
         )
+    )
+    if as_of_date is not None:
+        query = query.filter(PortfolioSnapshot.snapshot_date <= as_of_date)
+    row = (
+        query
         .order_by(PortfolioSnapshot.snapshot_date.desc(), PortfolioSnapshot.snapshot_at.desc())
         .first()
     )
@@ -1584,12 +1621,38 @@ def _upsert_operation(db, acc_id: str, op: dict) -> tuple[Optional[Operation], b
     if not op_id:
         return None, False
 
-    op_type = get_json_value(op, "type") or get_json_value(op, "operation_type") or "OPERATION_TYPE_UNSPECIFIED"
-    payment = get_json_value(op, "payment")
-    payment_value = money_to_float(payment) or 0.0
-    payment_currency = ((payment or {}).get("currency") or PORTFOLIO_CURRENCY).upper()
+    existing = (
+        db.query(Operation)
+        .filter(
+            Operation.account_id == acc_id,
+            Operation.operation_id == op_id,
+        )
+        .one_or_none()
+    )
 
-    op_dt_raw = parse_iso_dt(get_json_value(op, "date")) or datetime.now(timezone.utc)
+    op_type = (
+        get_json_value(op, "type")
+        or get_json_value(op, "operation_type")
+        or (existing.operation_type if existing is not None else None)
+        or "OPERATION_TYPE_UNSPECIFIED"
+    )
+    payment = get_json_value(op, "payment")
+    parsed_payment_value = money_to_float(payment)
+    payment_value = (
+        parsed_payment_value
+        if parsed_payment_value is not None
+        else (float(existing.amount) if existing is not None else 0.0)
+    )
+    payment_currency_raw = (payment or {}).get("currency")
+    payment_currency = (
+        str(payment_currency_raw).strip().upper()
+        if payment_currency_raw
+        else ((existing.currency or "UNKNOWN").upper() if existing is not None else "UNKNOWN")
+    )
+
+    op_dt_raw = parse_iso_dt(get_json_value(op, "date"))
+    if op_dt_raw is None:
+        raise ValueError("Operation timestamp is missing or malformed")
     if op_dt_raw.tzinfo is None:
         op_dt = op_dt_raw.replace(tzinfo=timezone.utc).replace(tzinfo=None)
     else:
@@ -1611,7 +1674,7 @@ def _upsert_operation(db, acc_id: str, op: dict) -> tuple[Optional[Operation], b
         "state": get_json_value(op, "state"),
         "description": get_json_value(op, "description") or get_json_value(op, "asset_uid") or "",
         "instrument_uid": get_json_value(op, "instrument_uid"),
-        "figi": get_json_value(op, "figi"),
+        "figi": get_json_value(op, "figi") or (existing.figi if existing is not None else None),
         "instrument_type": get_json_value(op, "instrument_type"),
         "instrument_kind": get_json_value(op, "instrument_kind"),
         "position_uid": get_json_value(op, "position_uid"),
@@ -1640,7 +1703,6 @@ def _upsert_operation(db, acc_id: str, op: dict) -> tuple[Optional[Operation], b
         seen_at=values["date"],
     )
 
-    existing = db.query(Operation).filter(Operation.operation_id == op_id).one_or_none()
     if existing is None:
         operation = Operation(**values)
         db.add(operation)
@@ -1656,7 +1718,7 @@ def _sync_operations(
     account_id: str,
     from_date: Optional[str],
     *,
-    affected_income_keys: Optional[set[tuple[str, date, str]]] = None,
+    affected_income_keys: Optional[set[tuple[str, date, str, str]]] = None,
 ) -> dict:
     """Синхронизирует операции счёта через GetOperationsByCursor и upsert в БД."""
     count_new = 0
@@ -1678,10 +1740,19 @@ def _sync_operations(
                 affected_income_keys is not None
                 and operation.figi
                 and operation.operation_type in INCOME_OPERATION_TYPE_MAP
+                and operation.state in {
+                    EXECUTED_OPERATION_STATE,
+                    CANCELED_OPERATION_STATE,
+                }
             ):
                 event_type, _ = INCOME_OPERATION_TYPE_MAP[operation.operation_type]
                 affected_income_keys.add(
-                    (operation.figi, operation.date.date(), event_type)
+                    (
+                        operation.figi,
+                        utc_naive_to_local_date(operation.date, LOCAL_TZ),
+                        event_type,
+                        (operation.currency or "UNKNOWN").upper(),
+                    )
                 )
 
         logger.info(
@@ -1716,12 +1787,13 @@ INCOME_OPERATION_TYPE_MAP = {
     "OPERATION_TYPE_DIVIDEND_TAX_PROGRESSIVE": ("dividend", "tax"),
 }
 EXECUTED_OPERATION_STATE = "OPERATION_STATE_EXECUTED"
+CANCELED_OPERATION_STATE = "OPERATION_STATE_CANCELED"
 
 
 def _reconcile_income_events(
     db,
     account_id: str,
-    affected_keys: set[tuple[str, date, str]],
+    affected_keys: set[tuple[str, date, str, str]],
 ) -> dict:
     """
     Пересчитывает затронутые доходные события по полной локальной истории.
@@ -1730,9 +1802,9 @@ def _reconcile_income_events(
     API-окно может содержать налог, но не исходную выплату.
     """
     if not affected_keys:
-        return {"income_created": 0, "income_updated": 0}
+        return {"income_created": 0, "income_updated": 0, "income_deactivated": 0}
 
-    income_by_key: dict[tuple[str, date, str], dict[str, float]] = {}
+    income_by_key: dict[tuple[str, date, str, str], dict[str, float]] = {}
 
     rows = (
         db.query(Operation)
@@ -1747,7 +1819,13 @@ def _reconcile_income_events(
         if not row.figi:
             continue
         event_type, amount_kind = INCOME_OPERATION_TYPE_MAP[row.operation_type]
-        key = (row.figi, row.date.date(), event_type)
+        currency = (row.currency or "UNKNOWN").upper()
+        key = (
+            row.figi,
+            utc_naive_to_local_date(row.date, LOCAL_TZ),
+            event_type,
+            currency,
+        )
         if key not in affected_keys:
             continue
         if key not in income_by_key:
@@ -1760,20 +1838,26 @@ def _reconcile_income_events(
         .all()
     )
     existing_by_key = {
-        (row.figi, row.event_date, row.event_type): row
+        (row.figi, row.event_date, row.event_type, row.currency): row
         for row in existing_events
-        if (row.figi, row.event_date, row.event_type) in affected_keys
+        if (row.figi, row.event_date, row.event_type, row.currency) in affected_keys
     }
 
-    cost_basis_by_figi: dict[str, Optional[float]] = {}
+    cost_basis_by_event: dict[tuple[str, date], Optional[float]] = {}
     created = 0
     updated = 0
+    deactivated = 0
 
-    for (figi, event_date, event_type), amounts in income_by_key.items():
+    for (figi, event_date, event_type, currency), amounts in income_by_key.items():
         gross_sum = amounts["gross"]
         tax_sum = amounts["tax"]
         net_amount = compute_income_net_amount(gross_sum, tax_sum)
+        key = (figi, event_date, event_type, currency)
+        existing = existing_by_key.get(key)
         if net_amount <= 0:
+            if existing is not None:
+                db.delete(existing)
+                deactivated += 1
             continue
 
         expected_amounts = {
@@ -1781,14 +1865,18 @@ def _reconcile_income_events(
             "tax_amount": round(tax_sum, 2),
             "net_amount": round(net_amount, 2),
         }
-        key = (figi, event_date, event_type)
-        existing = existing_by_key.get(key)
         if existing is None:
-            if figi not in cost_basis_by_figi:
-                cost_basis_by_figi[figi] = get_latest_cost_basis(db, account_id, figi)
+            cost_key = (figi, event_date)
+            if cost_key not in cost_basis_by_event:
+                cost_basis_by_event[cost_key] = get_latest_cost_basis(
+                    db,
+                    account_id,
+                    figi,
+                    as_of_date=event_date,
+                )
             net_yield_pct = compute_income_net_yield_pct(
                 net_amount,
-                cost_basis_by_figi[figi],
+                cost_basis_by_event[cost_key],
             )
             db.add(
                 IncomeEvent(
@@ -1796,6 +1884,7 @@ def _reconcile_income_events(
                     figi=figi,
                     event_date=event_date,
                     event_type=event_type,
+                    currency=currency,
                     notified=False,
                     net_yield_pct=round(net_yield_pct, 4),
                     **expected_amounts,
@@ -1809,11 +1898,17 @@ def _reconcile_income_events(
             for field, value in expected_amounts.items()
         )
         if amounts_changed:
-            if figi not in cost_basis_by_figi:
-                cost_basis_by_figi[figi] = get_latest_cost_basis(db, account_id, figi)
+            cost_key = (figi, event_date)
+            if cost_key not in cost_basis_by_event:
+                cost_basis_by_event[cost_key] = get_latest_cost_basis(
+                    db,
+                    account_id,
+                    figi,
+                    as_of_date=event_date,
+                )
             net_yield_pct = compute_income_net_yield_pct(
                 net_amount,
-                cost_basis_by_figi[figi],
+                cost_basis_by_event[cost_key],
             )
             for field, value in expected_amounts.items():
                 setattr(existing, field, value)
@@ -1822,9 +1917,16 @@ def _reconcile_income_events(
             # сразу увидят исправленные суммы после commit.
             updated += 1
 
+    for key in affected_keys - set(income_by_key):
+        existing = existing_by_key.get(key)
+        if existing is not None:
+            db.delete(existing)
+            deactivated += 1
+
     return {
         "income_created": created,
         "income_updated": updated,
+        "income_deactivated": deactivated,
     }
 
 
@@ -1863,7 +1965,7 @@ def sync_operations_for_account(db, acc_data: dict):
             {"account_id": acc_id, "from": from_iso},
         )
 
-    affected_income_keys: set[tuple[str, date, str]] = set()
+    affected_income_keys: set[tuple[str, date, str, str]] = set()
     stats = _sync_operations(
         db,
         acc_id,
@@ -1885,7 +1987,15 @@ def sync_operations_for_account(db, acc_data: dict):
     )
 
 
-def run_snapshot_and_operations_once():
+def clear_tracker_ready_state() -> None:
+    clear_ready_state(TRACKER_READY_FILE)
+
+
+def write_tracker_ready_state() -> None:
+    write_ready_state(TRACKER_READY_FILE)
+
+
+def run_snapshot_and_operations_once() -> bool:
     accounts_data = api_get_accounts()
     acc = choose_account(accounts_data)
 
@@ -1904,6 +2014,8 @@ def run_snapshot_and_operations_once():
                 "operations_sync_failed",
                 "Operations sync failed; snapshot remains saved.",
             )
+            return False
+    return True
 
 
 def run_payout_calendar_sync_once():
@@ -1922,7 +2034,7 @@ def run_payout_calendar_sync_once():
     )
 
 
-def job_with_retry():
+def job_with_retry() -> bool:
     """
     Обёртка для планировщика:
     - одна попытка на запуск;
@@ -1931,10 +2043,18 @@ def job_with_retry():
     """
     try:
         logger.info("snapshot_job_started", "Snapshot job started.")
-        run_snapshot_and_operations_once()
+        if not run_snapshot_and_operations_once():
+            logger.error(
+                "snapshot_job_incomplete",
+                "Snapshot job did not complete all required synchronization steps.",
+            )
+            return False
+        write_tracker_ready_state()
         logger.info("snapshot_job_completed", "Snapshot job completed successfully.")
+        return True
     except Exception:
         logger.exception("snapshot_job_failed", "Snapshot job failed.")
+        return False
 
 
 def payout_calendar_job_with_retry():
@@ -1953,17 +2073,28 @@ def payout_calendar_job_with_retry():
 
 
 def main() -> int:
+    clear_tracker_ready_state()
     if not API_TOKEN:
         logger.error(
             "missing_api_token",
             "TINVEST_API_TOKEN не задан. Передай его через переменную окружения.",
         )
         return 1
+    try:
+        validate_database_credentials(db_dsn=EXPLICIT_DB_DSN, db_password=DB_PASSWORD)
+    except RuntimeConfigurationError as exc:
+        logger.error(
+            "invalid_runtime_configuration",
+            "Required tracker runtime configuration is missing or malformed.",
+            {"error_type": type(exc).__name__},
+        )
+        return 1
 
     init_db()
 
     # Разовый запуск при старте — перезаписываем текущий день
-    job_with_retry()
+    if not job_with_retry():
+        return 1
     payout_calendar_job_with_retry()
 
     # Планировщик: запускаем job_with_retry каждые SNAPSHOT_INTERVAL_MINUTES минут
@@ -2032,6 +2163,7 @@ def main() -> int:
         scheduler.start()
     except (KeyboardInterrupt, SystemExit):
         logger.info("service_stopped", "Service stopped.")
+    clear_tracker_ready_state()
     return 0
 
 

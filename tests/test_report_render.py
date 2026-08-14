@@ -2,6 +2,7 @@ import os
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from decimal import Decimal
 from pathlib import Path
 
@@ -131,6 +132,17 @@ class ReportRenderTests(unittest.TestCase):
         self.assertTrue(narrative["executive_summary"])
         self.assertTrue(narrative["performance_commentary"])
 
+    def test_deterministic_cashflow_notes_show_tax_refund_separately(self):
+        payload = MonthlyReportPayloadBuilderTests()._build_payload(tax_refunds=Decimal("18"))
+
+        narrative = report_render.build_deterministic_monthly_narrative(payload)
+
+        tax_note = next(item for item in narrative["cashflow_notes"] if "налоги:" in item)
+        refund_note = next(item for item in narrative["cashflow_notes"] if "Возврат налога:" in item)
+        self.assertIn("12.10 ₽", tax_note)
+        self.assertNotIn("18.00 ₽", tax_note)
+        self.assertIn("18.00 ₽", refund_note)
+
     def test_build_monthly_report_html_renders_five_pages_and_embeds_charts(self):
         payload = build_sample_payload()
         charts = report_render.build_monthly_report_charts(payload)
@@ -196,12 +208,12 @@ class ReportRenderTests(unittest.TestCase):
 
     def test_save_debug_report_html_writes_file(self):
         html = "<html><body>test</body></html>"
-        path = report_render.save_debug_report_html(html)
-        try:
+        with tempfile.TemporaryDirectory() as parent:
+            directory = Path(parent).resolve() / "debug"
+            with mock.patch.dict(os.environ, {"REPORT_DEBUG_DIR": str(directory)}):
+                path = report_render.save_debug_report_html(html)
             self.assertTrue(Path(path).exists())
             self.assertIn("test", Path(path).read_text(encoding="utf-8"))
-        finally:
-            Path(path).unlink(missing_ok=True)
 
 
 if __name__ == "__main__":

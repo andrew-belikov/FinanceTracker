@@ -1,6 +1,9 @@
 import asyncio
+import functools
 import os
 import tempfile
+import weakref
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 
 from telegram import InputFile, Update
@@ -29,12 +32,23 @@ from runtime import (
     TZ,
     db_session,
     fmt_decimal_rub,
+    get_authorization_denial_text,
     is_authorized,
     log_update_received,
     logger,
     safe_send_document,
     safe_send_message,
 )
+
+
+async def require_authorized_private_chat(update: Update) -> bool:
+    if is_authorized(update):
+        return True
+    denial_text = get_authorization_denial_text(update)
+    message = getattr(update, "effective_message", None)
+    if denial_text and message is not None:
+        await message.reply_text(denial_text)
+    return False
 from services import (
     build_help_text,
     build_invest_text_for_account,
@@ -55,6 +69,173 @@ from services import (
     render_twr_summary_text,
     replace_rebalance_targets,
 )
+
+
+BOT_COMMAND_MAX_CONCURRENCY = max(1, min(8, int(os.getenv("BOT_COMMAND_MAX_CONCURRENCY", "2"))))
+BOT_COMMAND_TIMEOUT_SECONDS = max(1.0, float(os.getenv("BOT_COMMAND_TIMEOUT_SECONDS", "120")))
+_BOT_COMMAND_EXECUTOR = ThreadPoolExecutor(
+    max_workers=BOT_COMMAND_MAX_CONCURRENCY,
+    thread_name_prefix="bot-command",
+)
+_BOT_COMMAND_SEMAPHORES: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
+
+
+def _command_semaphore() -> asyncio.Semaphore:
+    loop = asyncio.get_running_loop()
+    semaphore = _BOT_COMMAND_SEMAPHORES.get(loop)
+    if semaphore is None:
+        semaphore = asyncio.Semaphore(BOT_COMMAND_MAX_CONCURRENCY)
+        _BOT_COMMAND_SEMAPHORES[loop] = semaphore
+    return semaphore
+
+
+async def run_blocking_command(
+    function,
+    /,
+    *args,
+    timeout: float | None = None,
+    timeout_cleanup=None,
+    **kwargs,
+):
+    semaphore = _command_semaphore()
+    async with semaphore:
+        loop = asyncio.get_running_loop()
+        future = loop.run_in_executor(
+            _BOT_COMMAND_EXECUTOR,
+            functools.partial(function, *args, **kwargs),
+        )
+        try:
+            return await asyncio.wait_for(
+                asyncio.shield(future),
+                timeout=timeout if timeout is not None else BOT_COMMAND_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            if timeout_cleanup is not None:
+                future.add_done_callback(timeout_cleanup)
+            raise
+
+
+def _cleanup_path_when_done(path: str):
+    def cleanup(_future) -> None:
+        try:
+            os.remove(path)
+        except FileNotFoundError:
+            pass
+
+    return cleanup
+
+
+def _cleanup_returned_path(future) -> None:
+    try:
+        result = future.result()
+    except Exception:
+        return
+    if isinstance(result, tuple) and result and isinstance(result[0], str):
+        try:
+            os.remove(result[0])
+        except FileNotFoundError:
+            pass
+
+
+def _set_iis_tax_deduction(*, enabled: bool, operation_id: str):
+    with db_session() as session:
+        account_id = resolve_reporting_account_id(session)
+        if account_id is None:
+            return "account_unavailable"
+        return set_iis_tax_deduction_category(
+            session,
+            account_id=account_id,
+            operation_id=operation_id,
+            enabled=enabled,
+        )
+
+
+def _build_calendar_text(*, start_date, end_date):
+    with db_session() as session:
+        account_id = resolve_reporting_account_id(session)
+        if account_id is None:
+            return None
+        return build_payout_calendar_text_for_account(
+            session,
+            account_id,
+            start_date=start_date,
+            end_date=end_date,
+            heading=f"💸 Календарь выплат на {PAYOUT_CALENDAR_HORIZON_DAYS} дней",
+        )
+
+
+def _build_targets_text():
+    with db_session() as session:
+        account_id = resolve_reporting_account_id(session)
+        if account_id is None:
+            return None
+        return build_targets_text_for_account(session, account_id)
+
+
+def _replace_targets_and_build_text(targets):
+    with db_session() as session:
+        account_id = resolve_reporting_account_id(session)
+        if account_id is None:
+            return "account_unavailable", None
+        saved = replace_rebalance_targets(session, account_id, targets)
+        if not saved:
+            return "unavailable", None
+    with db_session() as session:
+        return "ok", build_targets_text_for_account(session, account_id)
+
+
+def _build_rebalance_text():
+    with db_session() as session:
+        account_id = resolve_reporting_account_id(session)
+        if account_id is None:
+            return None
+        return build_rebalance_text_for_account(session, account_id)
+
+
+def _build_invest_text(rounded_amount):
+    with db_session() as session:
+        account_id = resolve_reporting_account_id(session)
+        if account_id is None:
+            return None
+        return build_invest_text_for_account(
+            session,
+            account_id,
+            rounded_amount,
+            header=f"💸 Как распределить пополнение {fmt_decimal_rub(rounded_amount, precision=0)}",
+        )
+
+
+def _new_private_temp_path(*, prefix: str, suffix: str) -> str:
+    handle = tempfile.NamedTemporaryFile(prefix=prefix, suffix=suffix, delete=False)
+    path = handle.name
+    handle.close()
+    os.chmod(path, 0o600)
+    return path
+
+
+def _build_twr_artifact(path: str):
+    with db_session() as session:
+        account_id = resolve_reporting_account_id(session)
+        if account_id is None:
+            return "account_unavailable", None
+        data = compute_twr_timeseries(session, account_id)
+        if not data:
+            return "insufficient", None
+        xirr_value, projected_value, projection_date = compute_portfolio_xirr_and_run_rate(
+            session,
+            account_id,
+        )
+    dates, values, twr = data
+    summary_text = render_twr_summary_text(
+        last_date=dates[-1],
+        last_value=values[-1],
+        last_twr_pct=twr[-1] * 100.0,
+        xirr_value=xirr_value,
+        projected_value=projected_value,
+        projection_date=projection_date,
+    )
+    render_twr_chart(path, dates, values, twr)
+    return "ok", summary_text
 
 
 async def debug_command_probe(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -84,17 +265,14 @@ async def handle_iis_tax_deduction_callback(update: Update, context: ContextType
         await query.answer("Операция не найдена", show_alert=True)
         return
 
-    with db_session() as session:
-        account_id = resolve_reporting_account_id(session)
-        if account_id is None:
-            await query.answer(REPORTING_ACCOUNT_UNAVAILABLE_TEXT, show_alert=True)
-            return
-        result = set_iis_tax_deduction_category(
-            session,
-            account_id=account_id,
-            operation_id=operation_id,
-            enabled=enabled,
-        )
+    result = await run_blocking_command(
+        _set_iis_tax_deduction,
+        enabled=enabled,
+        operation_id=operation_id,
+    )
+    if result == "account_unavailable":
+        await query.answer(REPORTING_ACCOUNT_UNAVAILABLE_TEXT, show_alert=True)
+        return
 
     if result == "not_found":
         await query.answer("Исполненное пополнение не найдено", show_alert=True)
@@ -114,7 +292,7 @@ async def handle_iis_tax_deduction_callback(update: Update, context: ContextType
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     log_update_received(update, command_name="/start")
-    if not is_authorized(update):
+    if not await require_authorized_private_chat(update):
         return
     text = (
         "Привет! Я слежу за вашим портфелем «Семейный капитал».\n\n"
@@ -135,7 +313,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     log_update_received(update, command_name="/help")
-    if not is_authorized(update):
+    if not await require_authorized_private_chat(update):
         return
 
     text = build_help_text()
@@ -144,31 +322,31 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_today(update: Update, context: ContextTypes.DEFAULT_TYPE):
     log_update_received(update, command_name="/today")
-    if not is_authorized(update):
+    if not await require_authorized_private_chat(update):
         return
-    text = build_today_summary()
+    text = await run_blocking_command(build_today_summary)
     await safe_send_message(context.bot, update.effective_chat.id, text, parse_mode="Markdown")
 
 
 async def cmd_week(update: Update, context: ContextTypes.DEFAULT_TYPE):
     log_update_received(update, command_name="/week")
-    if not is_authorized(update):
+    if not await require_authorized_private_chat(update):
         return
-    text = build_week_summary()
+    text = await run_blocking_command(build_week_summary)
     await safe_send_message(context.bot, update.effective_chat.id, text, parse_mode="Markdown")
 
 
 async def cmd_month(update: Update, context: ContextTypes.DEFAULT_TYPE):
     log_update_received(update, command_name="/month")
-    if not is_authorized(update):
+    if not await require_authorized_private_chat(update):
         return
-    text = build_month_summary()
+    text = await run_blocking_command(build_month_summary)
     await safe_send_message(context.bot, update.effective_chat.id, text, parse_mode="Markdown")
 
 
 async def cmd_calendar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     log_update_received(update, command_name="/calendar")
-    if not is_authorized(update):
+    if not await require_authorized_private_chat(update):
         return
     if context.args:
         await update.message.reply_text("Формат: /calendar")
@@ -176,18 +354,14 @@ async def cmd_calendar(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     start_date = datetime.now(TZ).date()
     end_date = start_date + timedelta(days=PAYOUT_CALENDAR_HORIZON_DAYS - 1)
-    with db_session() as session:
-        account_id = resolve_reporting_account_id(session)
-        if account_id is None:
-            await update.message.reply_text(REPORTING_ACCOUNT_UNAVAILABLE_TEXT)
-            return
-        text = build_payout_calendar_text_for_account(
-            session,
-            account_id,
-            start_date=start_date,
-            end_date=end_date,
-            heading=f"💸 Календарь выплат на {PAYOUT_CALENDAR_HORIZON_DAYS} дней",
-        )
+    text = await run_blocking_command(
+        _build_calendar_text,
+        start_date=start_date,
+        end_date=end_date,
+    )
+    if text is None:
+        await update.message.reply_text(REPORTING_ACCOUNT_UNAVAILABLE_TEXT)
+        return
     await safe_send_message(context.bot, update.effective_chat.id, text, parse_mode=None)
 
 
@@ -215,7 +389,7 @@ def _parse_monthpdf_args(args):
 
 async def cmd_monthpdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
     log_update_received(update, command_name="/monthpdf")
-    if not is_authorized(update):
+    if not await require_authorized_private_chat(update):
         return
 
     try:
@@ -236,10 +410,11 @@ async def cmd_monthpdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
     status_message = await update.message.reply_text("Собираю PDF-отчёт. Это может занять до пары минут.")
     document_path = None
     try:
-        document_path, filename = await asyncio.to_thread(
+        document_path, filename = await run_blocking_command(
             request_monthly_report_pdf,
             year=year,
             month=month,
+            timeout_cleanup=_cleanup_returned_path,
         )
         await safe_send_document(
             context.bot,
@@ -262,7 +437,7 @@ async def cmd_monthpdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Failed to fetch monthly PDF report from reporter.",
             {
                 "chat_id": getattr(update.effective_chat, "id", None),
-                "error": str(exc),
+                "error_type": type(exc).__name__,
             },
         )
         await update.message.reply_text(str(exc))
@@ -292,7 +467,7 @@ async def cmd_monthpdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_year(update: Update, context: ContextTypes.DEFAULT_TYPE):
     log_update_received(update, command_name="/year")
-    if not is_authorized(update):
+    if not await require_authorized_private_chat(update):
         return
 
     args = context.args or []
@@ -312,7 +487,7 @@ async def cmd_year(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
     try:
-        summary_text, diff_text, label = build_year_summary(year)
+        summary_text, diff_text, label = await run_blocking_command(build_year_summary, year)
     except ValueError as exc:
         await update.message.reply_text(str(exc))
         return
@@ -320,14 +495,14 @@ async def cmd_year(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     _, period_end_dt_exclusive, _, _ = get_year_period(year)
     chart_year = year if year is not None else datetime.now(TZ).year
-    temp_chart = tempfile.NamedTemporaryFile(prefix=f"year_{chart_year}_", suffix=".png", delete=False)
-    chart_path = temp_chart.name
-    temp_chart.close()
+    chart_path = _new_private_temp_path(prefix=f"year_{chart_year}_", suffix=".png")
     try:
-        chart = build_year_chart(
+        chart = await run_blocking_command(
+            build_year_chart,
             chart_path,
             year=chart_year,
             end_date_exclusive=period_end_dt_exclusive.date(),
+            timeout_cleanup=_cleanup_path_when_done(chart_path),
         )
     except ValueError as exc:
         if os.path.exists(chart_path):
@@ -344,14 +519,14 @@ async def cmd_year(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text(f"Недостаточно данных для графика за {label}.")
 
-    temp_delta_chart = tempfile.NamedTemporaryFile(prefix=f"year_delta_{chart_year}_", suffix=".png", delete=False)
-    delta_chart_path = temp_delta_chart.name
-    temp_delta_chart.close()
+    delta_chart_path = _new_private_temp_path(prefix=f"year_delta_{chart_year}_", suffix=".png")
     try:
-        delta_chart = build_year_monthly_delta_chart(
+        delta_chart = await run_blocking_command(
+            build_year_monthly_delta_chart,
             delta_chart_path,
             year=chart_year,
             end_date_exclusive=period_end_dt_exclusive.date(),
+            timeout_cleanup=_cleanup_path_when_done(delta_chart_path),
         )
     except ValueError as exc:
         if os.path.exists(delta_chart_path):
@@ -371,7 +546,7 @@ async def cmd_year(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_dataset(update: Update, context: ContextTypes.DEFAULT_TYPE):
     log_update_received(update, command_name="/dataset")
-    if not is_authorized(update):
+    if not await require_authorized_private_chat(update):
         return
 
     if context.args:
@@ -379,7 +554,10 @@ async def cmd_dataset(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     try:
-        archive_path, archive_name = create_dataset_archive()
+        archive_path, archive_name = await run_blocking_command(
+            create_dataset_archive,
+            timeout_cleanup=_cleanup_returned_path,
+        )
     except ValueError as exc:
         await update.message.reply_text(str(exc))
         return
@@ -397,93 +575,82 @@ async def cmd_dataset(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_structure(update: Update, context: ContextTypes.DEFAULT_TYPE):
     log_update_received(update, command_name="/structure")
-    if not is_authorized(update):
+    if not await require_authorized_private_chat(update):
         return
-    text = build_structure_text()
+    text = await run_blocking_command(build_structure_text)
     await safe_send_message(context.bot, update.effective_chat.id, text, parse_mode="Markdown")
 
 
 async def cmd_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
     log_update_received(update, command_name="/history")
-    if not is_authorized(update):
+    if not await require_authorized_private_chat(update):
         return
 
-    path = "/tmp/history.png"
+    path = _new_private_temp_path(prefix="history_", suffix=".png")
+    p = None
     try:
-        p = build_history_chart(path)
-    except ValueError as exc:
-        await update.message.reply_text(str(exc))
-        return
-    if not p:
-        await update.message.reply_text(
-            "Недостаточно данных для построения графика."
-        )
-        return
-
-    with open(p, "rb") as f:
-        # Caption убран по требованию
-        await update.message.reply_photo(
-            photo=InputFile(f)
-        )
+        try:
+            p = await run_blocking_command(
+                build_history_chart,
+                path,
+                timeout_cleanup=_cleanup_path_when_done(path),
+            )
+        except ValueError as exc:
+            await update.message.reply_text(str(exc))
+            return
+        if not p:
+            await update.message.reply_text("Недостаточно данных для построения графика.")
+            return
+        with open(p, "rb") as f:
+            await update.message.reply_photo(photo=InputFile(f))
+    finally:
+        for candidate in {path, p or ""}:
+            if candidate and os.path.exists(candidate):
+                os.remove(candidate)
 
 
 async def cmd_twr(update: Update, context: ContextTypes.DEFAULT_TYPE):
     log_update_received(update, command_name="/twr")
-    if not is_authorized(update):
+    if not await require_authorized_private_chat(update):
         return
 
-    with db_session() as session:
-        account_id = resolve_reporting_account_id(session)
-        if account_id is None:
+    path = _new_private_temp_path(prefix="twr_", suffix=".png")
+    try:
+        status, summary_text = await run_blocking_command(
+            _build_twr_artifact,
+            path,
+            timeout_cleanup=_cleanup_path_when_done(path),
+        )
+        if status == "account_unavailable":
             await update.message.reply_text(REPORTING_ACCOUNT_UNAVAILABLE_TEXT)
             return
-
-        data = compute_twr_timeseries(session, account_id)
-        xirr_value, projected_value, projection_date = compute_portfolio_xirr_and_run_rate(
-            session,
-            account_id,
+        if status == "insufficient":
+            await update.message.reply_text("Недостаточно данных")
+            return
+        await safe_send_message(
+            context.bot,
+            update.effective_chat.id,
+            summary_text,
+            parse_mode="Markdown",
         )
-
-    if not data:
-        await update.message.reply_text("Недостаточно данных")
-        return
-
-    dates, values, twr = data
-    last_date = dates[-1]
-    last_value = values[-1]
-    last_twr_pct = twr[-1] * 100.0
-    summary_text = render_twr_summary_text(
-        last_date=last_date,
-        last_value=last_value,
-        last_twr_pct=last_twr_pct,
-        xirr_value=xirr_value,
-        projected_value=projected_value,
-        projection_date=projection_date,
-    )
-    await safe_send_message(context.bot, update.effective_chat.id, summary_text, parse_mode="Markdown")
-
-    path = "/tmp/twr.png"
-    render_twr_chart(path, dates, values, twr)
-
-    with open(path, "rb") as f:
-        await update.message.reply_photo(
-            photo=InputFile(f)
-        )
+        with open(path, "rb") as f:
+            await update.message.reply_photo(photo=InputFile(f))
+    finally:
+        if os.path.exists(path):
+            os.remove(path)
 
 
 async def cmd_targets(update: Update, context: ContextTypes.DEFAULT_TYPE):
     log_update_received(update, command_name="/targets")
-    if not is_authorized(update):
+    if not await require_authorized_private_chat(update):
         return
 
     args = context.args or []
     if not args:
-        with db_session() as session:
-            account_id = resolve_reporting_account_id(session)
-            if account_id is None:
-                await update.message.reply_text(REPORTING_ACCOUNT_UNAVAILABLE_TEXT)
-                return
-            text = build_targets_text_for_account(session, account_id)
+        text = await run_blocking_command(_build_targets_text)
+        if text is None:
+            await update.message.reply_text(REPORTING_ACCOUNT_UNAVAILABLE_TEXT)
+            return
         await safe_send_message(context.bot, update.effective_chat.id, text, parse_mode="Markdown")
         return
 
@@ -497,41 +664,34 @@ async def cmd_targets(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(str(exc))
         return
 
-    with db_session() as session:
-        account_id = resolve_reporting_account_id(session)
-        if account_id is None:
-            await update.message.reply_text(REPORTING_ACCOUNT_UNAVAILABLE_TEXT)
-            return
-        saved = replace_rebalance_targets(session, account_id, targets)
-        if not saved:
-            await update.message.reply_text(REBALANCE_FEATURE_UNAVAILABLE_TEXT)
-            return
-
-    with db_session() as session:
-        text = build_targets_text_for_account(session, account_id)
+    status, text = await run_blocking_command(_replace_targets_and_build_text, targets)
+    if status == "account_unavailable":
+        await update.message.reply_text(REPORTING_ACCOUNT_UNAVAILABLE_TEXT)
+        return
+    if status == "unavailable":
+        await update.message.reply_text(REBALANCE_FEATURE_UNAVAILABLE_TEXT)
+        return
     await safe_send_message(context.bot, update.effective_chat.id, text, parse_mode="Markdown")
 
 
 async def cmd_rebalance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     log_update_received(update, command_name="/rebalance")
-    if not is_authorized(update):
+    if not await require_authorized_private_chat(update):
         return
     if context.args:
         await update.message.reply_text("Формат: /rebalance")
         return
 
-    with db_session() as session:
-        account_id = resolve_reporting_account_id(session)
-        if account_id is None:
-            await update.message.reply_text(REPORTING_ACCOUNT_UNAVAILABLE_TEXT)
-            return
-        text = build_rebalance_text_for_account(session, account_id)
+    text = await run_blocking_command(_build_rebalance_text)
+    if text is None:
+        await update.message.reply_text(REPORTING_ACCOUNT_UNAVAILABLE_TEXT)
+        return
     await safe_send_message(context.bot, update.effective_chat.id, text, parse_mode="Markdown")
 
 
 async def cmd_invest(update: Update, context: ContextTypes.DEFAULT_TYPE):
     log_update_received(update, command_name="/invest")
-    if not is_authorized(update):
+    if not await require_authorized_private_chat(update):
         return
 
     args = context.args or []
@@ -548,15 +708,8 @@ async def cmd_invest(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     rounded_amount = quantize_ruble_amount(amount)
-    with db_session() as session:
-        account_id = resolve_reporting_account_id(session)
-        if account_id is None:
-            await update.message.reply_text(REPORTING_ACCOUNT_UNAVAILABLE_TEXT)
-            return
-        text = build_invest_text_for_account(
-            session,
-            account_id,
-            rounded_amount,
-            header=f"💸 Как распределить пополнение {fmt_decimal_rub(rounded_amount, precision=0)}",
-        )
+    text = await run_blocking_command(_build_invest_text, rounded_amount)
+    if text is None:
+        await update.message.reply_text(REPORTING_ACCOUNT_UNAVAILABLE_TEXT)
+        return
     await safe_send_message(context.bot, update.effective_chat.id, text, parse_mode="Markdown")

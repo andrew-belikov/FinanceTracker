@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import hmac
 import json
 import os
+import socket
+import threading
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
@@ -19,6 +23,10 @@ from report_render import ReportRenderError
 REPORTER_HOST = os.getenv("REPORTER_HOST", "0.0.0.0").strip() or "0.0.0.0"
 REPORTER_PORT = int(os.getenv("REPORTER_PORT", "8088"))
 REPORTER_MAX_BODY_BYTES = int(os.getenv("REPORTER_MAX_BODY_BYTES", "65536"))
+REPORTER_SERVICE_KEY = os.getenv("REPORTER_SERVICE_KEY", "").strip()
+REPORTER_MAX_CONCURRENT_REQUESTS = int(os.getenv("REPORTER_MAX_CONCURRENT_REQUESTS", "2"))
+REPORTER_SOCKET_TIMEOUT_SECONDS = float(os.getenv("REPORTER_SOCKET_TIMEOUT_SECONDS", "10"))
+REPORTER_REQUEST_TIMEOUT_SECONDS = float(os.getenv("REPORTER_REQUEST_TIMEOUT_SECONDS", "180"))
 MONTHLY_REPORT_BUILDER = build_monthly_report_artifact_for_request
 
 logger = get_logger(__name__)
@@ -35,10 +43,63 @@ class ReporterHTTPServer(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
 
+    def __init__(
+        self,
+        server_address,
+        handler_class,
+        *,
+        service_key: str,
+        max_concurrent_requests: int,
+        socket_timeout_seconds: float,
+        request_timeout_seconds: float,
+    ):
+        if len(service_key) < 16:
+            raise ValueError("REPORTER_SERVICE_KEY must contain at least 16 characters")
+        if max_concurrent_requests < 1 or max_concurrent_requests > 32:
+            raise ValueError("REPORTER_MAX_CONCURRENT_REQUESTS must be between 1 and 32")
+        if socket_timeout_seconds <= 0 or request_timeout_seconds <= 0:
+            raise ValueError("Reporter timeouts must be positive")
+        self.service_key = service_key
+        self.request_budget = threading.BoundedSemaphore(max_concurrent_requests)
+        self.connection_budget = threading.BoundedSemaphore(max_concurrent_requests * 2)
+        self.socket_timeout_seconds = socket_timeout_seconds
+        self.request_timeout_seconds = request_timeout_seconds
+        super().__init__(server_address, handler_class)
+        self.request_pool = ThreadPoolExecutor(
+            max_workers=max_concurrent_requests * 2,
+            thread_name_prefix="reporter-request",
+        )
+        self.worker_pool = ThreadPoolExecutor(
+            max_workers=max_concurrent_requests,
+            thread_name_prefix="reporter-builder",
+        )
+
+    def process_request(self, request, client_address) -> None:
+        if not self.connection_budget.acquire(blocking=False):
+            self.shutdown_request(request)
+            return
+
+        def process_bounded_request() -> None:
+            try:
+                self.process_request_thread(request, client_address)
+            finally:
+                self.connection_budget.release()
+
+        self.request_pool.submit(process_bounded_request)
+
+    def server_close(self) -> None:
+        super().server_close()
+        self.request_pool.shutdown(wait=False, cancel_futures=True)
+        self.worker_pool.shutdown(wait=False, cancel_futures=True)
+
 
 class ReporterRequestHandler(BaseHTTPRequestHandler):
     server_version = "FinanceTrackerReporter/0.1"
     protocol_version = "HTTP/1.1"
+
+    def setup(self) -> None:
+        super().setup()
+        self.connection.settimeout(self.server.socket_timeout_seconds)
 
     def log_message(self, format: str, *args: Any) -> None:  # pragma: no cover - disable stderr logging
         return
@@ -119,8 +180,44 @@ class ReporterRequestHandler(BaseHTTPRequestHandler):
             )
             return
 
+        supplied_key = self.headers.get("X-Reporter-Service-Key")
+        if supplied_key is None:
+            self.close_connection = True
+            self._send_json(
+                HTTPStatus.UNAUTHORIZED,
+                {"status": "error", "error": "authentication_required"},
+            )
+            return
+        if not hmac.compare_digest(supplied_key.encode("utf-8"), self.server.service_key.encode("utf-8")):
+            self.close_connection = True
+            self._send_json(
+                HTTPStatus.FORBIDDEN,
+                {"status": "error", "error": "authentication_failed"},
+            )
+            return
+
+        if not self.server.request_budget.acquire(blocking=False):
+            self.close_connection = True
+            self._send_json(
+                HTTPStatus.SERVICE_UNAVAILABLE,
+                {"status": "error", "error": "reporter_overloaded"},
+            )
+            return
+
+        budget_owned = True
+        future = None
+        body_read = False
+
         try:
             request_json = self._read_json_body()
+            body_read = True
+        except socket.timeout:
+            self.close_connection = True
+            self._send_json(
+                HTTPStatus.REQUEST_TIMEOUT,
+                {"status": "error", "error": "request_timeout"},
+            )
+            return
         except (json.JSONDecodeError, UnicodeDecodeError, ValueError) as exc:
             logger.warning(
                 "reporter_monthly_pdf_request_rejected",
@@ -139,9 +236,22 @@ class ReporterRequestHandler(BaseHTTPRequestHandler):
                 },
             )
             return
+        finally:
+            if not body_read and budget_owned:
+                self.server.request_budget.release()
+                budget_owned = False
 
         try:
-            artifact = MONTHLY_REPORT_BUILDER(request_json)
+            future = self.server.worker_pool.submit(MONTHLY_REPORT_BUILDER, request_json)
+            future.add_done_callback(lambda _future: self.server.request_budget.release())
+            budget_owned = False
+            artifact = future.result(timeout=self.server.request_timeout_seconds)
+        except FutureTimeoutError:
+            self._send_json(
+                HTTPStatus.SERVICE_UNAVAILABLE,
+                {"status": "error", "error": "report_timeout"},
+            )
+            return
         except (json.JSONDecodeError, UnicodeDecodeError, ValueError, ReportRequestError) as exc:
             error_code = "invalid_request" if isinstance(exc, ReportRequestError) else "report_unavailable"
             logger.warning(
@@ -197,6 +307,9 @@ class ReporterRequestHandler(BaseHTTPRequestHandler):
                 },
             )
             return
+        finally:
+            if budget_owned:
+                self.server.request_budget.release()
 
         logger.info(
             "reporter_monthly_pdf_built",
@@ -215,10 +328,37 @@ class ReporterRequestHandler(BaseHTTPRequestHandler):
         )
 
 
-def build_reporter_server(host: str | None = None, port: int | None = None) -> ReporterHTTPServer:
+def build_reporter_server(
+    host: str | None = None,
+    port: int | None = None,
+    *,
+    service_key: str | None = None,
+    max_concurrent_requests: int | None = None,
+    socket_timeout_seconds: float | None = None,
+    request_timeout_seconds: float | None = None,
+) -> ReporterHTTPServer:
     resolved_host = (host or REPORTER_HOST).strip() or REPORTER_HOST
     resolved_port = int(port if port is not None else REPORTER_PORT)
-    return ReporterHTTPServer((resolved_host, resolved_port), ReporterRequestHandler)
+    return ReporterHTTPServer(
+        (resolved_host, resolved_port),
+        ReporterRequestHandler,
+        service_key=service_key if service_key is not None else REPORTER_SERVICE_KEY,
+        max_concurrent_requests=(
+            max_concurrent_requests
+            if max_concurrent_requests is not None
+            else REPORTER_MAX_CONCURRENT_REQUESTS
+        ),
+        socket_timeout_seconds=(
+            socket_timeout_seconds
+            if socket_timeout_seconds is not None
+            else REPORTER_SOCKET_TIMEOUT_SECONDS
+        ),
+        request_timeout_seconds=(
+            request_timeout_seconds
+            if request_timeout_seconds is not None
+            else REPORTER_REQUEST_TIMEOUT_SECONDS
+        ),
+    )
 
 
 def main() -> int:

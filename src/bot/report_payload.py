@@ -2,23 +2,23 @@ from __future__ import annotations
 
 import json
 import os
-import tempfile
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 from typing import Any
 
 from common.logging_setup import get_logger
 from common.text_utils import has_mojibake
+from debug_artifacts import save_debug_text
 from queries import (
     compute_realized_by_asset,
     get_asset_alias_rows,
     get_dataset_operations,
+    get_income_currency_breakdown_for_period,
     get_income_events_for_period,
     get_income_for_period,
     get_iis_tax_deductions_for_period,
     get_instrument_eod_rows,
     get_month_snapshots,
-    get_net_external_flow_for_period,
     get_period_daily_snapshot_rows,
     get_positions_for_snapshot,
     get_unrealized_at_period_end,
@@ -26,6 +26,7 @@ from queries import (
     get_commissions_for_period,
     get_deposits_for_period,
     get_taxes_for_period,
+    get_tax_refunds_for_period,
 )
 from runtime import (
     ACCOUNT_FRIENDLY_NAME,
@@ -42,18 +43,24 @@ from runtime import (
     normalize_decimal,
     to_iso_datetime,
     to_local_market_date,
+    local_reporting_bounds_utc_naive,
 )
 from services import (
+    add_operation_cashflow_by_currency_day,
     aggregate_rebalance_values_by_class,
     build_asset_alias_lookup,
     build_logical_asset_id,
     build_reconciliation_by_asset_type,
+    build_operation_cashflows_for_snapshot_interval,
     classify_operation_group,
     compute_income_by_asset_net,
     compute_rebalance_plan,
     compute_twr_timeseries,
     get_rebalance_targets,
     is_income_event_backed_tax_operation,
+    normalize_operation_currency,
+    rebase_twr_to_period,
+    sum_decimal_values_for_snapshot_interval,
 )
 
 
@@ -92,13 +99,17 @@ def _get_month_bounds(year: int, month: int) -> dict[str, Any]:
         period_end_exclusive = date(year + 1, 1, 1)
     else:
         period_end_exclusive = date(year, month + 1, 1)
+    period_start_dt, period_end_exclusive_dt = local_reporting_bounds_utc_naive(
+        period_start,
+        period_end_exclusive,
+    )
     return {
         "period_start": period_start,
         "period_end": period_end_exclusive - timedelta(days=1),
         "period_end_exclusive": period_end_exclusive,
-        "period_start_dt": datetime.combine(period_start, time.min),
-        "period_end_dt": datetime.combine(period_end_exclusive, time.min) - timedelta(microseconds=1),
-        "period_end_exclusive_dt": datetime.combine(period_end_exclusive, time.min),
+        "period_start_dt": period_start_dt,
+        "period_end_dt": period_end_exclusive_dt - timedelta(microseconds=1),
+        "period_end_exclusive_dt": period_end_exclusive_dt,
     }
 
 
@@ -111,7 +122,7 @@ def _resolve_currency(snapshot_rows: list[dict[str, Any]], positions_rows: list[
         currency = (row.get("currency") or "").strip()
         if currency:
             return currency
-    return "RUB"
+    return "UNKNOWN"
 
 
 def _pick_alias_row(
@@ -279,11 +290,7 @@ def _build_operations_month_data(
     alias_by_figi: dict[str, dict[str, Any]],
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     normalized_rows: list[dict[str, Any]] = []
-    deposits_by_day: dict[date, Decimal] = {}
-    iis_tax_deductions_by_day: dict[date, Decimal] = {}
-    withdrawals_by_day: dict[date, Decimal] = {}
-    commissions_by_day: dict[date, Decimal] = {}
-    taxes_by_day: dict[date, Decimal] = {}
+    cashflows_by_currency_day: dict[str, dict[str, dict[date, Decimal]]] = {}
     unknown_operation_group_count = 0
     mojibake_detected_count = 0
 
@@ -304,19 +311,37 @@ def _build_operations_month_data(
         amount = normalize_decimal(row.get("amount"))
         amount_abs = abs(amount)
 
+        cashflow_field: str | None = None
+        cashflow_amount = Decimal("0")
         if local_date is not None:
             if operation_group == "deposit" and row.get("cashflow_category") == IIS_TAX_DEDUCTION_CATEGORY:
-                iis_tax_deductions_by_day[local_date] = (
-                    iis_tax_deductions_by_day.get(local_date, Decimal("0")) + amount_abs
-                )
+                cashflow_field = "iis_tax_deduction_income"
+                cashflow_amount = amount_abs
             elif operation_group == "deposit":
-                deposits_by_day[local_date] = deposits_by_day.get(local_date, Decimal("0")) + amount_abs
+                cashflow_field = "deposits"
+                cashflow_amount = amount_abs
             elif operation_group == "withdrawal":
-                withdrawals_by_day[local_date] = withdrawals_by_day.get(local_date, Decimal("0")) + amount_abs
+                cashflow_field = "withdrawals"
+                cashflow_amount = amount_abs
             elif operation_group == "commission":
-                commissions_by_day[local_date] = commissions_by_day.get(local_date, Decimal("0")) + amount_abs
+                cashflow_field = "commissions"
+                cashflow_amount = amount_abs
             elif operation_group == "income_tax" and not is_income_event_backed_tax_operation(row.get("operation_type")):
-                taxes_by_day[local_date] = taxes_by_day.get(local_date, Decimal("0")) + amount_abs
+                if amount < 0:
+                    cashflow_field = "operation_taxes"
+                    cashflow_amount = amount_abs
+                elif amount > 0:
+                    cashflow_field = "operation_tax_refunds"
+                    cashflow_amount = amount
+
+        if local_date is not None and cashflow_field is not None:
+            add_operation_cashflow_by_currency_day(
+                cashflows_by_currency_day,
+                currency=row.get("currency"),
+                field=cashflow_field,
+                flow_date=local_date,
+                amount=cashflow_amount,
+            )
 
         normalized_rows.append(
             {
@@ -345,11 +370,7 @@ def _build_operations_month_data(
         )
 
     return normalized_rows, {
-        "deposits_by_day": deposits_by_day,
-        "iis_tax_deductions_by_day": iis_tax_deductions_by_day,
-        "withdrawals_by_day": withdrawals_by_day,
-        "commissions_by_day": commissions_by_day,
-        "taxes_by_day": taxes_by_day,
+        "cashflows_by_currency_day": cashflows_by_currency_day,
         "unknown_operation_group_count": unknown_operation_group_count,
         "mojibake_detected_count": mojibake_detected_count,
     }
@@ -358,10 +379,18 @@ def _build_operations_month_data(
 def _build_income_month_data(
     income_rows: list[dict[str, Any]],
     alias_by_figi: dict[str, dict[str, Any]],
-) -> tuple[list[dict[str, Any]], dict[str, Decimal], dict[str, Decimal]]:
+    *,
+    base_currency: str,
+) -> tuple[
+    list[dict[str, Any]],
+    dict[date, Decimal],
+    dict[date, Decimal],
+    dict[date, Decimal],
+]:
     normalized_rows: list[dict[str, Any]] = []
     income_net_by_day: dict[date, Decimal] = {}
     income_tax_by_day: dict[date, Decimal] = {}
+    income_tax_refunds_by_day: dict[date, Decimal] = {}
 
     for row in income_rows:
         alias_row = alias_by_figi.get(row.get("figi")) if row.get("figi") else None
@@ -376,14 +405,22 @@ def _build_income_month_data(
         event_date = row.get("event_date")
         net_amount = normalize_decimal(row.get("net_amount"))
         tax_amount = normalize_decimal(row.get("tax_amount"))
+        currency = normalize_operation_currency(row.get("currency"))
 
-        income_net_by_day[event_date] = income_net_by_day.get(event_date, Decimal("0")) + net_amount
-        income_tax_by_day[event_date] = income_tax_by_day.get(event_date, Decimal("0")) + abs(tax_amount)
+        if currency == base_currency and base_currency != "UNKNOWN":
+            income_net_by_day[event_date] = income_net_by_day.get(event_date, Decimal("0")) + net_amount
+            if tax_amount < 0:
+                income_tax_by_day[event_date] = income_tax_by_day.get(event_date, Decimal("0")) + abs(tax_amount)
+            elif tax_amount > 0:
+                income_tax_refunds_by_day[event_date] = (
+                    income_tax_refunds_by_day.get(event_date, Decimal("0")) + tax_amount
+                )
 
         normalized_rows.append(
             {
                 "event_date": event_date,
                 "event_type": row.get("event_type"),
+                "currency": currency,
                 "logical_asset_id": identity["logical_asset_id"],
                 "asset_uid": identity["asset_uid"],
                 "figi": identity["figi"],
@@ -397,7 +434,7 @@ def _build_income_month_data(
             }
         )
 
-    return normalized_rows, income_net_by_day, income_tax_by_day
+    return normalized_rows, income_net_by_day, income_tax_by_day, income_tax_refunds_by_day
 
 
 def _build_timeseries_daily(
@@ -411,26 +448,70 @@ def _build_timeseries_daily(
     taxes_by_day: dict[date, Decimal],
     income_tax_by_day: dict[date, Decimal],
     twr_by_date: dict[date, Decimal],
+    tax_refunds_by_day: dict[date, Decimal] | None = None,
+    income_tax_refunds_by_day: dict[date, Decimal] | None = None,
+    base_currency: str | None = None,
+    operation_cashflows_by_currency_day: dict[str, dict[str, dict[date, Decimal]]] | None = None,
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     previous_value: Decimal | None = None
+    previous_snapshot_date: date | None = None
 
     for row in snapshot_rows:
         snapshot_date = row["snapshot_date"]
         portfolio_value = normalize_decimal(row.get("total_value"))
-        deposits = deposits_by_day.get(snapshot_date, Decimal("0"))
-        withdrawals = withdrawals_by_day.get(snapshot_date, Decimal("0"))
-        income_net = income_net_by_day.get(snapshot_date, Decimal("0"))
-        iis_tax_deduction_income = iis_tax_deductions_by_day.get(snapshot_date, Decimal("0"))
+        interval_args = (previous_snapshot_date, snapshot_date)
+        has_currency_aware_cashflows = operation_cashflows_by_currency_day is not None
+        interval_operation_cashflows = build_operation_cashflows_for_snapshot_interval(
+            operation_cashflows_by_currency_day or {},
+            *interval_args,
+        )
+        snapshot_currency = normalize_operation_currency(row.get("currency") or base_currency)
+        base_cashflows = None
+        if snapshot_currency != "UNKNOWN":
+            base_cashflows = next(
+                (
+                    item
+                    for item in interval_operation_cashflows
+                    if item["currency"] == snapshot_currency
+                ),
+                None,
+            )
+        if has_currency_aware_cashflows:
+            base_cashflows = base_cashflows or {}
+            deposits = normalize_decimal(base_cashflows.get("deposits"))
+            withdrawals = normalize_decimal(base_cashflows.get("withdrawals"))
+            iis_tax_deduction_income = normalize_decimal(base_cashflows.get("iis_tax_deduction_income"))
+            commissions = normalize_decimal(base_cashflows.get("commissions"))
+            operation_taxes = normalize_decimal(base_cashflows.get("operation_taxes"))
+            operation_tax_refunds = normalize_decimal(base_cashflows.get("operation_tax_refunds"))
+        else:
+            deposits = sum_decimal_values_for_snapshot_interval(deposits_by_day, *interval_args)
+            withdrawals = sum_decimal_values_for_snapshot_interval(withdrawals_by_day, *interval_args)
+            iis_tax_deduction_income = sum_decimal_values_for_snapshot_interval(
+                iis_tax_deductions_by_day,
+                *interval_args,
+            )
+            commissions = sum_decimal_values_for_snapshot_interval(commissions_by_day, *interval_args)
+            operation_taxes = sum_decimal_values_for_snapshot_interval(taxes_by_day, *interval_args)
+            operation_tax_refunds = sum_decimal_values_for_snapshot_interval(
+                tax_refunds_by_day or {},
+                *interval_args,
+            )
+        income_net = sum_decimal_values_for_snapshot_interval(income_net_by_day, *interval_args)
         total_income_net = income_net + iis_tax_deduction_income
-        commissions = commissions_by_day.get(snapshot_date, Decimal("0"))
-        operation_taxes = taxes_by_day.get(snapshot_date, Decimal("0"))
-        income_taxes = income_tax_by_day.get(snapshot_date, Decimal("0"))
-        net_cashflow = deposits - withdrawals + income_net - commissions - operation_taxes
+        income_taxes = sum_decimal_values_for_snapshot_interval(income_tax_by_day, *interval_args)
+        income_tax_refunds = sum_decimal_values_for_snapshot_interval(
+            income_tax_refunds_by_day or {},
+            *interval_args,
+        )
+        net_external_flow = deposits - withdrawals
+        net_cashflow = net_external_flow
         day_pnl = Decimal("0")
         if previous_value is not None:
             day_pnl = portfolio_value - previous_value - net_cashflow
         previous_value = portfolio_value
+        previous_snapshot_date = snapshot_date
 
         rows.append(
             {
@@ -448,9 +529,19 @@ def _build_timeseries_daily(
                 "commissions": commissions,
                 "operation_taxes": operation_taxes,
                 "income_taxes": income_taxes,
+                "operation_tax_refunds": operation_tax_refunds,
+                "income_tax_refunds": income_tax_refunds,
+                "tax_refunds": operation_tax_refunds + income_tax_refunds,
+                "net_external_flow": net_external_flow,
                 "net_cashflow": net_cashflow,
                 "day_pnl": day_pnl,
                 "twr_pct": twr_by_date.get(snapshot_date),
+                "operation_cashflows_by_currency": interval_operation_cashflows,
+                "unsupported_operation_currencies": [
+                    item["currency"]
+                    for item in interval_operation_cashflows
+                    if snapshot_currency == "UNKNOWN" or item["currency"] != snapshot_currency
+                ],
             }
         )
 
@@ -491,8 +582,11 @@ def _compute_period_pnl(
     if start_snapshot is not None:
         period_pnl_abs = end_value - start_value - net_external_flow
     else:
-        month_net_cashflow = sum((normalize_decimal(row.get("net_cashflow")) for row in daily_rows[1:]), Decimal("0"))
-        period_pnl_abs = end_value - start_value - month_net_cashflow
+        month_external_flow = sum(
+            (normalize_decimal(row.get("net_external_flow", row.get("net_cashflow"))) for row in daily_rows[1:]),
+            Decimal("0"),
+        )
+        period_pnl_abs = end_value - start_value - month_external_flow
 
     if start_value == 0:
         return period_pnl_abs, None
@@ -847,6 +941,7 @@ def _build_summary_metrics(
     dividend_net: Decimal,
     commissions: Decimal,
     taxes: Decimal,
+    tax_refunds: Decimal,
     deposits_ytd: Decimal,
     plan_annual_contrib: Decimal,
     reconciliation_gap_abs: Decimal,
@@ -897,6 +992,7 @@ def _build_summary_metrics(
         "dividend_net": dividend_net,
         "commissions": commissions,
         "taxes": taxes,
+        "tax_refunds": tax_refunds,
         "deposits_ytd": deposits_ytd,
         "plan_annual_contrib": plan_annual_contrib,
         "plan_progress_pct": plan_progress_pct,
@@ -938,6 +1034,13 @@ def _display_rub(value: Any, *, precision: int = 0) -> str:
     return fmt_decimal_rub(value, precision=precision)
 
 
+def _display_nominal_currency(value: Any, currency: str) -> str:
+    normalized_currency = (currency or "UNKNOWN").strip().upper() or "UNKNOWN"
+    if normalized_currency == "RUB":
+        return fmt_decimal_rub(value, precision=2)
+    return f"{_to_decimal(value):.2f} {normalized_currency}"
+
+
 def _build_overview_facts(payload: dict[str, Any]) -> dict[str, Any]:
     summary = payload["summary_metrics"]
     highlights = []
@@ -954,6 +1057,10 @@ def _build_overview_facts(payload: dict[str, Any]) -> dict[str, Any]:
         f"пополнения {fmt_decimal_rub(summary.get('deposits'), precision=0)}, "
         f"выводы {fmt_decimal_rub(summary.get('withdrawals'), precision=0)}."
     )
+    if _to_decimal(summary.get("tax_refunds")) != 0:
+        highlights.append(
+            f"Возврат налога: {fmt_decimal_rub(summary.get('tax_refunds'), precision=2)}."
+        )
     if summary.get("top_holding_name"):
         highlights.append(
             f"Крупнейшая позиция: {summary.get('top_holding_name')} "
@@ -976,6 +1083,7 @@ def _build_overview_facts(payload: dict[str, Any]) -> dict[str, Any]:
         "total_income_net": _display_rub(summary.get("total_income_net"), precision=2),
         "commissions": _display_rub(summary.get("commissions"), precision=2),
         "taxes": _display_rub(summary.get("taxes"), precision=2),
+        "tax_refunds": _display_rub(summary.get("tax_refunds"), precision=2),
         "top_holding_name": summary.get("top_holding_name"),
         "top_holding_value": _display_rub(summary.get("top_holding_value"), precision=0),
         "top_holding_weight_pct": fmt_pct(float(_to_decimal(summary.get("top_holding_weight_pct"))), precision=1)
@@ -1156,6 +1264,7 @@ def _build_contribution_facts(payload: dict[str, Any]) -> dict[str, Any]:
 
 def _build_cashflow_facts(payload: dict[str, Any]) -> dict[str, Any]:
     summary = payload["summary_metrics"]
+    income_by_currency = payload.get("income_by_currency") or []
     return {
         "deposits": _display_rub(summary.get("deposits"), precision=0),
         "withdrawals": _display_rub(summary.get("withdrawals"), precision=0),
@@ -1164,6 +1273,29 @@ def _build_cashflow_facts(payload: dict[str, Any]) -> dict[str, Any]:
         "total_income_net": _display_rub(summary.get("total_income_net"), precision=2),
         "commissions": _display_rub(summary.get("commissions"), precision=2),
         "taxes": _display_rub(summary.get("taxes"), precision=2),
+        "tax_refunds": _display_rub(summary.get("tax_refunds"), precision=2),
+        "income_by_currency": [
+            {
+                "currency": str(row.get("currency") or "UNKNOWN").upper(),
+                "coupons": _display_nominal_currency(
+                    row.get("coupons"), str(row.get("currency") or "UNKNOWN")
+                ),
+                "dividends": _display_nominal_currency(
+                    row.get("dividends"), str(row.get("currency") or "UNKNOWN")
+                ),
+                "taxes": _display_nominal_currency(
+                    row.get("taxes"), str(row.get("currency") or "UNKNOWN")
+                ),
+                "tax_refunds": _display_nominal_currency(
+                    row.get("tax_refunds"), str(row.get("currency") or "UNKNOWN")
+                ),
+            }
+            for row in income_by_currency
+        ],
+        "unknown_income_currency_warning": any(
+            str(row.get("currency") or "UNKNOWN").upper() == "UNKNOWN"
+            for row in income_by_currency
+        ),
         "operations_top": [
             {
                 "local_date": _format_display_date(row.get("local_date")),
@@ -1251,14 +1383,11 @@ def build_monthly_ai_input(
 
 
 def save_debug_report_payload(payload: dict[str, Any]) -> str:
-    handle = tempfile.NamedTemporaryFile(
-        prefix="monthly_report_payload_",
+    return save_debug_text(
+        kind="payload",
         suffix=".json",
-        delete=False,
+        text=json.dumps(payload, ensure_ascii=False, indent=2),
     )
-    with open(handle.name, "w", encoding="utf-8") as file_obj:
-        json.dump(payload, file_obj, ensure_ascii=False, indent=2)
-    return handle.name
 
 
 def build_monthly_report_payload(
@@ -1325,44 +1454,72 @@ def build_monthly_report_payload(
         alias_by_instrument_uid,
         alias_by_figi,
     )
-    normalized_income_events, income_net_by_day, income_tax_by_day = _build_income_month_data(
+    base_currency = normalize_operation_currency(_resolve_currency(daily_snapshot_rows, positions_current))
+    (
+        normalized_income_events,
+        income_net_by_day,
+        income_tax_by_day,
+        income_tax_refunds_by_day,
+    ) = _build_income_month_data(
         income_event_rows,
         alias_by_figi,
+        base_currency=base_currency,
     )
 
     twr_series = compute_twr_timeseries(session, report_account_id)
     twr_by_date: dict[date, Decimal] = {}
     if twr_series is not None:
         series_dates, _values, series_returns = twr_series
+        period_twr_by_date = rebase_twr_to_period(
+            series_dates,
+            series_returns,
+            period_start,
+            period_end_exclusive,
+        )
         twr_by_date = {
             item_date: normalize_decimal(round(item_return * 100.0, 6))
-            for item_date, item_return in zip(series_dates, series_returns)
-            if period_start <= item_date < period_end_exclusive
+            for item_date, item_return in period_twr_by_date.items()
         }
 
     timeseries_daily = _build_timeseries_daily(
         daily_snapshot_rows,
-        deposits_by_day=operation_aggregates["deposits_by_day"],
-        iis_tax_deductions_by_day=operation_aggregates["iis_tax_deductions_by_day"],
-        withdrawals_by_day=operation_aggregates["withdrawals_by_day"],
+        deposits_by_day={},
+        iis_tax_deductions_by_day={},
+        withdrawals_by_day={},
         income_net_by_day=income_net_by_day,
-        commissions_by_day=operation_aggregates["commissions_by_day"],
-        taxes_by_day=operation_aggregates["taxes_by_day"],
+        commissions_by_day={},
+        taxes_by_day={},
         income_tax_by_day=income_tax_by_day,
         twr_by_date=twr_by_date,
+        tax_refunds_by_day={},
+        income_tax_refunds_by_day=income_tax_refunds_by_day,
+        base_currency=base_currency,
+        operation_cashflows_by_currency_day=operation_aggregates["cashflows_by_currency_day"],
     )
 
-    deposits = normalize_decimal(get_deposits_for_period(session, report_account_id, period_start_dt, period_end_exclusive_dt))
-    net_external_flow = normalize_decimal(
-        get_net_external_flow_for_period(
-            session,
-            report_account_id,
-            period_start_dt,
-            period_end_exclusive_dt,
-        )
+    operation_cashflows_by_currency = build_operation_cashflows_for_snapshot_interval(
+        operation_aggregates["cashflows_by_currency_day"],
+        period_start - timedelta(days=1),
+        period_end,
     )
-    withdrawals = deposits - net_external_flow
-    coupon_net, dividend_net = get_income_for_period(session, report_account_id, period_start_dt, period_end_dt)
+    base_period_cashflows = None
+    if base_currency != "UNKNOWN":
+        base_period_cashflows = next(
+            (item for item in operation_cashflows_by_currency if item["currency"] == base_currency),
+            None,
+        )
+    deposits = normalize_decimal(base_period_cashflows["deposits"]) if base_period_cashflows else Decimal("0")
+    withdrawals = (
+        normalize_decimal(base_period_cashflows["withdrawals"]) if base_period_cashflows else Decimal("0")
+    )
+    net_external_flow = deposits - withdrawals
+    coupon_net, dividend_net = get_income_for_period(
+        session,
+        report_account_id,
+        period_start_dt,
+        period_end_dt,
+        currency=base_currency,
+    )
     coupon_net = normalize_decimal(coupon_net)
     dividend_net = normalize_decimal(dividend_net)
     income_net = coupon_net + dividend_net
@@ -1376,11 +1533,29 @@ def build_monthly_report_payload(
     )
     commissions = normalize_decimal(get_commissions_for_period(session, report_account_id, period_start_dt, period_end_dt))
     taxes = normalize_decimal(get_taxes_for_period(session, report_account_id, period_start_dt, period_end_dt))
+    tax_refunds = normalize_decimal(
+        get_tax_refunds_for_period(session, report_account_id, period_start_dt, period_end_dt)
+    )
+    income_by_currency = [
+        {
+            "currency": str(row.get("currency") or "UNKNOWN").strip().upper() or "UNKNOWN",
+            "coupons": normalize_decimal(row.get("coupons")),
+            "dividends": normalize_decimal(row.get("dividends")),
+            "taxes": normalize_decimal(row.get("taxes")),
+            "tax_refunds": normalize_decimal(row.get("tax_refunds")),
+        }
+        for row in get_income_currency_breakdown_for_period(
+            session, report_account_id, period_start_dt, period_end_dt
+        )
+    ]
     deposits_ytd = normalize_decimal(
         get_deposits_for_period(
             session,
             report_account_id,
-            datetime(year, 1, 1),
+            local_reporting_bounds_utc_naive(
+                date(year, 1, 1),
+                date(year + 1, 1, 1),
+            )[0],
             period_end_exclusive_dt,
         )
     )
@@ -1438,6 +1613,7 @@ def build_monthly_report_payload(
         dividend_net=dividend_net,
         commissions=commissions,
         taxes=taxes,
+        tax_refunds=tax_refunds,
         deposits_ytd=deposits_ytd,
         plan_annual_contrib=normalize_decimal(PLAN_ANNUAL_CONTRIB_RUB),
         reconciliation_gap_abs=reconciliation_gap_abs,
@@ -1459,7 +1635,7 @@ def build_monthly_report_payload(
             "account_id": report_account_id,
             "account_friendly_name": ACCOUNT_FRIENDLY_NAME,
             "timezone": TZ_NAME,
-            "currency": _resolve_currency(daily_snapshot_rows, positions_current),
+            "currency": base_currency,
             "period_year": year,
             "period_month": month,
             "period_label_ru": f"{MONTHS_RU[month]} {year}",
@@ -1485,6 +1661,8 @@ def build_monthly_report_payload(
         "open_pl_end": open_pl_end,
         "operations_top": build_operations_top(normalized_operations),
         "income_events": normalized_income_events,
+        "income_by_currency": income_by_currency,
+        "operation_cashflows_by_currency": operation_cashflows_by_currency,
         "reconciliation_by_asset_type": reconciliation_rows,
         "data_quality": {
             "unknown_operation_group_count": operation_aggregates["unknown_operation_group_count"],
@@ -1494,6 +1672,14 @@ def build_monthly_report_payload(
             "income_events_available": True,
             "asset_alias_rows_count": len(asset_alias_rows),
             "has_rebalance_targets": bool(targets),
+            "unknown_income_currency_warning": any(
+                row["currency"] == "UNKNOWN" for row in income_by_currency
+            ),
+            "unsupported_operation_currencies": [
+                item["currency"]
+                for item in operation_cashflows_by_currency
+                if base_currency == "UNKNOWN" or item["currency"] != base_currency
+            ],
         },
         "rebalance_snapshot": rebalance_snapshot,
     }
@@ -1506,7 +1692,7 @@ def build_monthly_report_payload(
             "Saved monthly report payload to a debug JSON file.",
             {
                 "period": f"{year}-{month:02d}",
-                "path": debug_path,
+                "artifact_kind": "payload",
             },
         )
 

@@ -6,12 +6,41 @@ import sys
 from urllib.parse import urlparse
 
 import httpx
+from sqlalchemy.engine import make_url
+from sqlalchemy.exc import ArgumentError
 
 from common.logging_setup import configure_logging, get_logger
 
 
 configure_logging()
 logger = get_logger(__name__)
+
+
+class RuntimeConfigurationError(ValueError):
+    """Raised when startup credentials are absent or malformed."""
+
+
+def validate_database_credentials() -> None:
+    db_dsn = os.getenv("DB_DSN", "").strip()
+    db_password = os.getenv("DB_PASSWORD", "").strip()
+    if not db_dsn:
+        if not db_password:
+            raise RuntimeConfigurationError(
+                "Database credentials must be explicitly configured"
+            )
+        return
+    try:
+        parsed = make_url(db_dsn)
+    except (ArgumentError, ValueError):
+        raise RuntimeConfigurationError("Database DSN is malformed") from None
+    if parsed.get_backend_name() in {"postgres", "postgresql"} and (
+        not parsed.host
+        or not parsed.username
+        or not parsed.database
+        or parsed.password is None
+        or not str(parsed.password).strip()
+    ):
+        raise RuntimeConfigurationError("Database DSN is malformed")
 
 
 def is_enabled(value: str | None) -> bool:
@@ -47,7 +76,15 @@ def probe_telegram(timeout: float, proxy_url: str | None) -> tuple[bool, str]:
                 build_telegram_probe_url(),
                 headers={"User-Agent": "FinanceTrackerBotProxySmoke/1.0"},
             )
-            return True, f"http_status={response.status_code}"
+            if response.status_code != 200:
+                return False, f"http_status={response.status_code}"
+            try:
+                payload = response.json()
+            except ValueError:
+                return False, "http_status=200 invalid_json"
+            if not isinstance(payload, dict) or payload.get("ok") is not True:
+                return False, "http_status=200 telegram_ok=false"
+            return True, "http_status=200 telegram_ok=true"
     except Exception as exc:  # pragma: no cover - network-dependent
         return False, str(exc)
 
@@ -67,6 +104,7 @@ def resolve_proxy_target() -> tuple[str | None, int | None, str]:
 
 
 def collect_results() -> tuple[int, list[dict[str, str]]]:
+    validate_database_credentials()
     results: list[dict[str, str]] = []
     exit_code = 0
 
@@ -132,7 +170,15 @@ def collect_results() -> tuple[int, list[dict[str, str]]]:
 
 
 def run_startup_smoke() -> int:
-    exit_code, results = collect_results()
+    try:
+        exit_code, results = collect_results()
+    except RuntimeConfigurationError as exc:
+        logger.error(
+            "bot_startup_smoke_invalid_configuration",
+            "Required bot startup configuration is missing or malformed.",
+            {"error_type": type(exc).__name__},
+        )
+        return 1
     ctx = {"exit_code": exit_code, "results": results}
     if exit_code == 0:
         logger.info(

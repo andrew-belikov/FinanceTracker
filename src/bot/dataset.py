@@ -4,6 +4,7 @@ import tempfile
 import zipfile
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
+from pathlib import Path
 
 from common.text_utils import has_mojibake
 from queries import (
@@ -27,15 +28,21 @@ from runtime import (
     normalize_decimal,
     to_iso_datetime,
     to_local_market_date,
+    local_reporting_bounds_utc_naive,
     write_csv_file,
 )
 from services import (
+    add_operation_cashflow_by_currency_day,
     build_asset_alias_lookup,
     build_logical_asset_id,
     build_reconciliation_by_asset_type,
+    build_operation_cashflows_for_snapshot_interval,
     classify_operation_group,
     compute_twr_timeseries,
     is_income_event_backed_tax_operation,
+    normalize_operation_currency,
+    rebase_twr_to_period,
+    sum_decimal_values_for_snapshot_interval,
 )
 
 
@@ -53,17 +60,25 @@ def build_dataset_export(session) -> tuple[dict, list[dict], list[dict], list[di
     latest_snapshot = get_latest_snapshot_with_id(session, account_id)
     if latest_snapshot is None:
         raise ValueError("Пока нет данных для экспорта датасета.")
+    base_currency = normalize_operation_currency(latest_snapshot.get("currency"))
 
     daily_rows = get_daily_snapshot_rows(session, account_id)
     positions_rows = list(get_positions_for_snapshot(session, latest_snapshot["id"]))
     asset_alias_rows = list(get_asset_alias_rows(session))
     asset_alias_by_instrument_uid, asset_alias_by_figi = build_asset_alias_lookup(asset_alias_rows)
     operations_rows = list(
+        # Operation timestamps are UTC-naive; dataset bounds are local civil days.
         get_dataset_operations(
             session,
             account_id=account_id,
-            start_dt=datetime.combine(min_date, time.min),
-            end_dt=datetime.combine(max_date + timedelta(days=1), time.min),
+            start_dt=local_reporting_bounds_utc_naive(
+                min_date,
+                max_date + timedelta(days=1),
+            )[0],
+            end_dt=local_reporting_bounds_utc_naive(
+                min_date,
+                max_date + timedelta(days=1),
+            )[1],
         )
     )
     income_rows = list(get_income_events_for_period(session, account_id, min_date, max_date))
@@ -72,13 +87,15 @@ def build_dataset_export(session) -> tuple[dict, list[dict], list[dict], list[di
     twr_by_date: dict[date, float] = {}
     if twr_data is not None:
         dates, _values, twr_series = twr_data
-        twr_by_date = {dt: round(value * 100.0, 6) for dt, value in zip(dates, twr_series)}
+        period_twr = rebase_twr_to_period(
+            dates,
+            twr_series,
+            min_date,
+            max_date + timedelta(days=1),
+        )
+        twr_by_date = {dt: round(value * 100.0, 6) for dt, value in period_twr.items()}
 
-    deposits_by_day: dict[date, Decimal] = {}
-    iis_tax_deductions_by_day: dict[date, Decimal] = {}
-    withdrawals_by_day: dict[date, Decimal] = {}
-    commissions_by_day: dict[date, Decimal] = {}
-    taxes_by_day: dict[date, Decimal] = {}
+    cashflows_by_currency_day: dict[str, dict[str, dict[date, Decimal]]] = {}
     operations_csv_rows: list[dict] = []
     unknown_operation_groups = 0
     mojibake_detected_count = 0
@@ -111,19 +128,37 @@ def build_dataset_export(session) -> tuple[dict, list[dict], list[dict], list[di
 
         amount = normalize_decimal(row["amount"])
         amount_abs = abs(amount)
+        cashflow_field: str | None = None
+        cashflow_amount = Decimal("0")
         if local_date is not None:
             if group == "deposit" and row.get("cashflow_category") == IIS_TAX_DEDUCTION_CATEGORY:
-                iis_tax_deductions_by_day[local_date] = (
-                    iis_tax_deductions_by_day.get(local_date, Decimal("0")) + amount_abs
-                )
+                cashflow_field = "iis_tax_deduction_income"
+                cashflow_amount = amount_abs
             elif group == "deposit":
-                deposits_by_day[local_date] = deposits_by_day.get(local_date, Decimal("0")) + amount_abs
+                cashflow_field = "deposits"
+                cashflow_amount = amount_abs
             elif group == "withdrawal":
-                withdrawals_by_day[local_date] = withdrawals_by_day.get(local_date, Decimal("0")) + amount_abs
+                cashflow_field = "withdrawals"
+                cashflow_amount = amount_abs
             elif group == "commission":
-                commissions_by_day[local_date] = commissions_by_day.get(local_date, Decimal("0")) + amount_abs
+                cashflow_field = "commissions"
+                cashflow_amount = amount_abs
             elif group == "income_tax" and not is_income_event_backed_tax_operation(row["operation_type"]):
-                taxes_by_day[local_date] = taxes_by_day.get(local_date, Decimal("0")) + amount_abs
+                if amount < 0:
+                    cashflow_field = "operation_taxes"
+                    cashflow_amount = amount_abs
+                elif amount > 0:
+                    cashflow_field = "operation_tax_refunds"
+                    cashflow_amount = amount
+
+        if local_date is not None and cashflow_field is not None:
+            add_operation_cashflow_by_currency_day(
+                cashflows_by_currency_day,
+                currency=row.get("currency"),
+                field=cashflow_field,
+                flow_date=local_date,
+                amount=cashflow_amount,
+            )
 
         operations_csv_rows.append(
             {
@@ -153,6 +188,7 @@ def build_dataset_export(session) -> tuple[dict, list[dict], list[dict], list[di
 
     income_net_by_day: dict[date, Decimal] = {}
     income_tax_by_day: dict[date, Decimal] = {}
+    income_tax_refunds_by_day: dict[date, Decimal] = {}
     income_csv_rows: list[dict] = []
     for row in income_rows:
         event_date = row["event_date"]
@@ -165,12 +201,20 @@ def build_dataset_export(session) -> tuple[dict, list[dict], list[dict], list[di
         )
         net_amount = normalize_decimal(row["net_amount"])
         tax_amount = normalize_decimal(row["tax_amount"])
-        income_net_by_day[event_date] = income_net_by_day.get(event_date, Decimal("0")) + net_amount
-        income_tax_by_day[event_date] = income_tax_by_day.get(event_date, Decimal("0")) + abs(tax_amount)
+        currency = normalize_operation_currency(row.get("currency"))
+        if currency == base_currency and base_currency != "UNKNOWN":
+            income_net_by_day[event_date] = income_net_by_day.get(event_date, Decimal("0")) + net_amount
+            if tax_amount < 0:
+                income_tax_by_day[event_date] = income_tax_by_day.get(event_date, Decimal("0")) + abs(tax_amount)
+            elif tax_amount > 0:
+                income_tax_refunds_by_day[event_date] = (
+                    income_tax_refunds_by_day.get(event_date, Decimal("0")) + tax_amount
+                )
         income_csv_rows.append(
             {
                 "event_date": event_date,
                 "event_type": row["event_type"],
+                "currency": currency,
                 "logical_asset_id": logical_asset_id,
                 "asset_uid": asset_uid,
                 "figi": row["figi"],
@@ -186,22 +230,50 @@ def build_dataset_export(session) -> tuple[dict, list[dict], list[dict], list[di
 
     daily_csv_rows: list[dict] = []
     previous_value: Decimal | None = None
+    previous_snapshot_date: date | None = None
     for row in daily_rows:
         snapshot_date = row["snapshot_date"]
         portfolio_value = normalize_decimal(row["total_value"])
-        deposits = deposits_by_day.get(snapshot_date, Decimal("0"))
-        withdrawals = withdrawals_by_day.get(snapshot_date, Decimal("0"))
-        income_net = income_net_by_day.get(snapshot_date, Decimal("0"))
-        iis_tax_deduction_income = iis_tax_deductions_by_day.get(snapshot_date, Decimal("0"))
+        interval_args = (previous_snapshot_date, snapshot_date)
+        interval_operation_cashflows = build_operation_cashflows_for_snapshot_interval(
+            cashflows_by_currency_day,
+            *interval_args,
+        )
+        snapshot_currency = normalize_operation_currency(row.get("currency") or latest_snapshot.get("currency"))
+        base_cashflows = None
+        if snapshot_currency != "UNKNOWN":
+            base_cashflows = next(
+                (item for item in interval_operation_cashflows if item["currency"] == snapshot_currency),
+                None,
+            )
+        deposits = normalize_decimal(base_cashflows["deposits"]) if base_cashflows else Decimal("0")
+        withdrawals = normalize_decimal(base_cashflows["withdrawals"]) if base_cashflows else Decimal("0")
+        income_net = sum_decimal_values_for_snapshot_interval(income_net_by_day, *interval_args)
+        iis_tax_deduction_income = (
+            normalize_decimal(base_cashflows["iis_tax_deduction_income"])
+            if base_cashflows
+            else Decimal("0")
+        )
         total_income_net = income_net + iis_tax_deduction_income
-        commissions = commissions_by_day.get(snapshot_date, Decimal("0"))
-        taxes = taxes_by_day.get(snapshot_date, Decimal("0"))
-        income_tax = income_tax_by_day.get(snapshot_date, Decimal("0"))
-        net_cashflow = deposits - withdrawals + income_net - commissions - taxes
+        commissions = normalize_decimal(base_cashflows["commissions"]) if base_cashflows else Decimal("0")
+        taxes = normalize_decimal(base_cashflows["operation_taxes"]) if base_cashflows else Decimal("0")
+        income_tax = sum_decimal_values_for_snapshot_interval(income_tax_by_day, *interval_args)
+        operation_tax_refund = (
+            normalize_decimal(base_cashflows["operation_tax_refunds"])
+            if base_cashflows
+            else Decimal("0")
+        )
+        income_tax_refund = sum_decimal_values_for_snapshot_interval(
+            income_tax_refunds_by_day,
+            *interval_args,
+        )
+        net_external_flow = deposits - withdrawals
+        net_cashflow = net_external_flow
         day_pnl = Decimal("0")
         if previous_value is not None:
             day_pnl = portfolio_value - previous_value - net_cashflow
         previous_value = portfolio_value
+        previous_snapshot_date = snapshot_date
 
         daily_csv_rows.append(
             {
@@ -218,9 +290,19 @@ def build_dataset_export(session) -> tuple[dict, list[dict], list[dict], list[di
                 "commissions": commissions,
                 "operation_taxes": taxes,
                 "income_taxes": income_tax,
+                "operation_tax_refunds": operation_tax_refund,
+                "income_tax_refunds": income_tax_refund,
+                "tax_refunds": operation_tax_refund + income_tax_refund,
+                "net_external_flow": net_external_flow,
                 "net_cashflow": net_cashflow,
                 "day_pnl": day_pnl,
                 "twr_pct": twr_by_date.get(snapshot_date),
+                "operation_cashflows_by_currency": interval_operation_cashflows,
+                "unsupported_operation_currencies": [
+                    item["currency"]
+                    for item in interval_operation_cashflows
+                    if snapshot_currency == "UNKNOWN" or item["currency"] != snapshot_currency
+                ],
             }
         )
 
@@ -274,6 +356,12 @@ def build_dataset_export(session) -> tuple[dict, list[dict], list[dict], list[di
     commissions_total = sum((row["commissions"] for row in daily_csv_rows), Decimal("0"))
     operation_taxes_total = sum((row["operation_taxes"] for row in daily_csv_rows), Decimal("0"))
     income_taxes_total = sum((row["income_taxes"] for row in daily_csv_rows), Decimal("0"))
+    operation_tax_refunds_total = sum(
+        (row["operation_tax_refunds"] for row in daily_csv_rows), Decimal("0")
+    )
+    income_tax_refunds_total = sum(
+        (row["income_tax_refunds"] for row in daily_csv_rows), Decimal("0")
+    )
     current_value = normalize_decimal(latest_snapshot["total_value"])
     net_contributions = deposits_total - withdrawals_total
     period_start_value = normalize_decimal(daily_csv_rows[0]["portfolio_value"])
@@ -293,6 +381,11 @@ def build_dataset_export(session) -> tuple[dict, list[dict], list[dict], list[di
 
     positions_missing_labels = sum(1 for row in positions_csv_rows if not (row["ticker"] or row["name"]))
 
+    operation_cashflows_by_currency = build_operation_cashflows_for_snapshot_interval(
+        cashflows_by_currency_day,
+        min_date - timedelta(days=1),
+        max_date,
+    )
     dataset = {
         "meta": {
             "dataset_version": 3,
@@ -301,7 +394,7 @@ def build_dataset_export(session) -> tuple[dict, list[dict], list[dict], list[di
             "account_name": ACCOUNT_FRIENDLY_NAME,
             "period_start": min_date.isoformat(),
             "period_end": max_date.isoformat(),
-            "base_currency": latest_snapshot["currency"],
+            "base_currency": normalize_operation_currency(latest_snapshot.get("currency")),
             "latest_snapshot_at": to_iso_datetime(latest_snapshot["snapshot_at"]),
         },
         "summary": {
@@ -316,6 +409,9 @@ def build_dataset_export(session) -> tuple[dict, list[dict], list[dict], list[di
             "income_taxes_total": income_taxes_total,
             "operation_taxes_total": operation_taxes_total,
             "taxes_total": income_taxes_total + operation_taxes_total,
+            "income_tax_refunds_total": income_tax_refunds_total,
+            "operation_tax_refunds_total": operation_tax_refunds_total,
+            "tax_refunds_total": income_tax_refunds_total + operation_tax_refunds_total,
             "period_start_value": period_start_value,
             "period_end_value": period_end_value,
             "period_net_cashflow": period_net_cashflow,
@@ -335,6 +431,7 @@ def build_dataset_export(session) -> tuple[dict, list[dict], list[dict], list[di
         "positions_current": positions_csv_rows,
         "operations": operations_csv_rows,
         "income_events": income_csv_rows,
+        "operation_cashflows_by_currency": operation_cashflows_by_currency,
         "asset_aliases": [
             {
                 "logical_asset_id": row["asset_uid"],
@@ -355,13 +452,21 @@ def build_dataset_export(session) -> tuple[dict, list[dict], list[dict], list[di
             "has_full_history_from_zero": has_full_history_from_zero,
             "alias_groups_count": alias_groups_count,
             "income_events_available": True,
+            "unsupported_operation_currencies": [
+                item["currency"]
+                for item in operation_cashflows_by_currency
+                if base_currency == "UNKNOWN" or item["currency"] != base_currency
+            ],
         },
         "assumptions": [
             "В operations включены только исполненные операции после дедупликации по operation_id.",
             "Дневные cashflow-агрегаты привязаны к локальной дате Europe/Moscow.",
+            "Operation cashflows разделяются по валютам; P&L снапшота нейтрализует только внешний поток в его базовой валюте.",
+            "UNKNOWN и отличающиеся от базовой валюты operation cashflows сохраняются в operation_cashflows_by_currency и не конвертируются.",
             "income_net в daily timeseries уже учитывает удержанный налог из income_events.",
             "iis_tax_deduction_income считается доходом портфеля и не входит во внешний денежный поток.",
             "operation_taxes_total не включает dividend/coupon tax, если тот же налог уже представлен в income_events.",
+            "Удержанный налог хранится как положительный расход, а положительный signed tax cashflow экспортируется отдельно как tax refund.",
             "Архив считается period-first: lifetime return не вычисляется без полной истории с нуля.",
             "reconciliation_by_asset_type строится от snapshot totals по классам активов; нераскрытый остаток остаётся residual.",
         ],
@@ -398,6 +503,7 @@ def build_dataset_readme(dataset: dict) -> str:
         f"- Total income net: {decimal_to_str(summary['total_income_net'])} {meta['base_currency']}\n"
         f"- Period pnl abs: {decimal_to_str(summary['period_pnl_abs'])} {meta['base_currency']}\n"
         f"- Period twr pct: {summary['period_twr_pct']}\n"
+        f"- Tax refunds: {decimal_to_str(summary['tax_refunds_total'])} {meta['base_currency']}\n"
         f"- Positions value sum: {decimal_to_str(summary['positions_value_sum'])} {meta['base_currency']}\n"
         f"- Reconciliation gap abs: {decimal_to_str(summary['reconciliation_gap_abs'])} {meta['base_currency']}\n"
         f"- Full history from zero: {summary['has_full_history_from_zero']}\n\n"
@@ -408,7 +514,9 @@ def build_dataset_readme(dataset: dict) -> str:
         "- `income_net` в дневном ряду уже очищен от удержанного налога по income_events.\n"
         "- `iis_tax_deduction_income` — отдельный доход; `total_income_net` включает его вместе с купонами и дивидендами.\n"
         "- В TWR и `period_external_cashflow` входят только собственные пополнения и выводы.\n"
+        "- `operation_cashflows_by_currency` хранит operation cashflows раздельно; `UNKNOWN` и foreign currency не нейтрализуют P&L базовой валюты.\n"
         "- `taxes_total` дедуплицирован: dividend/coupon tax не суммируется второй раз из operations, если он уже попал в income_events.\n"
+        "- `tax_refunds_total` — отдельный возврат налога и не является отрицательным налоговым расходом.\n"
         "- Если `has_full_history_from_zero=false`, архив нельзя трактовать как полную lifetime-историю портфеля.\n"
         "- Если `reconciliation_gap_abs` не равен нулю, смотрите `reconciliation_by_asset_type`: это residual между snapshot totals и суммой позиционных оценок.\n"
         "- Для подробного анализа сначала читайте `dataset.json`, затем CSV-файлы как табличную детализацию.\n"
@@ -420,10 +528,6 @@ def create_dataset_archive() -> tuple[str, str]:
         dataset, daily_rows, positions_rows, operations_rows, income_rows = build_dataset_export(session)
 
     archive_name = f"fintracker_dataset_{dataset['meta']['period_end']}.zip"
-    archive_tmp = tempfile.NamedTemporaryFile(prefix="fintracker_dataset_", suffix=".zip", delete=False)
-    archive_path = archive_tmp.name
-    archive_tmp.close()
-
     json_text = json.dumps(dataset, ensure_ascii=False, indent=2, default=json_default)
     readme_text = build_dataset_readme(dataset)
 
@@ -441,9 +545,15 @@ def create_dataset_archive() -> tuple[str, str]:
         "commissions",
         "operation_taxes",
         "income_taxes",
+        "operation_tax_refunds",
+        "income_tax_refunds",
+        "tax_refunds",
+        "net_external_flow",
         "net_cashflow",
         "day_pnl",
         "twr_pct",
+        "operation_cashflows_by_currency",
+        "unsupported_operation_currencies",
     ]
     positions_fields = [
         "snapshot_date",
@@ -492,6 +602,7 @@ def create_dataset_archive() -> tuple[str, str]:
     income_fields = [
         "event_date",
         "event_type",
+        "currency",
         "logical_asset_id",
         "asset_uid",
         "figi",
@@ -503,6 +614,20 @@ def create_dataset_archive() -> tuple[str, str]:
         "net_yield_pct",
         "notified",
     ]
+    daily_csv_export_rows = []
+    for row in daily_rows:
+        csv_row = dict(row)
+        csv_row["operation_cashflows_by_currency"] = json.dumps(
+            row.get("operation_cashflows_by_currency", []),
+            ensure_ascii=False,
+            sort_keys=True,
+            default=json_default,
+        )
+        csv_row["unsupported_operation_currencies"] = json.dumps(
+            row.get("unsupported_operation_currencies", []),
+            ensure_ascii=False,
+        )
+        daily_csv_export_rows.append(csv_row)
 
     with tempfile.TemporaryDirectory(prefix="fintracker_dataset_") as temp_dir:
         dataset_json_path = os.path.join(temp_dir, "dataset.json")
@@ -513,17 +638,36 @@ def create_dataset_archive() -> tuple[str, str]:
         with open(readme_path, "w", encoding="utf-8") as f:
             f.write(readme_text)
 
-        write_csv_file(os.path.join(temp_dir, "daily_timeseries.csv"), daily_fields, daily_rows)
+        write_csv_file(os.path.join(temp_dir, "daily_timeseries.csv"), daily_fields, daily_csv_export_rows)
         write_csv_file(os.path.join(temp_dir, "positions_current.csv"), positions_fields, positions_rows)
         write_csv_file(os.path.join(temp_dir, "operations.csv"), operations_fields, operations_rows)
         write_csv_file(os.path.join(temp_dir, "income_events.csv"), income_fields, income_rows)
 
-        with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-            archive.write(dataset_json_path, arcname="dataset.json")
-            archive.write(readme_path, arcname="README_AI.md")
-            archive.write(os.path.join(temp_dir, "daily_timeseries.csv"), arcname="daily_timeseries.csv")
-            archive.write(os.path.join(temp_dir, "positions_current.csv"), arcname="positions_current.csv")
-            archive.write(os.path.join(temp_dir, "operations.csv"), arcname="operations.csv")
-            archive.write(os.path.join(temp_dir, "income_events.csv"), arcname="income_events.csv")
+        archive_path = None
+        try:
+            archive_tmp = tempfile.NamedTemporaryFile(
+                prefix="fintracker_dataset_",
+                suffix=".zip",
+                delete=False,
+            )
+            archive_path = archive_tmp.name
+            archive_tmp.close()
+            with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+                archive.write(dataset_json_path, arcname="dataset.json")
+                archive.write(readme_path, arcname="README_AI.md")
+                archive.write(
+                    os.path.join(temp_dir, "daily_timeseries.csv"),
+                    arcname="daily_timeseries.csv",
+                )
+                archive.write(
+                    os.path.join(temp_dir, "positions_current.csv"),
+                    arcname="positions_current.csv",
+                )
+                archive.write(os.path.join(temp_dir, "operations.csv"), arcname="operations.csv")
+                archive.write(os.path.join(temp_dir, "income_events.csv"), arcname="income_events.csv")
+        except BaseException:
+            if archive_path is not None:
+                Path(archive_path).unlink(missing_ok=True)
+            raise
 
     return archive_path, archive_name

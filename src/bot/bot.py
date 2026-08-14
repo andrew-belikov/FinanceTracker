@@ -82,7 +82,6 @@ from jobs import (
 )
 from runtime import (
     BOT_PROXY_ENABLED,
-    BOT_PROXY_ENDPOINT,
     DAILY_JOB_SCHEDULE_LABEL,
     JOBQUEUE_SMOKE_TEST_DELAY_SECONDS,
     JOBQUEUE_SMOKE_TEST_ON_START,
@@ -104,6 +103,10 @@ from runtime import (
     TELEGRAM_REQUEST_WRITE_TIMEOUT_SECONDS,
     TZ_NAME,
     YESTERDAY_PEAK_ALERT_SCHEDULE_LABEL,
+    ALLOWLIST_CONFIGURATION_ERROR,
+    EXPLICIT_DB_DSN,
+    DB_PASSWORD,
+    RuntimeConfigurationError,
     build_daily_job_time,
     build_payout_weekly_job_time,
     build_yesterday_peak_alert_time,
@@ -111,6 +114,7 @@ from runtime import (
     logger,
     reset_update_tracking_state,
     resolve_telegram_proxy_url,
+    validate_database_credentials,
 )
 
 
@@ -211,7 +215,7 @@ def configure_jobs(app: Application) -> None:
             "yesterday_peak_alert_schedule": YESTERDAY_PEAK_ALERT_SCHEDULE_LABEL,
             "payout_weekly_schedule": PAYOUT_WEEKLY_SCHEDULE_LABEL,
             "schedule_timezone": TZ_NAME,
-            "target_chat_ids": sorted(TARGET_CHAT_IDS),
+            "target_chat_count": len(TARGET_CHAT_IDS),
             "daily_job_startup_catchup_delay_seconds": DAILY_JOB_STARTUP_CATCHUP_DELAY_SECONDS,
             "yesterday_peak_alert_startup_catchup_delay_seconds": YESTERDAY_PEAK_ALERT_STARTUP_CATCHUP_DELAY_SECONDS,
             "payout_weekly_startup_catchup_delay_seconds": PAYOUT_WEEKLY_STARTUP_CATCHUP_DELAY_SECONDS,
@@ -232,7 +236,7 @@ def configure_jobs(app: Application) -> None:
             "Scheduled one-time JobQueue smoke-test.",
             {
                 "delay_seconds": JOBQUEUE_SMOKE_TEST_DELAY_SECONDS,
-                "target_chat_ids": sorted(TARGET_CHAT_IDS),
+                "target_chat_count": len(TARGET_CHAT_IDS),
             },
         )
 
@@ -275,15 +279,8 @@ def build_application() -> Application:
 
 async def on_application_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     err = getattr(context, "error", None)
-    update_id = getattr(update, "update_id", None)
-    user_id = getattr(getattr(update, "effective_user", None), "id", None)
-    chat_id = getattr(getattr(update, "effective_chat", None), "id", None)
     ctx = {
-        "update_id": update_id,
-        "user_id": user_id,
-        "chat_id": chat_id,
         "error_type": type(err).__name__ if err is not None else None,
-        "error_message": str(err) if err is not None else None,
     }
     if err is not None:
         logger.raw_logger.error(
@@ -310,6 +307,17 @@ def main() -> int:
             "TELEGRAM_BOT_TOKEN не задан. Передай его через env-переменную.",
         )
         return 1
+    try:
+        if ALLOWLIST_CONFIGURATION_ERROR is not None:
+            raise ALLOWLIST_CONFIGURATION_ERROR
+        validate_database_credentials(db_dsn=EXPLICIT_DB_DSN, db_password=DB_PASSWORD)
+    except RuntimeConfigurationError as exc:
+        logger.error(
+            "invalid_runtime_configuration",
+            "Required bot runtime configuration is missing or malformed.",
+            {"error_type": type(exc).__name__},
+        )
+        return 1
 
     reset_update_tracking_state()
     reset_polling_watchdog_state()
@@ -320,7 +328,6 @@ def main() -> int:
         "Configured Telegram transport for polling and bot API requests.",
         {
             "proxy_enabled": BOT_PROXY_ENABLED,
-            "proxy_url": BOT_PROXY_ENDPOINT if BOT_PROXY_ENABLED else None,
             "request_pool_size": TELEGRAM_REQUEST_CONNECTION_POOL_SIZE,
             "request_pool_timeout_seconds": TELEGRAM_REQUEST_POOL_TIMEOUT_SECONDS,
             "get_updates_pool_size": TELEGRAM_GET_UPDATES_CONNECTION_POOL_SIZE,
@@ -350,10 +357,8 @@ def main() -> int:
             "Telegram transport failed while initializing or polling; requesting supervised restart.",
             {
                 "error_type": type(exc).__name__,
-                "error_message": str(exc),
                 "retry_exit_code": BOT_STARTUP_RETRY_EXIT_CODE,
                 "proxy_enabled": BOT_PROXY_ENABLED,
-                "proxy_url": BOT_PROXY_ENDPOINT if BOT_PROXY_ENABLED else None,
             },
         )
         return BOT_STARTUP_RETRY_EXIT_CODE

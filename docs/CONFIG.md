@@ -21,10 +21,15 @@
   прикладных сервисов.
 - Применённые файлы отслеживаются в `schema_migrations`; изменение их содержимого
   после применения блокирует deploy.
+- `migrate --check` выполняет только чтение catalog и `schema_migrations`: на
+  пустой или отстающей схеме он возвращает ненулевой код и не создаёт объекты.
+- Write-режим `migrate` перед каждой forward-миграцией задаёт session-local
+  PostgreSQL `TimeZone` из проверенного `TIMEZONE` (fallback: `SCHED_TZ`, затем
+  `Europe/Moscow`). `--check` не меняет session settings.
 
 ## Расписание
 
-- `TIMEZONE` — таймзона для отображения дат в текстах и для расписания JobQueue (например, `Europe/Moscow`).
+- `TIMEZONE` — таймзона для отображения дат, локальных отчётных периодов и расписания JobQueue (например, `Europe/Moscow`). Границы локального полуинтервала `[начало, конец)` переводятся в UTC перед запросом к UTC-naive timestamps; дневная и месячная группировка выполняется обратно в этой таймзоне.
 - `DAILY_SUMMARY_HOUR` — час ежедневного запуска JobQueue в таймзоне `TIMEZONE` (по умолчанию `18`).
 - `DAILY_SUMMARY_MINUTE` — минута ежедневного запуска JobQueue в таймзоне `TIMEZONE` (по умолчанию `0`).
 - `YESTERDAY_PEAK_ALERT_HOUR` — час утренней проверки максимума за вчера в таймзоне `TIMEZONE` (по умолчанию `8`).
@@ -51,7 +56,7 @@
 - `TINVEST_BASE_URL` — базовый URL API.
 - `TINVEST_PORTFOLIO_CURRENCY` — валюта портфеля (обычно `RUB`).
 - `TINVEST_ACCOUNT_STATUS` — фильтр статуса счёта (`ACCOUNT_STATUS_ALL` и т.п.).
-- `TINKOFF_ACCOUNT_ID` — фиксированный account_id (если пусто/`auto`, выбирается первый доступный).
+- `TINKOFF_ACCOUNT_ID` — фиксированный `account_id`, для которого требуется точное совпадение. При пустом значении или `auto` выбирается только единственный открытый счёт; при нуле или нескольких открытых счетах tracker останавливается без записи.
 - `OPERATIONS_MAX_PAGES` — жёсткий лимит страниц для одного синка операций (по умолчанию `10000`). Если API сообщает о следующей странице после достижения лимита, синк завершается ошибкой и частичная транзакция откатывается.
 - `PAYOUT_CALENDAR_HORIZON_DAYS` — горизонт сохранённого календаря выплат (по умолчанию `90` дней).
 - `PAYOUT_CALENDAR_TAX_RATE_PCT` — расчётная ставка налога для сумм и доходности в `/calendar` и еженедельной сводке (по умолчанию `13`; допустимо от `0` до `100`). Это оценка: фактическая ставка зависит от налогового статуса и вида дохода.
@@ -75,6 +80,10 @@
 - `REPORTER_MAX_BODY_BYTES` — максимальный размер тела запроса для `POST /reports/monthly/pdf` (по умолчанию `65536`).
 - `REPORTER_INTERNAL_URL` — внутренний compose-URL для вызовов `bot -> reporter`. Рекомендуемое значение: `http://reporter:8088`.
 - `REPORTER_REQUEST_TIMEOUT_SECONDS` — таймаут внутреннего запроса `bot -> reporter` при сборке `/monthpdf` и month-end auto-send. Это только timeout на reporter-call, а не на upload документа в Telegram.
+- `REPORTER_SERVICE_KEY` — обязательный случайный внутренний ключ длиной не менее 16 символов. Он передаётся Compose только `bot` и `reporter`, сравнивается до чтения request body и никогда не вводится пользователем.
+- `REPORTER_MAX_CONCURRENT_REQUESTS` — лимит одновременно читаемых/собираемых reporter-запросов; перегрузка возвращает `503`.
+- `REPORTER_SOCKET_TIMEOUT_SECONDS` и `REPORTER_REQUEST_TIMEOUT_SECONDS` ограничивают медленное тело запроса и полный reporter build соответственно.
+- `BOT_COMMAND_MAX_CONCURRENCY` и `BOT_COMMAND_TIMEOUT_SECONDS` ограничивают вынесенные из asyncio loop операции БД, dataset и charts.
 - `OLLAMA_ENABLED` — включает narrative-layer через локальную `Ollama` (`true/false`). В первом PR может оставаться `false`.
 - `OLLAMA_BASE_URL` — базовый URL `Ollama` для контейнера `reporter`. На `homeserver` корректный путь: `http://ollama:11434`.
 - `OLLAMA_MODEL` — имя модели, которое будет использоваться для narrative generation.
@@ -83,8 +92,8 @@
 - `OLLAMA_NUM_CTX` — желаемый размер context window для prompt.
 - `OLLAMA_MAX_INPUT_CHARS` — жёсткий лимит на размер `monthly_ai_input` перед обрезкой. Рекомендуемое стартовое значение: `12000`.
 - `REPORT_PDF_ENGINE` — backend генерации PDF. Для текущего monthly PDF используется `weasyprint`.
-- `REPORT_DEBUG_SAVE_HTML` — сохранять промежуточный HTML в debug-режиме (`true/false`).
-- `REPORT_DEBUG_SAVE_PAYLOAD` — сохранять render payload в debug-режиме (`true/false`).
+- `REPORT_DEBUG_SAVE_HTML` и `REPORT_DEBUG_SAVE_PAYLOAD` — сохранять чувствительные промежуточные artifacts (`true/false`). По умолчанию persistent debug-файлы не создаются.
+- При включении debug обязателен отдельный `REPORT_DEBUG_DIR`: каталог приводится к `0700`, файлы — к `0600`; `REPORT_DEBUG_MAX_FILES` и `REPORT_DEBUG_MAX_AGE_SECONDS` задают bounded retention. Эти файлы содержат финансовые данные и не должны попадать в backup, shared volume или логи.
 - `BOT_PROXY_ENABLED` — включает outbound proxy только для контейнера `bot` (`true/false`).
 - `BOT_VLESS_URL` — основной VLESS share link для `xray-client`. Рекомендуется хранить значение в кавычках, чтобы `#label` в конце ссылки не отрезался парсером `.env`.
 - `BOT_VLESS_FALLBACK_URL` — дополнительный VLESS share link. Если основной `BOT_VLESS_URL` не проходит render/startup smoke или активный маршрут позже деградирует, `xray-client` автоматически пробует следующий кандидат.
@@ -123,6 +132,8 @@
 Правильная схема:
 
 - `reporter` подключён к внешней Docker-сети `localllm_localllm`;
+- `bot` и `xray-client` дополнительно соединены выделенной internal-сетью `bot_proxy_internal`; `xray-client` отсутствует в default-сети и не публикует SOCKS port на host;
+- `bot` и `reporter` используют отдельную internal-сеть `bot_reporter_internal`, а служебный ключ остаётся обязательным вторым рубежом;
 - `OLLAMA_BASE_URL=http://ollama:11434`.
 
 Если внешняя сеть отсутствует, `docker compose up` с сервисом `reporter` не стартует, пока сеть не будет создана или пока не будет поднят compose-проект `LocalLLM`.
@@ -175,6 +186,14 @@ docker compose exec bot python proxy_smoke.py
 - Миграция `migrations/20260805_operations_cashflow_category.sql` добавляет nullable-поле `cashflow_category`.
 - Значение `iis_tax_deduction` разрешено только для вручную помеченного исполненного пополнения и означает доход от налогового вычета ИИС.
 - Upsert из Invest API не меняет это поле; поставить или снять категорию можно кнопкой в Telegram-уведомлении о пополнении.
+
+### Надёжность уведомлений и плановых рассылок
+
+- Миграция `migrations/20260814_bot_notification_delivery_leases.sql` добавляет owner token, timestamps lease/heartbeat к `bot_daily_job_runs` и таблицу `bot_notification_deliveries`.
+- Свежий lease блокирует конкурентный запуск, просроченный lease разрешает fenced takeover, а `completed` остаётся терминальным. Старый owner не может завершить или освободить lease после takeover.
+- Результат доставки хранится отдельно для каждого `(notification_kind, notification_key, chat_id, message_type)`. После частичного сбоя повторяются только недоставленные сообщения; scheduled run завершается только после всех intended recipients.
+- Plain-text fallback выполняется ровно один раз только для Telegram `BadRequest`, однозначно указывающего на ошибку Markdown/форматирования. Timeout и network errors не запускают fallback-отправку; для event-уведомления и плановой рассылки такая неоднозначная попытка сохраняется как `uncertain` и автоматически не повторяется, чтобы не дублировать уже принятую Telegram доставку.
+- Кнопка `Вычет` существует только у уведомления об исполненном пополнении. Разметка ручная, обратимая и идемпотентная; уведомления о купонах/дивидендах эту кнопку не получают.
 
 
 ### Поля `OperationItem` в `operations`

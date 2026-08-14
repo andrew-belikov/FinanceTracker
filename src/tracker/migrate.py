@@ -4,15 +4,20 @@ import argparse
 import hashlib
 import os
 from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from sqlalchemy import text
+from sqlalchemy import inspect, text
+from sqlalchemy.engine import make_url
+from sqlalchemy.exc import ArgumentError
 
-from app import Base, engine
 from common.logging_setup import configure_logging, get_logger
 
 
 MIGRATIONS_DIR = Path(os.getenv("MIGRATIONS_DIR", "/app/migrations"))
 MIGRATION_LOCK_ID = 1_731_904_221
+MIGRATION_TIMEZONE = (
+    os.getenv("TIMEZONE") or os.getenv("SCHED_TZ") or "Europe/Moscow"
+).strip()
 SCHEMA_MIGRATIONS_DDL = """
 CREATE TABLE IF NOT EXISTS schema_migrations (
     filename TEXT PRIMARY KEY,
@@ -27,6 +32,48 @@ logger = get_logger("tracker_migrations")
 
 class MigrationError(RuntimeError):
     pass
+
+
+class RuntimeConfigurationError(ValueError):
+    """Raised when migration database credentials are absent or malformed."""
+
+
+def validate_database_credentials() -> None:
+    db_dsn = os.getenv("DB_DSN", "").strip()
+    db_password = os.getenv("DB_PASSWORD", "").strip()
+    if not db_dsn:
+        if not db_password:
+            raise RuntimeConfigurationError(
+                "Database credentials must be explicitly configured"
+            )
+        return
+    try:
+        parsed = make_url(db_dsn)
+    except (ArgumentError, ValueError):
+        raise RuntimeConfigurationError("Database DSN is malformed") from None
+    if parsed.get_backend_name() in {"postgres", "postgresql"} and (
+        not parsed.host
+        or not parsed.username
+        or not parsed.database
+        or parsed.password is None
+        or not str(parsed.password).strip()
+    ):
+        raise RuntimeConfigurationError("Database DSN is malformed")
+
+
+def validate_migration_timezone() -> None:
+    if not MIGRATION_TIMEZONE:
+        raise RuntimeConfigurationError("Migration timezone must be explicitly configured")
+    try:
+        ZoneInfo(MIGRATION_TIMEZONE)
+    except (ZoneInfoNotFoundError, ValueError):
+        raise RuntimeConfigurationError("Migration timezone is invalid") from None
+
+
+def _load_database_runtime():
+    from app import Base, engine
+
+    return Base, engine
 
 
 def discover_migrations(migrations_dir: Path) -> list[Path]:
@@ -87,11 +134,47 @@ def _validate_applied_checksums(
             )
 
 
+def _run_check_only(connection, Base, migrations: list[Path]) -> int:
+    ledger_exists = connection.execute(
+        text("SELECT to_regclass('public.schema_migrations')")
+    ).scalar_one_or_none()
+    if ledger_exists is None:
+        raise MigrationError("Migration ledger is missing")
+
+    missing_tables = sorted(
+        table.name
+        for table in Base.metadata.sorted_tables
+        if not inspect(connection).has_table(table.name)
+    )
+    if missing_tables:
+        raise MigrationError("Required tables are missing: " + ", ".join(missing_tables))
+
+    applied = _load_applied_migrations(connection)
+    _validate_applied_checksums(migrations, applied)
+    pending = [path for path in migrations if path.name not in applied]
+    if pending:
+        raise MigrationError(
+            "Pending migrations: " + ", ".join(path.name for path in pending)
+        )
+    logger.info(
+        "database_migrations_verified",
+        "Database migrations are up to date.",
+        {"applied_total": len(applied)},
+    )
+    return 0
+
+
 def run_migrations(*, check_only: bool = False) -> int:
+    validate_database_credentials()
+    validate_migration_timezone()
+    Base, engine = _load_database_runtime()
     migrations = discover_migrations(MIGRATIONS_DIR)
 
     applied_count = 0
     with engine.connect() as connection:
+        if check_only:
+            return _run_check_only(connection, Base, migrations)
+
         connection.execute(text(SCHEMA_MIGRATIONS_DDL))
         connection.commit()
         connection.execute(
@@ -106,18 +189,6 @@ def run_migrations(*, check_only: bool = False) -> int:
             _validate_applied_checksums(migrations, applied)
             pending = [path for path in migrations if path.name not in applied]
 
-            if check_only:
-                if pending:
-                    raise MigrationError(
-                        "Pending migrations: " + ", ".join(path.name for path in pending)
-                    )
-                logger.info(
-                    "database_migrations_verified",
-                    "Database migrations are up to date.",
-                    {"applied_total": len(applied)},
-                )
-                return 0
-
             for path in pending:
                 checksum = migration_checksum(path)
                 sql = migration_sql(path)
@@ -127,6 +198,10 @@ def run_migrations(*, check_only: bool = False) -> int:
                     {"filename": path.name},
                 )
                 try:
+                    connection.execute(
+                        text("SELECT set_config('TimeZone', :timezone, true)"),
+                        {"timezone": MIGRATION_TIMEZONE},
+                    )
                     if sql:
                         connection.exec_driver_sql(sql)
                     connection.execute(
@@ -171,14 +246,14 @@ def run_migrations(*, check_only: bool = False) -> int:
             connection.commit()
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Apply FinanceTracker SQL migrations.")
     parser.add_argument(
         "--check",
         action="store_true",
         help="Fail when a migration is pending or its checksum changed.",
     )
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     try:
         return run_migrations(check_only=args.check)
     except Exception:
