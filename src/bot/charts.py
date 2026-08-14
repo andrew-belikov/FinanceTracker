@@ -30,6 +30,7 @@ from runtime import (
     fmt_compact_pct,
     fmt_compact_rub,
     fmt_rub,
+    local_reporting_bounds_utc_naive,
 )
 
 
@@ -490,8 +491,10 @@ def build_history_chart(path: str) -> str | None:
 
 def build_year_chart(path: str, year: int, end_date_exclusive: date) -> str | None:
     year_start = date(year, 1, 1)
-    period_start_dt = datetime.combine(year_start, time.min)
-    period_end_dt_exclusive = datetime.combine(end_date_exclusive, time.min)
+    period_start_dt, period_end_dt_exclusive = local_reporting_bounds_utc_naive(
+        year_start,
+        end_date_exclusive,
+    )
     is_ytd = end_date_exclusive.year == year and end_date_exclusive <= (datetime.now(TZ).date() + timedelta(days=1))
 
     with db_session() as session:
@@ -647,8 +650,10 @@ def build_year_chart(path: str, year: int, end_date_exclusive: date) -> str | No
 
 def build_year_monthly_delta_chart(path: str, year: int, end_date_exclusive: date) -> str | None:
     year_start = date(year, 1, 1)
-    period_start_dt = datetime.combine(year_start, time.min)
-    period_end_dt_exclusive = datetime.combine(end_date_exclusive, time.min)
+    period_start_dt, period_end_dt_exclusive = local_reporting_bounds_utc_naive(
+        year_start,
+        end_date_exclusive,
+    )
     is_ytd = end_date_exclusive.year == year and end_date_exclusive <= (datetime.now(TZ).date() + timedelta(days=1))
 
     with db_session() as session:
@@ -698,11 +703,15 @@ def build_year_monthly_delta_chart(path: str, year: int, end_date_exclusive: dat
         if has_pre_period_baseline:
             first_month_external_flow = external_flow_by_month.get(first_month_start, 0.0)
         else:
+            first_flow_start, first_flow_end_exclusive = local_reporting_bounds_utc_naive(
+                first_period_start + timedelta(days=1),
+                first_month_end_exclusive,
+            )
             first_month_external_flow = get_net_external_flow_for_period(
                 session,
                 account_id,
-                datetime.combine(first_period_start + timedelta(days=1), time.min),
-                datetime.combine(first_month_end_exclusive, time.min),
+                first_flow_start,
+                first_flow_end_exclusive,
             )
 
         first_month_delta = values[0] - first_month_base - first_month_external_flow
