@@ -510,6 +510,26 @@ class MonthlyReportPayloadBuilderTests(unittest.TestCase):
             ),
             mock.patch.object(report_payload, "get_deposits_for_period", side_effect=deposits_for_period),
             mock.patch.object(report_payload, "get_income_for_period", return_value=(Decimal("128.60"), Decimal("50.25"))),
+            mock.patch.object(
+                report_payload,
+                "get_income_currency_breakdown_for_period",
+                return_value=[
+                    {
+                        "currency": "RUB",
+                        "coupons": Decimal("128.60"),
+                        "dividends": Decimal("50.25"),
+                        "taxes": Decimal("12.10"),
+                        "tax_refunds": tax_refunds,
+                    },
+                    {
+                        "currency": "USD",
+                        "coupons": Decimal("9"),
+                        "dividends": Decimal("4"),
+                        "taxes": Decimal("1"),
+                        "tax_refunds": Decimal("2"),
+                    },
+                ],
+            ),
             mock.patch.object(report_payload, "get_iis_tax_deductions_for_period", return_value=Decimal("52000")),
             mock.patch.object(report_payload, "get_commissions_for_period", return_value=Decimal("35")),
             mock.patch.object(report_payload, "get_taxes_for_period", return_value=Decimal("12.10")),
@@ -572,6 +592,11 @@ class MonthlyReportPayloadBuilderTests(unittest.TestCase):
         self.assertEqual(payload["summary_metrics"]["open_pl_end_total"], "315")
         self.assertEqual(payload["summary_metrics"]["iis_tax_deduction_income"], "52000")
         self.assertEqual(payload["summary_metrics"]["total_income_net"], "52178.85")
+        self.assertEqual(
+            [row["currency"] for row in payload["income_by_currency"]],
+            ["RUB", "USD"],
+        )
+        self.assertEqual(payload["income_by_currency"][1]["coupons"], "9")
         self.assertEqual(payload["positions_current"][0]["ticker"], "EQMX")
         self.assertEqual(payload["position_flow_groups"]["new"][0]["ticker"], "BOND1")
         self.assertEqual(payload["position_flow_groups"]["closed"][0]["ticker"], "GAZP")

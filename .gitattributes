@@ -1,2 +1,9 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# These migrations were applied and recorded byte-for-byte with CRLF endings.
+# Keep checkout bytes stable so migration checksum verification remains valid.
+migrations/20260221_operations_from_deposits.sql text eol=crlf
+migrations/20260225_operations_add_instrument_columns.sql text eol=crlf
+migrations/20260226_income_events.sql text eol=crlf
+migrations/20260304_operations_operation_item_fields.sql text eol=crlf

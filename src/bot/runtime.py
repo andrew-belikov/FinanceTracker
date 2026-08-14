@@ -6,15 +6,17 @@ import unicodedata
 from contextlib import contextmanager
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
+from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
-from telegram import InputFile, Update
-from telegram.error import BadRequest
 
 from common.logging_setup import configure_logging, get_logger
 from common.time_utils import local_civil_bounds_to_utc_naive, utc_naive_to_local_date
+
+if TYPE_CHECKING:
+    from telegram import Update
 
 
 class RuntimeConfigurationError(ValueError):
@@ -386,6 +388,8 @@ async def safe_send_message(
     reply_markup=None,
 ):
     """Send message; if Markdown parsing fails, fallback to plain text."""
+    from telegram.error import BadRequest
+
     try:
         logger.info(
             "bot_send_message_started",
@@ -438,6 +442,8 @@ async def safe_send_document(
     filename: str,
     caption: str | None = None,
 ):
+    from telegram import InputFile
+
     logger.info(
         "bot_send_document_started",
         "Sending Telegram document.",

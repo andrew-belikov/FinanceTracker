@@ -13,6 +13,7 @@ from queries import (
     compute_realized_by_asset,
     get_asset_alias_rows,
     get_dataset_operations,
+    get_income_currency_breakdown_for_period,
     get_income_events_for_period,
     get_income_for_period,
     get_iis_tax_deductions_for_period,
@@ -1033,6 +1034,13 @@ def _display_rub(value: Any, *, precision: int = 0) -> str:
     return fmt_decimal_rub(value, precision=precision)
 
 
+def _display_nominal_currency(value: Any, currency: str) -> str:
+    normalized_currency = (currency or "UNKNOWN").strip().upper() or "UNKNOWN"
+    if normalized_currency == "RUB":
+        return fmt_decimal_rub(value, precision=2)
+    return f"{_to_decimal(value):.2f} {normalized_currency}"
+
+
 def _build_overview_facts(payload: dict[str, Any]) -> dict[str, Any]:
     summary = payload["summary_metrics"]
     highlights = []
@@ -1256,6 +1264,7 @@ def _build_contribution_facts(payload: dict[str, Any]) -> dict[str, Any]:
 
 def _build_cashflow_facts(payload: dict[str, Any]) -> dict[str, Any]:
     summary = payload["summary_metrics"]
+    income_by_currency = payload.get("income_by_currency") or []
     return {
         "deposits": _display_rub(summary.get("deposits"), precision=0),
         "withdrawals": _display_rub(summary.get("withdrawals"), precision=0),
@@ -1265,6 +1274,28 @@ def _build_cashflow_facts(payload: dict[str, Any]) -> dict[str, Any]:
         "commissions": _display_rub(summary.get("commissions"), precision=2),
         "taxes": _display_rub(summary.get("taxes"), precision=2),
         "tax_refunds": _display_rub(summary.get("tax_refunds"), precision=2),
+        "income_by_currency": [
+            {
+                "currency": str(row.get("currency") or "UNKNOWN").upper(),
+                "coupons": _display_nominal_currency(
+                    row.get("coupons"), str(row.get("currency") or "UNKNOWN")
+                ),
+                "dividends": _display_nominal_currency(
+                    row.get("dividends"), str(row.get("currency") or "UNKNOWN")
+                ),
+                "taxes": _display_nominal_currency(
+                    row.get("taxes"), str(row.get("currency") or "UNKNOWN")
+                ),
+                "tax_refunds": _display_nominal_currency(
+                    row.get("tax_refunds"), str(row.get("currency") or "UNKNOWN")
+                ),
+            }
+            for row in income_by_currency
+        ],
+        "unknown_income_currency_warning": any(
+            str(row.get("currency") or "UNKNOWN").upper() == "UNKNOWN"
+            for row in income_by_currency
+        ),
         "operations_top": [
             {
                 "local_date": _format_display_date(row.get("local_date")),
@@ -1505,6 +1536,18 @@ def build_monthly_report_payload(
     tax_refunds = normalize_decimal(
         get_tax_refunds_for_period(session, report_account_id, period_start_dt, period_end_dt)
     )
+    income_by_currency = [
+        {
+            "currency": str(row.get("currency") or "UNKNOWN").strip().upper() or "UNKNOWN",
+            "coupons": normalize_decimal(row.get("coupons")),
+            "dividends": normalize_decimal(row.get("dividends")),
+            "taxes": normalize_decimal(row.get("taxes")),
+            "tax_refunds": normalize_decimal(row.get("tax_refunds")),
+        }
+        for row in get_income_currency_breakdown_for_period(
+            session, report_account_id, period_start_dt, period_end_dt
+        )
+    ]
     deposits_ytd = normalize_decimal(
         get_deposits_for_period(
             session,
@@ -1618,6 +1661,7 @@ def build_monthly_report_payload(
         "open_pl_end": open_pl_end,
         "operations_top": build_operations_top(normalized_operations),
         "income_events": normalized_income_events,
+        "income_by_currency": income_by_currency,
         "operation_cashflows_by_currency": operation_cashflows_by_currency,
         "reconciliation_by_asset_type": reconciliation_rows,
         "data_quality": {
@@ -1628,6 +1672,9 @@ def build_monthly_report_payload(
             "income_events_available": True,
             "asset_alias_rows_count": len(asset_alias_rows),
             "has_rebalance_targets": bool(targets),
+            "unknown_income_currency_warning": any(
+                row["currency"] == "UNKNOWN" for row in income_by_currency
+            ),
             "unsupported_operation_currencies": [
                 item["currency"]
                 for item in operation_cashflows_by_currency

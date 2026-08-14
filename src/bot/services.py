@@ -16,6 +16,7 @@ from queries import (
     get_instrument_eod_rows,
     get_deposits_for_period,
     get_external_cashflows_raw,
+    get_income_currency_breakdown_for_period,
     get_income_for_period,
     get_iis_tax_deductions_for_period,
     get_last_snapshot_before_date,
@@ -478,6 +479,39 @@ def append_tax_refund_line(text_value: str, tax_refunds: Decimal | float | int) 
     if normalized_refunds <= 0:
         return text_value
     return f"{text_value}\nВозврат налога: {fmt_decimal_rub(normalized_refunds)}."
+
+
+def append_income_currency_breakdown(
+    text_value: str,
+    rows: list[dict[str, Decimal | str]],
+) -> str:
+    if not rows:
+        return text_value
+
+    lines = [text_value, "", "💱 Доходы и налоги по валютам"]
+    has_unknown = False
+    for row in rows:
+        currency = str(row.get("currency") or "UNKNOWN").strip().upper() or "UNKNOWN"
+        has_unknown = has_unknown or currency == "UNKNOWN"
+
+        def amount(field: str) -> str:
+            value = normalize_decimal(row.get(field))
+            if currency == "RUB":
+                return fmt_decimal_rub(value)
+            return f"{value:,.2f} {currency}".replace(",", " ")
+
+        lines.append(
+            f"• {currency}: купоны {amount('coupons')}; "
+            f"дивиденды {amount('dividends')}; "
+            f"налоги {amount('taxes')}; "
+            f"возвраты {amount('tax_refunds')}"
+        )
+    if has_unknown:
+        lines.append(
+            "⚠️ UNKNOWN: валюта не определена; сумма не включена "
+            "в базовые итоги."
+        )
+    return "\n".join(lines)
 
 
 def compute_twr_series(
@@ -1002,6 +1036,9 @@ def build_today_summary() -> str:
         commissions = get_commissions_for_period(session, account_id, day_start, day_end)
         taxes = get_taxes_for_period(session, account_id, day_start, day_end)
         tax_refunds = get_tax_refunds_for_period(session, account_id, day_start, day_end)
+        income_by_currency = get_income_currency_breakdown_for_period(
+            session, account_id, day_start, day_end
+        )
 
     if not snaps:
         return "Пока нет ни одного снапшота портфеля."
@@ -1049,7 +1086,10 @@ def build_today_summary() -> str:
         taxes=fmt_decimal_rub(taxes),
     )
 
-    return append_tax_refund_line(render_today_text(ctx), tax_refunds)
+    return append_income_currency_breakdown(
+        append_tax_refund_line(render_today_text(ctx), tax_refunds),
+        income_by_currency,
+    )
 
 
 def build_week_summary() -> str:
@@ -1113,6 +1153,9 @@ def build_week_summary() -> str:
         commissions = get_commissions_for_period(session, account_id, week_start, week_end)
         taxes = get_taxes_for_period(session, account_id, week_start, week_end)
         tax_refunds = get_tax_refunds_for_period(session, account_id, week_start, week_end)
+        income_by_currency = get_income_currency_breakdown_for_period(
+            session, account_id, week_start, week_end
+        )
 
         year_start, _ = local_reporting_bounds_utc_naive(
             date(week_end_date.year, 1, 1),
@@ -1137,7 +1180,10 @@ def build_week_summary() -> str:
         taxes=fmt_decimal_rub(taxes),
     )
 
-    return append_tax_refund_line(render_week_text(ctx), tax_refunds)
+    return append_income_currency_breakdown(
+        append_tax_refund_line(render_week_text(ctx), tax_refunds),
+        income_by_currency,
+    )
 
 
 def build_month_summary() -> str:
@@ -1185,6 +1231,9 @@ def build_month_summary() -> str:
         commissions = get_commissions_for_period(session, account_id, month_start_dt, month_end_dt)
         taxes = get_taxes_for_period(session, account_id, month_start_dt, month_end_dt)
         tax_refunds = get_tax_refunds_for_period(session, account_id, month_start_dt, month_end_dt)
+        income_by_currency = get_income_currency_breakdown_for_period(
+            session, account_id, month_start_dt, month_end_dt
+        )
         dep_year = get_deposits_for_period(
             session,
             account_id=account_id,
@@ -1251,7 +1300,10 @@ def build_month_summary() -> str:
         taxes=fmt_decimal_rub(taxes),
     )
 
-    month_text = append_tax_refund_line(render_month_text(ctx), tax_refunds)
+    month_text = append_income_currency_breakdown(
+        append_tax_refund_line(render_month_text(ctx), tax_refunds),
+        income_by_currency,
+    )
     if end_snap:
         diff_lines = compute_positions_diff_lines(start_positions, end_positions)
         if diff_lines:

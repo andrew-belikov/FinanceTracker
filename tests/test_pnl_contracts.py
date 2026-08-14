@@ -310,6 +310,7 @@ class TodaySummaryContractTests(unittest.TestCase):
             "get_total_deposits": lambda _session, _account_id: deposits,
             "get_net_external_contributions": lambda _session, _account_id: net_contributions,
             "get_income_for_period": lambda *_args: (Decimal("0"), Decimal("0")),
+            "get_income_currency_breakdown_for_period": lambda *_args: [],
             "get_iis_tax_deductions_for_period": lambda *_args: Decimal("0"),
             "get_commissions_for_period": lambda *_args: Decimal("0"),
             "get_taxes_for_period": lambda *_args: Decimal("0"),
@@ -325,6 +326,7 @@ class TodaySummaryContractTests(unittest.TestCase):
             "fmt_pct": lambda value: value,
             "fmt_decimal_rub": lambda value: value,
             "append_tax_refund_line": lambda text_value, _refunds: text_value,
+            "append_income_currency_breakdown": lambda text_value, _rows: text_value,
             "REPORTING_ACCOUNT_UNAVAILABLE_TEXT": "unavailable",
             "local_reporting_bounds_utc_naive": lambda start, end: (
                 datetime.combine(start, time.min),
