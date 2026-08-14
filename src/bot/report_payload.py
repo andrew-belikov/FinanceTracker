@@ -2,13 +2,13 @@ from __future__ import annotations
 
 import json
 import os
-import tempfile
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 from typing import Any
 
 from common.logging_setup import get_logger
 from common.text_utils import has_mojibake
+from debug_artifacts import save_debug_text
 from queries import (
     compute_realized_by_asset,
     get_asset_alias_rows,
@@ -1352,14 +1352,11 @@ def build_monthly_ai_input(
 
 
 def save_debug_report_payload(payload: dict[str, Any]) -> str:
-    handle = tempfile.NamedTemporaryFile(
-        prefix="monthly_report_payload_",
+    return save_debug_text(
+        kind="payload",
         suffix=".json",
-        delete=False,
+        text=json.dumps(payload, ensure_ascii=False, indent=2),
     )
-    with open(handle.name, "w", encoding="utf-8") as file_obj:
-        json.dump(payload, file_obj, ensure_ascii=False, indent=2)
-    return handle.name
 
 
 def build_monthly_report_payload(
@@ -1648,7 +1645,7 @@ def build_monthly_report_payload(
             "Saved monthly report payload to a debug JSON file.",
             {
                 "period": f"{year}-{month:02d}",
-                "path": debug_path,
+                "artifact_kind": "payload",
             },
         )
 

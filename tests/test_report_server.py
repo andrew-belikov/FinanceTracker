@@ -20,7 +20,14 @@ from report_server import build_reporter_server
 
 class ReporterServerTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.server = build_reporter_server(host="127.0.0.1", port=0)
+        self.server = build_reporter_server(
+            host="127.0.0.1",
+            port=0,
+            service_key="synthetic-service-key",
+            max_concurrent_requests=1,
+            socket_timeout_seconds=0.2,
+            request_timeout_seconds=1.0,
+        )
         self.port = self.server.server_address[1]
         self.thread = threading.Thread(target=self.server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True)
         self.thread.start()
@@ -67,6 +74,19 @@ class ReporterServerTests(unittest.TestCase):
         self.assertEqual(payload["service"], "reporter")
         self.assertEqual(payload["pdf_engine"], "weasyprint")
 
+    def test_missing_service_key_fails_before_socket_bind(self):
+        with mock.patch.object(report_server.ThreadingHTTPServer, "__init__") as server_init:
+            with self.assertRaises(ValueError):
+                build_reporter_server(
+                    host="127.0.0.1",
+                    port=0,
+                    service_key="",
+                    max_concurrent_requests=1,
+                    socket_timeout_seconds=1,
+                    request_timeout_seconds=1,
+                )
+        server_init.assert_not_called()
+
     def test_monthly_pdf_returns_pdf_response(self):
         with mock.patch.object(
             report_server,
@@ -81,7 +101,10 @@ class ReporterServerTests(unittest.TestCase):
                 "POST",
                 "/reports/monthly/pdf",
                 body=json.dumps({"year": 2026, "month": 4}).encode("utf-8"),
-                headers={"Content-Type": "application/json"},
+                headers={
+                    "Content-Type": "application/json",
+                    "X-Reporter-Service-Key": "synthetic-service-key",
+                },
             )
 
         self.assertEqual(status, 200)
@@ -89,16 +112,124 @@ class ReporterServerTests(unittest.TestCase):
         self.assertEqual(content_type, "application/pdf")
         self.assertEqual(disposition, 'attachment; filename="fintracker_monthly_2026-04.pdf"')
 
+    def test_missing_and_wrong_key_rejected_before_body_or_builder(self):
+        with mock.patch.object(report_server.ReporterRequestHandler, "_read_json_body") as read_body, \
+             mock.patch.object(report_server, "MONTHLY_REPORT_BUILDER") as builder:
+            missing = self._request("POST", "/reports/monthly/pdf", body=b"ignored")
+            wrong = self._request(
+                "POST",
+                "/reports/monthly/pdf",
+                body=b"ignored",
+                headers={"X-Reporter-Service-Key": "wrong"},
+            )
+        self.assertEqual(missing[0], 401)
+        self.assertEqual(wrong[0], 403)
+        read_body.assert_not_called()
+        builder.assert_not_called()
+
     def test_monthly_pdf_stub_rejects_non_object_json(self):
         status, payload, _content_type, _disposition = self._request(
             "POST",
             "/reports/monthly/pdf",
             body=json.dumps(["bad"]).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
+            headers={
+                "Content-Type": "application/json",
+                "X-Reporter-Service-Key": "synthetic-service-key",
+            },
         )
 
         self.assertEqual(status, 400)
         self.assertEqual(payload["error"], "invalid_request")
+
+    def test_concurrency_budget_rejects_overload_and_bounds_builder(self):
+        entered = threading.Event()
+        release = threading.Event()
+        active = 0
+        maximum = 0
+        lock = threading.Lock()
+
+        def builder(_request):
+            nonlocal active, maximum
+            with lock:
+                active += 1
+                maximum = max(maximum, active)
+            entered.set()
+            release.wait(timeout=2)
+            with lock:
+                active -= 1
+            return {"filename": "report.pdf", "period": "2026-04", "pdf_bytes": b"%PDF"}
+
+        first_result = []
+        headers = {
+            "Content-Type": "application/json",
+            "X-Reporter-Service-Key": "synthetic-service-key",
+        }
+        with mock.patch.object(report_server, "MONTHLY_REPORT_BUILDER", side_effect=builder):
+            thread = threading.Thread(
+                target=lambda: first_result.append(
+                    self._request("POST", "/reports/monthly/pdf", body=b"{}", headers=headers)
+                )
+            )
+            thread.start()
+            self.assertTrue(entered.wait(timeout=1))
+            overloaded = self._request("POST", "/reports/monthly/pdf", body=b"{}", headers=headers)
+            release.set()
+            thread.join(timeout=2)
+        self.assertEqual(overloaded[0], 503)
+        self.assertEqual(overloaded[1]["error"], "reporter_overloaded")
+        self.assertEqual(first_result[0][0], 200)
+        self.assertEqual(maximum, 1)
+
+    def test_request_deadline_returns_service_unavailable(self):
+        self.server.request_timeout_seconds = 0.02
+        release = threading.Event()
+
+        def builder(_request):
+            release.wait(timeout=1)
+            return {"filename": "report.pdf", "period": "2026-04", "pdf_bytes": b"%PDF"}
+
+        try:
+            with mock.patch.object(report_server, "MONTHLY_REPORT_BUILDER", side_effect=builder):
+                result = self._request(
+                    "POST",
+                    "/reports/monthly/pdf",
+                    body=b"{}",
+                    headers={
+                        "Content-Type": "application/json",
+                        "X-Reporter-Service-Key": "synthetic-service-key",
+                    },
+                )
+            self.assertEqual(result[0], 503)
+            self.assertEqual(result[1]["error"], "report_timeout")
+        finally:
+            release.set()
+
+    def test_slow_body_timeout_releases_concurrency_budget(self):
+        headers = {
+            "Content-Type": "application/json",
+            "X-Reporter-Service-Key": "synthetic-service-key",
+        }
+        artifact = {"filename": "report.pdf", "period": "2026-04", "pdf_bytes": b"%PDF"}
+        slow = socket.create_connection(("127.0.0.1", self.port), timeout=1)
+        slow.sendall(
+            b"POST /reports/monthly/pdf HTTP/1.1\r\n"
+            b"Host: reporter\r\n"
+            b"X-Reporter-Service-Key: synthetic-service-key\r\n"
+            b"Content-Type: application/json\r\n"
+            b"Content-Length: 10\r\n\r\n{"
+        )
+        time.sleep(0.03)
+        overloaded = self._request(
+            "POST", "/reports/monthly/pdf", body=b"{}", headers=headers
+        )
+        time.sleep(0.25)
+        with mock.patch.object(report_server, "MONTHLY_REPORT_BUILDER", return_value=artifact):
+            recovered = self._request(
+                "POST", "/reports/monthly/pdf", body=b"{}", headers=headers
+            )
+        slow.close()
+        self.assertEqual(overloaded[0], 503)
+        self.assertEqual(recovered[0], 200)
 
     def test_unknown_path_returns_not_found(self):
         status, payload, _content_type, _disposition = self._request("GET", "/unknown")

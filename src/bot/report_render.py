@@ -23,6 +23,7 @@ from charts import (
     set_chart_header,
 )
 from common.logging_setup import get_logger
+from debug_artifacts import save_debug_text
 from report_payload import create_monthly_report_payload
 from runtime import fmt_decimal_rub, fmt_pct
 from services import (
@@ -1829,14 +1830,7 @@ def build_monthly_report_html(
 
 
 def save_debug_report_html(html: str) -> str:
-    handle = tempfile.NamedTemporaryFile(
-        prefix="monthly_report_",
-        suffix=".html",
-        delete=False,
-    )
-    with open(handle.name, "w", encoding="utf-8") as file_obj:
-        file_obj.write(html)
-    return handle.name
+    return save_debug_text(kind="html", suffix=".html", text=html)
 
 
 def build_monthly_report_pdf_bytes(
@@ -1858,7 +1852,7 @@ def build_monthly_report_pdf_bytes(
             "monthly_report_html_debug_saved",
             "Saved monthly report HTML to a debug file.",
             {
-                "path": debug_path,
+                "artifact_kind": "html",
             },
         )
 

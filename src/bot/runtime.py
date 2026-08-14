@@ -520,11 +520,22 @@ def write_csv_file(path: str, fieldnames: list[str], rows: list[dict]):
                         if isinstance(value, Decimal)
                         else value.isoformat()
                         if isinstance(value, (datetime, date))
-                        else value
+                        else neutralize_csv_cell(value)
                     )
                     for key, value in row.items()
                 }
             )
+
+
+def neutralize_csv_cell(value):
+    if not isinstance(value, str):
+        return value
+    index = 0
+    while index < len(value) and (value[index].isspace() or ord(value[index]) < 32):
+        index += 1
+    if index < len(value) and value[index] in {"=", "+", "-", "@"}:
+        return "'" + value
+    return value
 
 
 def normalize_decimal(value) -> Decimal:

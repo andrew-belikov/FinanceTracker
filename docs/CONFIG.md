@@ -80,6 +80,10 @@
 - `REPORTER_MAX_BODY_BYTES` — максимальный размер тела запроса для `POST /reports/monthly/pdf` (по умолчанию `65536`).
 - `REPORTER_INTERNAL_URL` — внутренний compose-URL для вызовов `bot -> reporter`. Рекомендуемое значение: `http://reporter:8088`.
 - `REPORTER_REQUEST_TIMEOUT_SECONDS` — таймаут внутреннего запроса `bot -> reporter` при сборке `/monthpdf` и month-end auto-send. Это только timeout на reporter-call, а не на upload документа в Telegram.
+- `REPORTER_SERVICE_KEY` — обязательный случайный внутренний ключ длиной не менее 16 символов. Он передаётся Compose только `bot` и `reporter`, сравнивается до чтения request body и никогда не вводится пользователем.
+- `REPORTER_MAX_CONCURRENT_REQUESTS` — лимит одновременно читаемых/собираемых reporter-запросов; перегрузка возвращает `503`.
+- `REPORTER_SOCKET_TIMEOUT_SECONDS` и `REPORTER_REQUEST_TIMEOUT_SECONDS` ограничивают медленное тело запроса и полный reporter build соответственно.
+- `BOT_COMMAND_MAX_CONCURRENCY` и `BOT_COMMAND_TIMEOUT_SECONDS` ограничивают вынесенные из asyncio loop операции БД, dataset и charts.
 - `OLLAMA_ENABLED` — включает narrative-layer через локальную `Ollama` (`true/false`). В первом PR может оставаться `false`.
 - `OLLAMA_BASE_URL` — базовый URL `Ollama` для контейнера `reporter`. На `homeserver` корректный путь: `http://ollama:11434`.
 - `OLLAMA_MODEL` — имя модели, которое будет использоваться для narrative generation.
@@ -88,8 +92,8 @@
 - `OLLAMA_NUM_CTX` — желаемый размер context window для prompt.
 - `OLLAMA_MAX_INPUT_CHARS` — жёсткий лимит на размер `monthly_ai_input` перед обрезкой. Рекомендуемое стартовое значение: `12000`.
 - `REPORT_PDF_ENGINE` — backend генерации PDF. Для текущего monthly PDF используется `weasyprint`.
-- `REPORT_DEBUG_SAVE_HTML` — сохранять промежуточный HTML в debug-режиме (`true/false`).
-- `REPORT_DEBUG_SAVE_PAYLOAD` — сохранять render payload в debug-режиме (`true/false`).
+- `REPORT_DEBUG_SAVE_HTML` и `REPORT_DEBUG_SAVE_PAYLOAD` — сохранять чувствительные промежуточные artifacts (`true/false`). По умолчанию persistent debug-файлы не создаются.
+- При включении debug обязателен отдельный `REPORT_DEBUG_DIR`: каталог приводится к `0700`, файлы — к `0600`; `REPORT_DEBUG_MAX_FILES` и `REPORT_DEBUG_MAX_AGE_SECONDS` задают bounded retention. Эти файлы содержат финансовые данные и не должны попадать в backup, shared volume или логи.
 - `BOT_PROXY_ENABLED` — включает outbound proxy только для контейнера `bot` (`true/false`).
 - `BOT_VLESS_URL` — основной VLESS share link для `xray-client`. Рекомендуется хранить значение в кавычках, чтобы `#label` в конце ссылки не отрезался парсером `.env`.
 - `BOT_VLESS_FALLBACK_URL` — дополнительный VLESS share link. Если основной `BOT_VLESS_URL` не проходит render/startup smoke или активный маршрут позже деградирует, `xray-client` автоматически пробует следующий кандидат.
@@ -128,6 +132,8 @@
 Правильная схема:
 
 - `reporter` подключён к внешней Docker-сети `localllm_localllm`;
+- `bot` и `xray-client` дополнительно соединены выделенной internal-сетью `bot_proxy_internal`; `xray-client` отсутствует в default-сети и не публикует SOCKS port на host;
+- `bot` и `reporter` используют отдельную internal-сеть `bot_reporter_internal`, а служебный ключ остаётся обязательным вторым рубежом;
 - `OLLAMA_BASE_URL=http://ollama:11434`.
 
 Если внешняя сеть отсутствует, `docker compose up` с сервисом `reporter` не стартует, пока сеть не будет создана или пока не будет поднят compose-проект `LocalLLM`.

@@ -11,6 +11,7 @@ from common.logging_setup import get_logger
 
 REPORTER_INTERNAL_URL = os.getenv("REPORTER_INTERNAL_URL", "http://reporter:8088").strip() or "http://reporter:8088"
 REPORTER_REQUEST_TIMEOUT_SECONDS = float(os.getenv("REPORTER_REQUEST_TIMEOUT_SECONDS", "180").strip() or "180")
+REPORTER_SERVICE_KEY = os.getenv("REPORTER_SERVICE_KEY", "").strip()
 
 logger = get_logger(__name__)
 
@@ -39,6 +40,8 @@ def request_monthly_report_pdf(
     year: int | None = None,
     month: int | None = None,
 ) -> tuple[str, str]:
+    if len(REPORTER_SERVICE_KEY) < 16:
+        raise ReporterClientError("Reporter service authentication is not configured.")
     payload: dict[str, Any] = {}
     if year is not None:
         payload["year"] = year
@@ -53,6 +56,7 @@ def request_monthly_report_pdf(
         headers={
             "Content-Type": "application/json",
             "Accept": "application/pdf, application/json",
+            "X-Reporter-Service-Key": REPORTER_SERVICE_KEY,
         },
         method="POST",
     )
