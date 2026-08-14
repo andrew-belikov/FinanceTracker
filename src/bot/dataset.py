@@ -27,6 +27,7 @@ from runtime import (
     normalize_decimal,
     to_iso_datetime,
     to_local_market_date,
+    local_reporting_bounds_utc_naive,
     write_csv_file,
 )
 from services import (
@@ -58,17 +59,25 @@ def build_dataset_export(session) -> tuple[dict, list[dict], list[dict], list[di
     latest_snapshot = get_latest_snapshot_with_id(session, account_id)
     if latest_snapshot is None:
         raise ValueError("Пока нет данных для экспорта датасета.")
+    base_currency = normalize_operation_currency(latest_snapshot.get("currency"))
 
     daily_rows = get_daily_snapshot_rows(session, account_id)
     positions_rows = list(get_positions_for_snapshot(session, latest_snapshot["id"]))
     asset_alias_rows = list(get_asset_alias_rows(session))
     asset_alias_by_instrument_uid, asset_alias_by_figi = build_asset_alias_lookup(asset_alias_rows)
     operations_rows = list(
+        # Operation timestamps are UTC-naive; dataset bounds are local civil days.
         get_dataset_operations(
             session,
             account_id=account_id,
-            start_dt=datetime.combine(min_date, time.min),
-            end_dt=datetime.combine(max_date + timedelta(days=1), time.min),
+            start_dt=local_reporting_bounds_utc_naive(
+                min_date,
+                max_date + timedelta(days=1),
+            )[0],
+            end_dt=local_reporting_bounds_utc_naive(
+                min_date,
+                max_date + timedelta(days=1),
+            )[1],
         )
     )
     income_rows = list(get_income_events_for_period(session, account_id, min_date, max_date))
@@ -191,17 +200,20 @@ def build_dataset_export(session) -> tuple[dict, list[dict], list[dict], list[di
         )
         net_amount = normalize_decimal(row["net_amount"])
         tax_amount = normalize_decimal(row["tax_amount"])
-        income_net_by_day[event_date] = income_net_by_day.get(event_date, Decimal("0")) + net_amount
-        if tax_amount < 0:
-            income_tax_by_day[event_date] = income_tax_by_day.get(event_date, Decimal("0")) + abs(tax_amount)
-        elif tax_amount > 0:
-            income_tax_refunds_by_day[event_date] = (
-                income_tax_refunds_by_day.get(event_date, Decimal("0")) + tax_amount
-            )
+        currency = normalize_operation_currency(row.get("currency"))
+        if currency == base_currency and base_currency != "UNKNOWN":
+            income_net_by_day[event_date] = income_net_by_day.get(event_date, Decimal("0")) + net_amount
+            if tax_amount < 0:
+                income_tax_by_day[event_date] = income_tax_by_day.get(event_date, Decimal("0")) + abs(tax_amount)
+            elif tax_amount > 0:
+                income_tax_refunds_by_day[event_date] = (
+                    income_tax_refunds_by_day.get(event_date, Decimal("0")) + tax_amount
+                )
         income_csv_rows.append(
             {
                 "event_date": event_date,
                 "event_type": row["event_type"],
+                "currency": currency,
                 "logical_asset_id": logical_asset_id,
                 "asset_uid": asset_uid,
                 "figi": row["figi"],
@@ -373,7 +385,6 @@ def build_dataset_export(session) -> tuple[dict, list[dict], list[dict], list[di
         min_date - timedelta(days=1),
         max_date,
     )
-    base_currency = normalize_operation_currency(latest_snapshot.get("currency"))
     dataset = {
         "meta": {
             "dataset_version": 3,
@@ -594,6 +605,7 @@ def create_dataset_archive() -> tuple[str, str]:
     income_fields = [
         "event_date",
         "event_type",
+        "currency",
         "logical_asset_id",
         "asset_uid",
         "figi",

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from typing import TypedDict
@@ -15,16 +16,20 @@ from runtime import (
     OPERATIONS_DEDUP_CTE,
     TAX_OPERATION_TYPES,
     TINKOFF_ACCOUNT_ID,
+    TZ,
+    TZ_NAME,
     WITHDRAWAL_OPERATION_TYPES,
     decimal_to_str,
     normalize_decimal,
 )
+from common.time_utils import utc_naive_to_local_date
 
 
 class IncomeNotificationRow(TypedDict):
     id: int
     figi: str
     event_type: str
+    currency: str
     net_amount: Decimal
     net_yield_pct: Decimal
     coupon_period_days: int | None
@@ -36,6 +41,17 @@ class InvestNotificationRow(TypedDict):
     date: datetime
     amount: Decimal
     cashflow_category: str | None
+
+
+class CurrencyAggregationError(RuntimeError):
+    """Raised when nominal values would otherwise be added across currencies."""
+
+
+@contextmanager
+def _optional_relation_savepoint(session):
+    """Keep a missing optional table from aborting the outer report transaction."""
+    with session.begin_nested():
+        yield
 
 
 def normalize_reporting_account_id(raw_value: str | None) -> str | None:
@@ -82,7 +98,7 @@ def get_latest_snapshots(session, account_id: str, limit: int = 2):
         session.execute(
             text(
                 """
-        SELECT snapshot_date, snapshot_at, total_value
+        SELECT snapshot_date, snapshot_at, total_value, currency
         FROM portfolio_snapshots
         WHERE account_id = :account_id
         ORDER BY snapshot_date DESC, snapshot_at DESC
@@ -113,7 +129,7 @@ def get_latest_deposit_date(
         text(
             f"""
             {OPERATIONS_DEDUP_CTE}
-            SELECT MAX(date::date)
+            SELECT MAX(timezone(:timezone, date AT TIME ZONE 'UTC')::date)
             FROM operations_dedup
             WHERE account_id = :account_id
               AND operation_type IN :operation_types
@@ -126,6 +142,7 @@ def get_latest_deposit_date(
             "operation_types": operation_types,
             "deduction_category": IIS_TAX_DEDUCTION_CATEGORY,
             "executed_state": EXECUTED_OPERATION_STATE,
+            "timezone": TZ_NAME,
         },
     ).scalar_one()
 
@@ -134,6 +151,7 @@ def get_total_deposits(
     session,
     account_id: str,
     operation_types: tuple[str, ...] = DEPOSIT_OPERATION_TYPES,
+    currency: str | None = None,
 ) -> float:
     row = session.execute(
         text(
@@ -145,6 +163,12 @@ def get_total_deposits(
               AND operation_type IN :operation_types
               AND COALESCE(cashflow_category, '') <> :deduction_category
               AND state = :executed_state
+              AND UPPER(COALESCE(currency, '')) = COALESCE(
+                  :currency,
+                  (SELECT UPPER(ps.currency) FROM portfolio_snapshots ps
+                   WHERE ps.account_id = :account_id
+                   ORDER BY ps.snapshot_date DESC, ps.snapshot_at DESC, ps.id DESC LIMIT 1)
+              )
             """
         ).bindparams(bindparam("operation_types", expanding=True)),
         {
@@ -152,12 +176,17 @@ def get_total_deposits(
             "operation_types": operation_types,
             "deduction_category": IIS_TAX_DEDUCTION_CATEGORY,
             "executed_state": EXECUTED_OPERATION_STATE,
+            "currency": (currency or "").strip().upper() or None,
         },
     ).scalar_one()
     return float(row or 0)
 
 
-def get_net_external_contributions(session, account_id: str) -> float:
+def get_net_external_contributions(
+    session,
+    account_id: str,
+    currency: str | None = None,
+) -> float:
     row = session.execute(
         text(
             f"""
@@ -178,6 +207,12 @@ def get_net_external_contributions(session, account_id: str) -> float:
             WHERE account_id = :account_id
               AND operation_type IN :operation_types
               AND state = :executed_state
+              AND UPPER(COALESCE(currency, '')) = COALESCE(
+                  :currency,
+                  (SELECT UPPER(ps.currency) FROM portfolio_snapshots ps
+                   WHERE ps.account_id = :account_id
+                   ORDER BY ps.snapshot_date DESC, ps.snapshot_at DESC, ps.id DESC LIMIT 1)
+              )
             """
         ).bindparams(
             bindparam("deposit_types", expanding=True),
@@ -191,6 +226,7 @@ def get_net_external_contributions(session, account_id: str) -> float:
             "operation_types": DEPOSIT_OPERATION_TYPES + WITHDRAWAL_OPERATION_TYPES,
             "deduction_category": IIS_TAX_DEDUCTION_CATEGORY,
             "executed_state": EXECUTED_OPERATION_STATE,
+            "currency": (currency or "").strip().upper() or None,
         },
     ).scalar_one()
     return float(row or 0)
@@ -202,6 +238,7 @@ def get_deposits_for_period(
     start_dt: datetime,
     end_dt: datetime,
     operation_types: tuple[str, ...] = DEPOSIT_OPERATION_TYPES,
+    currency: str | None = None,
 ) -> float:
     row = session.execute(
         text(
@@ -215,6 +252,12 @@ def get_deposits_for_period(
           AND operation_type IN :operation_types
           AND COALESCE(cashflow_category, '') <> :deduction_category
           AND state = :executed_state
+          AND UPPER(COALESCE(currency, '')) = COALESCE(
+              :currency,
+              (SELECT UPPER(ps.currency) FROM portfolio_snapshots ps
+               WHERE ps.account_id = :account_id
+               ORDER BY ps.snapshot_date DESC, ps.snapshot_at DESC, ps.id DESC LIMIT 1)
+          )
         """
         ).bindparams(bindparam("operation_types", expanding=True)),
         {
@@ -224,6 +267,7 @@ def get_deposits_for_period(
             "operation_types": operation_types,
             "deduction_category": IIS_TAX_DEDUCTION_CATEGORY,
             "executed_state": EXECUTED_OPERATION_STATE,
+            "currency": (currency or "").strip().upper() or None,
         },
     ).scalar_one()
     return float(row or 0)
@@ -234,6 +278,7 @@ def get_iis_tax_deductions_for_period(
     account_id: str,
     start_dt: datetime,
     end_dt: datetime,
+    currency: str | None = None,
 ) -> Decimal:
     row = session.execute(
         text(
@@ -247,6 +292,12 @@ def get_iis_tax_deductions_for_period(
               AND operation_type IN :deposit_types
               AND cashflow_category = :deduction_category
               AND state = :executed_state
+              AND UPPER(COALESCE(currency, '')) = COALESCE(
+                  :currency,
+                  (SELECT UPPER(ps.currency) FROM portfolio_snapshots ps
+                   WHERE ps.account_id = :account_id
+                   ORDER BY ps.snapshot_date DESC, ps.snapshot_at DESC, ps.id DESC LIMIT 1)
+              )
             """
         ).bindparams(bindparam("deposit_types", expanding=True)),
         {
@@ -256,6 +307,7 @@ def get_iis_tax_deductions_for_period(
             "deposit_types": DEPOSIT_OPERATION_TYPES,
             "deduction_category": IIS_TAX_DEDUCTION_CATEGORY,
             "executed_state": EXECUTED_OPERATION_STATE,
+            "currency": (currency or "").strip().upper() or None,
         },
     ).scalar_one()
     return Decimal(row or 0)
@@ -266,6 +318,7 @@ def get_net_external_flow_for_period(
     account_id: str,
     start_dt: datetime,
     end_dt: datetime,
+    currency: str | None = None,
 ) -> float:
     row = session.execute(
         text(
@@ -289,6 +342,12 @@ def get_net_external_flow_for_period(
           AND date < :end_dt
           AND operation_type IN :operation_types
           AND state = :executed_state
+          AND UPPER(COALESCE(currency, '')) = COALESCE(
+              :currency,
+              (SELECT UPPER(ps.currency) FROM portfolio_snapshots ps
+               WHERE ps.account_id = :account_id
+               ORDER BY ps.snapshot_date DESC, ps.snapshot_at DESC, ps.id DESC LIMIT 1)
+          )
         """
         ).bindparams(
             bindparam("deposit_types", expanding=True),
@@ -304,6 +363,7 @@ def get_net_external_flow_for_period(
             "operation_types": DEPOSIT_OPERATION_TYPES + WITHDRAWAL_OPERATION_TYPES,
             "deduction_category": IIS_TAX_DEDUCTION_CATEGORY,
             "executed_state": EXECUTED_OPERATION_STATE,
+            "currency": (currency or "").strip().upper() or None,
         },
     ).scalar_one()
     return float(row or 0)
@@ -317,31 +377,60 @@ def _is_undefined_table_error(exc: Exception, table_name: str) -> bool:
     return f'relation "{table_name}" does not exist' in str(exc).lower()
 
 
-def get_income_for_period(db, account_id: str, start_date, end_date) -> tuple[Decimal, Decimal]:
+def get_income_for_period(
+    db,
+    account_id: str,
+    start_date,
+    end_date,
+    currency: str | None = None,
+) -> tuple[Decimal, Decimal]:
     try:
-        row = db.execute(
-            text(
-                """
+        with _optional_relation_savepoint(db):
+            rows = db.execute(
+                text(
+                    """
                 SELECT
+                    COALESCE(NULLIF(UPPER(currency), ''), 'UNKNOWN') AS currency,
                     COALESCE(SUM(CASE WHEN event_type = 'coupon' THEN net_amount ELSE 0 END), 0) AS coupons,
                     COALESCE(SUM(CASE WHEN event_type = 'dividend' THEN net_amount ELSE 0 END), 0) AS dividends
                 FROM income_events
                 WHERE account_id = :account_id
                   AND event_date >= :start_date
                   AND event_date <= :end_date
+                  AND UPPER(COALESCE(currency, '')) = COALESCE(
+                      :currency,
+                      (SELECT UPPER(ps.currency) FROM portfolio_snapshots ps
+                       WHERE ps.account_id = :account_id
+                       ORDER BY ps.snapshot_date DESC, ps.snapshot_at DESC, ps.id DESC LIMIT 1)
+                  )
+                GROUP BY COALESCE(NULLIF(UPPER(currency), ''), 'UNKNOWN')
                 """
-            ),
-            {"account_id": account_id, "start_date": start_date, "end_date": end_date},
-        ).mappings().one()
+                ),
+                {
+                    "account_id": account_id,
+                    "start_date": start_date,
+                    "end_date": end_date,
+                    "currency": (currency or "").strip().upper() or None,
+                },
+            ).mappings().all()
     except Exception as exc:
         if _is_undefined_table_error(exc, "income_events"):
             return Decimal("0"), Decimal("0")
         raise
 
+    if not rows:
+        return Decimal("0"), Decimal("0")
+    if len(rows) != 1 or rows[0]["currency"] == "UNKNOWN":
+        raise CurrencyAggregationError(
+            "Income currencies require an explicit selection; implicit FX is disabled"
+        )
+    row = rows[0]
     return Decimal(row["coupons"] or 0), Decimal(row["dividends"] or 0)
 
 
-def get_commissions_for_period(db, account_id: str, start_date, end_date) -> Decimal:
+def get_commissions_for_period(
+    db, account_id: str, start_date, end_date, currency: str | None = None
+) -> Decimal:
     total = db.execute(
         text(
             f"""
@@ -353,6 +442,12 @@ def get_commissions_for_period(db, account_id: str, start_date, end_date) -> Dec
               AND date <= :end_date
               AND operation_type IN :operation_types
               AND state = :executed_state
+              AND UPPER(COALESCE(currency, '')) = COALESCE(
+                  :currency,
+                  (SELECT UPPER(ps.currency) FROM portfolio_snapshots ps
+                   WHERE ps.account_id = :account_id
+                   ORDER BY ps.snapshot_date DESC, ps.snapshot_at DESC, ps.id DESC LIMIT 1)
+              )
             """
         ).bindparams(bindparam("operation_types", expanding=True)),
         {
@@ -361,17 +456,21 @@ def get_commissions_for_period(db, account_id: str, start_date, end_date) -> Dec
             "end_date": end_date,
             "operation_types": COMMISSION_OPERATION_TYPES,
             "executed_state": EXECUTED_OPERATION_STATE,
+            "currency": (currency or "").strip().upper() or None,
         },
     ).scalar_one()
     return abs(Decimal(total or 0))
 
 
-def get_taxes_for_period(db, account_id: str, start_date, end_date) -> Decimal:
+def get_taxes_for_period(
+    db, account_id: str, start_date, end_date, currency: str | None = None
+) -> Decimal:
     income_taxes = Decimal("0")
     try:
-        income_taxes_row = db.execute(
-            text(
-                """
+        with _optional_relation_savepoint(db):
+            income_taxes_row = db.execute(
+                text(
+                    """
                 SELECT COALESCE(
                     SUM(CASE WHEN tax_amount < 0 THEN ABS(tax_amount) ELSE 0 END),
                     0
@@ -380,10 +479,21 @@ def get_taxes_for_period(db, account_id: str, start_date, end_date) -> Decimal:
                 WHERE account_id = :account_id
                   AND event_date >= :start_date
                   AND event_date <= :end_date
+                  AND UPPER(COALESCE(currency, '')) = COALESCE(
+                      :currency,
+                      (SELECT UPPER(ps.currency) FROM portfolio_snapshots ps
+                       WHERE ps.account_id = :account_id
+                       ORDER BY ps.snapshot_date DESC, ps.snapshot_at DESC, ps.id DESC LIMIT 1)
+                  )
                 """
-            ),
-            {"account_id": account_id, "start_date": start_date, "end_date": end_date},
-        ).scalar_one()
+                ),
+                {
+                    "account_id": account_id,
+                    "start_date": start_date,
+                    "end_date": end_date,
+                    "currency": (currency or "").strip().upper() or None,
+                },
+            ).scalar_one()
         income_taxes = abs(Decimal(income_taxes_row or 0))
     except Exception as exc:
         if not _is_undefined_table_error(exc, "income_events"):
@@ -403,6 +513,12 @@ def get_taxes_for_period(db, account_id: str, start_date, end_date) -> Decimal:
               AND date <= :end_date
               AND operation_type IN :operation_types
               AND state = :executed_state
+              AND UPPER(COALESCE(currency, '')) = COALESCE(
+                  :currency,
+                  (SELECT UPPER(ps.currency) FROM portfolio_snapshots ps
+                   WHERE ps.account_id = :account_id
+                   ORDER BY ps.snapshot_date DESC, ps.snapshot_at DESC, ps.id DESC LIMIT 1)
+              )
             """
         ).bindparams(bindparam("operation_types", expanding=True)),
         {
@@ -411,17 +527,21 @@ def get_taxes_for_period(db, account_id: str, start_date, end_date) -> Decimal:
             "end_date": end_date,
             "operation_types": TAX_OPERATION_TYPES,
             "executed_state": EXECUTED_OPERATION_STATE,
+            "currency": (currency or "").strip().upper() or None,
         },
     ).scalar_one()
     return income_taxes + abs(Decimal(operation_taxes or 0))
 
 
-def get_tax_refunds_for_period(db, account_id: str, start_date, end_date) -> Decimal:
+def get_tax_refunds_for_period(
+    db, account_id: str, start_date, end_date, currency: str | None = None
+) -> Decimal:
     income_refunds = Decimal("0")
     try:
-        income_refunds_row = db.execute(
-            text(
-                """
+        with _optional_relation_savepoint(db):
+            income_refunds_row = db.execute(
+                text(
+                    """
                 SELECT COALESCE(
                     SUM(CASE WHEN tax_amount > 0 THEN tax_amount ELSE 0 END),
                     0
@@ -430,10 +550,21 @@ def get_tax_refunds_for_period(db, account_id: str, start_date, end_date) -> Dec
                 WHERE account_id = :account_id
                   AND event_date >= :start_date
                   AND event_date <= :end_date
+                  AND UPPER(COALESCE(currency, '')) = COALESCE(
+                      :currency,
+                      (SELECT UPPER(ps.currency) FROM portfolio_snapshots ps
+                       WHERE ps.account_id = :account_id
+                       ORDER BY ps.snapshot_date DESC, ps.snapshot_at DESC, ps.id DESC LIMIT 1)
+                  )
                 """
-            ),
-            {"account_id": account_id, "start_date": start_date, "end_date": end_date},
-        ).scalar_one()
+                ),
+                {
+                    "account_id": account_id,
+                    "start_date": start_date,
+                    "end_date": end_date,
+                    "currency": (currency or "").strip().upper() or None,
+                },
+            ).scalar_one()
         income_refunds = max(Decimal(income_refunds_row or 0), Decimal("0"))
     except Exception as exc:
         if not _is_undefined_table_error(exc, "income_events"):
@@ -453,6 +584,12 @@ def get_tax_refunds_for_period(db, account_id: str, start_date, end_date) -> Dec
               AND date <= :end_date
               AND operation_type IN :operation_types
               AND state = :executed_state
+              AND UPPER(COALESCE(currency, '')) = COALESCE(
+                  :currency,
+                  (SELECT UPPER(ps.currency) FROM portfolio_snapshots ps
+                   WHERE ps.account_id = :account_id
+                   ORDER BY ps.snapshot_date DESC, ps.snapshot_at DESC, ps.id DESC LIMIT 1)
+              )
             """
         ).bindparams(bindparam("operation_types", expanding=True)),
         {
@@ -461,6 +598,7 @@ def get_tax_refunds_for_period(db, account_id: str, start_date, end_date) -> Dec
             "end_date": end_date,
             "operation_types": TAX_OPERATION_TYPES,
             "executed_state": EXECUTED_OPERATION_STATE,
+            "currency": (currency or "").strip().upper() or None,
         },
     ).scalar_one()
     return income_refunds + max(Decimal(operation_refunds or 0), Decimal("0"))
@@ -980,13 +1118,15 @@ def get_asset_alias_rows(session):
 
 def get_income_events_for_period(session, account_id: str, start_date: date, end_date: date):
     try:
-        rows = (
-            session.execute(
-                text(
+        with _optional_relation_savepoint(session):
+            rows = (
+                session.execute(
+                    text(
                     """
                     SELECT
                         ie.event_date,
                         ie.event_type,
+                        ie.currency,
                         ie.figi,
                         COALESCE(i.ticker, '') AS ticker,
                         COALESCE(i.name, ie.figi) AS instrument_name,
@@ -1002,15 +1142,14 @@ def get_income_events_for_period(session, account_id: str, start_date: date, end
                       AND ie.event_date <= :end_date
                     ORDER BY ie.event_date ASC, ie.figi ASC, ie.event_type ASC
                     """
-                ),
-                {"account_id": account_id, "start_date": start_date, "end_date": end_date},
+                    ),
+                    {"account_id": account_id, "start_date": start_date, "end_date": end_date},
+                )
+                .mappings()
+                .all()
             )
-            .mappings()
-            .all()
-        )
     except Exception as exc:
         if _is_undefined_table_error(exc, "income_events"):
-            session.rollback()
             return []
         raise
     return rows
@@ -1102,13 +1241,20 @@ def get_deposits_by_date(
             text(
                 f"""
         {OPERATIONS_DEDUP_CTE}
-        SELECT date::date AS d, SUM(amount) AS s
+        SELECT timezone(:timezone, date AT TIME ZONE 'UTC')::date AS d, SUM(amount) AS s
         FROM operations_dedup
         WHERE account_id = :account_id
           AND operation_type IN :operation_types
           AND COALESCE(cashflow_category, '') <> :deduction_category
           AND state = :executed_state
-        GROUP BY date::date
+          AND UPPER(COALESCE(currency, '')) = (
+              SELECT UPPER(ps.currency)
+              FROM portfolio_snapshots ps
+              WHERE ps.account_id = :account_id
+              ORDER BY ps.snapshot_date DESC, ps.snapshot_at DESC, ps.id DESC
+              LIMIT 1
+          )
+        GROUP BY timezone(:timezone, date AT TIME ZONE 'UTC')::date
         ORDER BY d ASC
         """
             ).bindparams(bindparam("operation_types", expanding=True)),
@@ -1117,6 +1263,7 @@ def get_deposits_by_date(
                 "operation_types": operation_types,
                 "deduction_category": IIS_TAX_DEDUCTION_CATEGORY,
                 "executed_state": EXECUTED_OPERATION_STATE,
+                "timezone": TZ_NAME,
             },
         )
         .mappings()
@@ -1131,13 +1278,20 @@ def get_iis_tax_deductions_by_date(session, account_id: str):
             text(
                 f"""
                 {OPERATIONS_DEDUP_CTE}
-                SELECT date::date AS d, SUM(ABS(amount)) AS s
+                SELECT timezone(:timezone, date AT TIME ZONE 'UTC')::date AS d, SUM(ABS(amount)) AS s
                 FROM operations_dedup
                 WHERE account_id = :account_id
                   AND operation_type IN :operation_types
                   AND cashflow_category = :deduction_category
                   AND state = :executed_state
-                GROUP BY date::date
+                  AND UPPER(COALESCE(currency, '')) = (
+                      SELECT UPPER(ps.currency)
+                      FROM portfolio_snapshots ps
+                      WHERE ps.account_id = :account_id
+                      ORDER BY ps.snapshot_date DESC, ps.snapshot_at DESC, ps.id DESC
+                      LIMIT 1
+                  )
+                GROUP BY timezone(:timezone, date AT TIME ZONE 'UTC')::date
                 ORDER BY d ASC
                 """
             ).bindparams(bindparam("operation_types", expanding=True)),
@@ -1146,6 +1300,7 @@ def get_iis_tax_deductions_by_date(session, account_id: str):
                 "operation_types": DEPOSIT_OPERATION_TYPES,
                 "deduction_category": IIS_TAX_DEDUCTION_CATEGORY,
                 "executed_state": EXECUTED_OPERATION_STATE,
+                "timezone": TZ_NAME,
             },
         )
         .mappings()
@@ -1189,6 +1344,13 @@ def get_year_financials_from_operations(session, account_id: str, start_dt: date
               AND date >= :start_dt
               AND date < :end_dt
               AND state = :executed_state
+              AND UPPER(COALESCE(currency, '')) = (
+                  SELECT UPPER(ps.currency)
+                  FROM portfolio_snapshots ps
+                  WHERE ps.account_id = :account_id
+                  ORDER BY ps.snapshot_date DESC, ps.snapshot_at DESC, ps.id DESC
+                  LIMIT 1
+              )
             """
         ).bindparams(
             bindparam("deposit_types", expanding=True),
@@ -1236,6 +1398,13 @@ def compute_realized_by_asset(session, account_id: str, start_dt: datetime, end_
                   AND od.state = :executed_state
                   AND od.operation_type = 'OPERATION_TYPE_SELL'
                   AND od.figi IS NOT NULL
+                  AND UPPER(COALESCE(od.currency, '')) = (
+                      SELECT UPPER(ps.currency)
+                      FROM portfolio_snapshots ps
+                      WHERE ps.account_id = :account_id
+                      ORDER BY ps.snapshot_date DESC, ps.snapshot_at DESC, ps.id DESC
+                      LIMIT 1
+                  )
                 GROUP BY od.figi
                 ORDER BY amount DESC
                 """
@@ -1306,6 +1475,13 @@ def compute_income_by_asset_net(session, account_id: str, start_dt: datetime, en
                       'OPERATION_TYPE_BOND_TAX_PROGRESSIVE'
                   )
                   AND od.figi IS NOT NULL
+                  AND UPPER(COALESCE(od.currency, '')) = (
+                      SELECT UPPER(ps.currency)
+                      FROM portfolio_snapshots ps
+                      WHERE ps.account_id = :account_id
+                      ORDER BY ps.snapshot_date DESC, ps.snapshot_at DESC, ps.id DESC
+                      LIMIT 1
+                  )
                 GROUP BY od.figi
                 ORDER BY net_amount DESC
                 """
@@ -1338,7 +1514,7 @@ def compute_income_by_asset_net(session, account_id: str, start_dt: datetime, en
 
 
 def get_unrealized_at_period_end(session, account_id: str, to_dt: datetime) -> Decimal:
-    to_date = to_dt.date() - timedelta(days=1)
+    to_date = utc_naive_to_local_date(to_dt, TZ) - timedelta(days=1)
     snap = (
         session.execute(
             text(
@@ -1390,7 +1566,7 @@ def get_year_deposits_by_date(
             text(
                 f"""
                 {OPERATIONS_DEDUP_CTE}
-                SELECT date::date AS d, SUM(amount) AS s
+                SELECT timezone(:timezone, date AT TIME ZONE 'UTC')::date AS d, SUM(amount) AS s
                 FROM operations_dedup
                 WHERE account_id = :account_id
                   AND date >= :start_dt
@@ -1398,7 +1574,14 @@ def get_year_deposits_by_date(
                   AND operation_type IN :operation_types
                   AND COALESCE(cashflow_category, '') <> :deduction_category
                   AND state = :executed_state
-                GROUP BY date::date
+                  AND UPPER(COALESCE(currency, '')) = (
+                      SELECT UPPER(ps.currency)
+                      FROM portfolio_snapshots ps
+                      WHERE ps.account_id = :account_id
+                      ORDER BY ps.snapshot_date DESC, ps.snapshot_at DESC, ps.id DESC
+                      LIMIT 1
+                  )
+                GROUP BY timezone(:timezone, date AT TIME ZONE 'UTC')::date
                 ORDER BY d ASC
                 """
             ).bindparams(bindparam("operation_types", expanding=True)),
@@ -1409,6 +1592,7 @@ def get_year_deposits_by_date(
                 "operation_types": DEPOSIT_OPERATION_TYPES,
                 "deduction_category": IIS_TAX_DEDUCTION_CATEGORY,
                 "executed_state": EXECUTED_OPERATION_STATE,
+                "timezone": TZ_NAME,
             },
         )
         .mappings()
@@ -1465,7 +1649,7 @@ def get_monthly_deposits(session, account_id: str, from_dt: datetime, to_dt: dat
                 f"""
                 {OPERATIONS_DEDUP_CTE}
                 SELECT
-                    date_trunc('month', date)::date AS month_start,
+                    date_trunc('month', timezone(:timezone, date AT TIME ZONE 'UTC'))::date AS month_start,
                     SUM(amount) AS amount
                 FROM operations_dedup
                 WHERE account_id = :account_id
@@ -1474,6 +1658,13 @@ def get_monthly_deposits(session, account_id: str, from_dt: datetime, to_dt: dat
                   AND state = :executed_state
                   AND operation_type = 'OPERATION_TYPE_INPUT'
                   AND COALESCE(cashflow_category, '') <> :deduction_category
+                  AND UPPER(COALESCE(currency, '')) = (
+                      SELECT UPPER(ps.currency)
+                      FROM portfolio_snapshots ps
+                      WHERE ps.account_id = :account_id
+                      ORDER BY ps.snapshot_date DESC, ps.snapshot_at DESC, ps.id DESC
+                      LIMIT 1
+                  )
                 GROUP BY month_start
                 ORDER BY month_start ASC
                 """
@@ -1484,6 +1675,7 @@ def get_monthly_deposits(session, account_id: str, from_dt: datetime, to_dt: dat
                 "to_dt": to_dt,
                 "executed_state": EXECUTED_OPERATION_STATE,
                 "deduction_category": IIS_TAX_DEDUCTION_CATEGORY,
+                "timezone": TZ_NAME,
             },
         )
         .mappings()
@@ -1504,7 +1696,7 @@ def get_monthly_net_external_flows(
                 f"""
                 {OPERATIONS_DEDUP_CTE}
                 SELECT
-                    date_trunc('month', date)::date AS month_start,
+                    date_trunc('month', timezone(:timezone, date AT TIME ZONE 'UTC'))::date AS month_start,
                     SUM(
                         CASE
                             WHEN operation_type IN :deposit_types
@@ -1520,6 +1712,13 @@ def get_monthly_net_external_flows(
                   AND date < :to_dt
                   AND state = :executed_state
                   AND operation_type IN :operation_types
+                  AND UPPER(COALESCE(currency, '')) = (
+                      SELECT UPPER(ps.currency)
+                      FROM portfolio_snapshots ps
+                      WHERE ps.account_id = :account_id
+                      ORDER BY ps.snapshot_date DESC, ps.snapshot_at DESC, ps.id DESC
+                      LIMIT 1
+                  )
                 GROUP BY month_start
                 ORDER BY month_start ASC
                 """
@@ -1537,6 +1736,7 @@ def get_monthly_net_external_flows(
                 "operation_types": DEPOSIT_OPERATION_TYPES + WITHDRAWAL_OPERATION_TYPES,
                 "executed_state": EXECUTED_OPERATION_STATE,
                 "deduction_category": IIS_TAX_DEDUCTION_CATEGORY,
+                "timezone": TZ_NAME,
             },
         )
         .mappings()
@@ -1556,7 +1756,7 @@ def get_monthly_iis_tax_deductions(
                 f"""
                 {OPERATIONS_DEDUP_CTE}
                 SELECT
-                    date_trunc('month', date)::date AS month_start,
+                    date_trunc('month', timezone(:timezone, date AT TIME ZONE 'UTC'))::date AS month_start,
                     SUM(ABS(amount)) AS amount
                 FROM operations_dedup
                 WHERE account_id = :account_id
@@ -1565,6 +1765,13 @@ def get_monthly_iis_tax_deductions(
                   AND state = :executed_state
                   AND operation_type = 'OPERATION_TYPE_INPUT'
                   AND cashflow_category = :deduction_category
+                  AND UPPER(COALESCE(currency, '')) = (
+                      SELECT UPPER(ps.currency)
+                      FROM portfolio_snapshots ps
+                      WHERE ps.account_id = :account_id
+                      ORDER BY ps.snapshot_date DESC, ps.snapshot_at DESC, ps.id DESC
+                      LIMIT 1
+                  )
                 GROUP BY month_start
                 ORDER BY month_start ASC
                 """
@@ -1575,6 +1782,7 @@ def get_monthly_iis_tax_deductions(
                 "to_dt": to_dt,
                 "executed_state": EXECUTED_OPERATION_STATE,
                 "deduction_category": IIS_TAX_DEDUCTION_CATEGORY,
+                "timezone": TZ_NAME,
             },
         )
         .mappings()
@@ -1636,6 +1844,13 @@ def get_deposits_sum_for_period(session, account_id: str, start_dt: datetime, en
               AND state = :executed_state
               AND operation_type = 'OPERATION_TYPE_INPUT'
               AND COALESCE(cashflow_category, '') <> :deduction_category
+              AND UPPER(COALESCE(currency, '')) = (
+                  SELECT UPPER(ps.currency)
+                  FROM portfolio_snapshots ps
+                  WHERE ps.account_id = :account_id
+                  ORDER BY ps.snapshot_date DESC, ps.snapshot_at DESC, ps.id DESC
+                  LIMIT 1
+              )
             """
         ),
         {
@@ -1678,17 +1893,27 @@ def get_portfolio_timeseries_agg_by_date(session, account_id: str):
     return rows
 
 
-def get_external_cashflows_raw(session, account_id: str):
+def get_external_cashflows_raw(
+    session,
+    account_id: str,
+    currency: str | None = None,
+):
     rows = (
         session.execute(
             text(
                 f"""
         {OPERATIONS_DEDUP_CTE}
-        SELECT date, amount, operation_type, cashflow_category
+        SELECT date, amount, currency, operation_type, cashflow_category
         FROM operations_dedup
         WHERE account_id = :account_id
           AND operation_type IN :operation_types
           AND state = :executed_state
+          AND UPPER(COALESCE(currency, '')) = COALESCE(
+              :currency,
+              (SELECT UPPER(ps.currency) FROM portfolio_snapshots ps
+               WHERE ps.account_id = :account_id
+               ORDER BY ps.snapshot_date DESC, ps.snapshot_at DESC, ps.id DESC LIMIT 1)
+          )
         ORDER BY date ASC
         """
             ).bindparams(bindparam("operation_types", expanding=True)),
@@ -1696,6 +1921,7 @@ def get_external_cashflows_raw(session, account_id: str):
                 "account_id": account_id,
                 "operation_types": DEPOSIT_OPERATION_TYPES + WITHDRAWAL_OPERATION_TYPES,
                 "executed_state": EXECUTED_OPERATION_STATE,
+                "currency": (currency or "").strip().upper() or None,
             },
         )
         .mappings()
@@ -2546,14 +2772,16 @@ def get_unnotified_income_events(
     account_id: str,
 ) -> list[IncomeNotificationRow]:
     try:
-        return (
-            session.execute(
-                text(
+        with _optional_relation_savepoint(session):
+            return (
+                session.execute(
+                    text(
                     """
                     SELECT
                         ie.id,
                         ie.figi,
                         ie.event_type,
+                        ie.currency,
                         ie.net_amount,
                         ie.net_yield_pct,
                         coupon.coupon_period_days,
@@ -2588,15 +2816,14 @@ def get_unnotified_income_events(
                       AND ie.notified = false
                     ORDER BY ie.created_at ASC
                     """
-                ),
-                {"account_id": account_id},
+                    ),
+                    {"account_id": account_id},
+                )
+                .mappings()
+                .all()
             )
-            .mappings()
-            .all()
-        )
     except Exception as exc:
         if _is_undefined_table_error(exc, "income_events"):
-            session.rollback()
             return []
         raise
 

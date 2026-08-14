@@ -42,6 +42,7 @@ from runtime import (
     normalize_decimal,
     to_iso_datetime,
     to_local_market_date,
+    local_reporting_bounds_utc_naive,
 )
 from services import (
     add_operation_cashflow_by_currency_day,
@@ -97,13 +98,17 @@ def _get_month_bounds(year: int, month: int) -> dict[str, Any]:
         period_end_exclusive = date(year + 1, 1, 1)
     else:
         period_end_exclusive = date(year, month + 1, 1)
+    period_start_dt, period_end_exclusive_dt = local_reporting_bounds_utc_naive(
+        period_start,
+        period_end_exclusive,
+    )
     return {
         "period_start": period_start,
         "period_end": period_end_exclusive - timedelta(days=1),
         "period_end_exclusive": period_end_exclusive,
-        "period_start_dt": datetime.combine(period_start, time.min),
-        "period_end_dt": datetime.combine(period_end_exclusive, time.min) - timedelta(microseconds=1),
-        "period_end_exclusive_dt": datetime.combine(period_end_exclusive, time.min),
+        "period_start_dt": period_start_dt,
+        "period_end_dt": period_end_exclusive_dt - timedelta(microseconds=1),
+        "period_end_exclusive_dt": period_end_exclusive_dt,
     }
 
 
@@ -373,6 +378,8 @@ def _build_operations_month_data(
 def _build_income_month_data(
     income_rows: list[dict[str, Any]],
     alias_by_figi: dict[str, dict[str, Any]],
+    *,
+    base_currency: str,
 ) -> tuple[
     list[dict[str, Any]],
     dict[date, Decimal],
@@ -397,19 +404,22 @@ def _build_income_month_data(
         event_date = row.get("event_date")
         net_amount = normalize_decimal(row.get("net_amount"))
         tax_amount = normalize_decimal(row.get("tax_amount"))
+        currency = normalize_operation_currency(row.get("currency"))
 
-        income_net_by_day[event_date] = income_net_by_day.get(event_date, Decimal("0")) + net_amount
-        if tax_amount < 0:
-            income_tax_by_day[event_date] = income_tax_by_day.get(event_date, Decimal("0")) + abs(tax_amount)
-        elif tax_amount > 0:
-            income_tax_refunds_by_day[event_date] = (
-                income_tax_refunds_by_day.get(event_date, Decimal("0")) + tax_amount
-            )
+        if currency == base_currency and base_currency != "UNKNOWN":
+            income_net_by_day[event_date] = income_net_by_day.get(event_date, Decimal("0")) + net_amount
+            if tax_amount < 0:
+                income_tax_by_day[event_date] = income_tax_by_day.get(event_date, Decimal("0")) + abs(tax_amount)
+            elif tax_amount > 0:
+                income_tax_refunds_by_day[event_date] = (
+                    income_tax_refunds_by_day.get(event_date, Decimal("0")) + tax_amount
+                )
 
         normalized_rows.append(
             {
                 "event_date": event_date,
                 "event_type": row.get("event_type"),
+                "currency": currency,
                 "logical_asset_id": identity["logical_asset_id"],
                 "asset_uid": identity["asset_uid"],
                 "figi": identity["figi"],
@@ -1416,6 +1426,7 @@ def build_monthly_report_payload(
         alias_by_instrument_uid,
         alias_by_figi,
     )
+    base_currency = normalize_operation_currency(_resolve_currency(daily_snapshot_rows, positions_current))
     (
         normalized_income_events,
         income_net_by_day,
@@ -1424,6 +1435,7 @@ def build_monthly_report_payload(
     ) = _build_income_month_data(
         income_event_rows,
         alias_by_figi,
+        base_currency=base_currency,
     )
 
     twr_series = compute_twr_timeseries(session, report_account_id)
@@ -1441,7 +1453,6 @@ def build_monthly_report_payload(
             for item_date, item_return in period_twr_by_date.items()
         }
 
-    base_currency = normalize_operation_currency(_resolve_currency(daily_snapshot_rows, positions_current))
     timeseries_daily = _build_timeseries_daily(
         daily_snapshot_rows,
         deposits_by_day={},
@@ -1474,7 +1485,13 @@ def build_monthly_report_payload(
         normalize_decimal(base_period_cashflows["withdrawals"]) if base_period_cashflows else Decimal("0")
     )
     net_external_flow = deposits - withdrawals
-    coupon_net, dividend_net = get_income_for_period(session, report_account_id, period_start_dt, period_end_dt)
+    coupon_net, dividend_net = get_income_for_period(
+        session,
+        report_account_id,
+        period_start_dt,
+        period_end_dt,
+        currency=base_currency,
+    )
     coupon_net = normalize_decimal(coupon_net)
     dividend_net = normalize_decimal(dividend_net)
     income_net = coupon_net + dividend_net
@@ -1495,7 +1512,10 @@ def build_monthly_report_payload(
         get_deposits_for_period(
             session,
             report_account_id,
-            datetime(year, 1, 1),
+            local_reporting_bounds_utc_naive(
+                date(year, 1, 1),
+                date(year + 1, 1, 1),
+            )[0],
             period_end_exclusive_dt,
         )
     )

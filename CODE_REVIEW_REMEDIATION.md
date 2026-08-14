@@ -50,28 +50,28 @@ deployment, migration или security-последствия.
 | P0-01 | IR-00 | security | secret scan текущих файлов и Git history; синтетические VLESS fixtures | `51ed49c`, `29a9db3` | EXTERNAL_BLOCKED: tracked tree clean, rotation/history pending | 258/258; tracked tree 0; history 14 value-safe findings | finance: repository part APPROVE | отзыв двух server-side VLESS identities; history rewrite только после отдельного разрешения |
 | P1-01 | PR-03 | notifications | точные query-row contracts для income/invest jobs и callback markup | `7a75ad7` | REVIEWED | 270/270; row/markup contracts PASS | security APPROVE | bot job smoke без `KeyError`; кнопка только у пополнения |
 | P1-02 | PR-02 | ci-deploy | workflow contract: green CI и равенство CI/deploy SHA | `55d11f2` | REVIEWED | 258/258; workflow contracts PASS | security APPROVE | CI/deploy run одного SHA |
-| P1-03 | PR-07 | data | table-driven day/month/year/DST local bounds → UTC `[start,end)` | pending | CONFIRMED | pending | finance | tracker sync и отчётные границы без ошибок |
+| P1-03 | PR-07 | data | table-driven day/month/year/DST local bounds → UTC `[start,end)` | `330b48c`, `c290c0b` | REVIEWED | 287/287; timezone/DST contracts PASS | finance APPROVE | tracker sync и отчётные границы без ошибок |
 | P1-04 | PR-08 | finance | withholding `-13` + operation tax `-5` = expense `18`; tax refund отдельно | `b1a81ab`, `3b78422` | REVIEWED | 258/258; tax/refund contracts PASS | ci APPROVE | очищенный отчётный smoke |
 | P1-05 | PR-09 | finance | gap-day deposit/withdrawal, несколько потоков и `/today` | `b1a81ab`, `3b78422` | REVIEWED | 258/258; gap-day contracts PASS | ci APPROVE | TWR/today smoke на тестовых данных |
 | P1-06 | PR-09 | finance | pre-period return + flat selected period = `0%` | `b1a81ab` | REVIEWED | 258/258; period rebase PASS | ci APPROVE | monthly payload/PDF smoke |
 | P1-07 | PR-08 | finance | dividend/commission/tax/deposit/withdrawal и fallback без start snapshot | `b1a81ab`, `3b78422` | REVIEWED | 258/258; P&L contracts PASS | ci APPROVE | daily/monthly payload smoke |
 | P1-08 | PR-08 | finance | deposit/withdrawal round-trip и несколько выводов | `b1a81ab` | REVIEWED | 258/258; lifetime P&L PASS | ci APPROVE | `/today` безопасный smoke владельцем |
-| P1-09 | PR-07 | data | mixed RUB/USD income/tax; неизвестная валюта без неявного сложения | pending | CONFIRMED | pending | finance | tracker/report currency smoke |
-| P1-10 | PR-10 | data | одинаковый `operation_id` на двух accounts | pending | CONFIRMED | pending | finance | migration и sync ledger |
-| P1-11 | PR-10 | data | exact ID absent; `auto` с 0/1/2 open accounts | pending | CONFIRMED | pending | security | tracker sync без account fallback |
+| P1-09 | PR-07 | data | mixed RUB/USD income/tax; неизвестная валюта без неявного сложения | `330b48c`, `c290c0b` | REVIEWED | 287/287; currency separation PASS | finance APPROVE | tracker/report currency smoke |
+| P1-10 | PR-10 | data | одинаковый `operation_id` на двух accounts | `330b48c` | REVIEWED | PostgreSQL 16 composite identity/collision rollback PASS | finance APPROVE | migration и sync ledger |
+| P1-11 | PR-10 | data | exact ID absent; `auto` с 0/1/2 open accounts | `330b48c` | REVIEWED | 287/287; exact/auto account contracts PASS | finance APPROVE | tracker sync без account fallback |
 | P1-12 | PR-05 | security | allowed user в group отклоняется до DB/PDF/dataset/chart | `51ed49c`, `29a9db3` | REVIEWED | 258/258; private-chat contracts PASS | finance APPROVE | отрицательный private-data smoke |
 | P1-13 | PR-05 | security | missing/empty/malformed allowlist останавливает startup | `51ed49c`, `29a9db3` | REVIEWED | 258/258; config fail-fast PASS | finance APPROVE | startup config evidence без ID |
 | P1-14 | PR-06 | security | no/wrong key → `401/403` до body/builder; correct key succeeds | pending | CONFIRMED | pending | ci-deploy | reporter negative/authorized smoke |
 | P2-01 | PR-11 | finance | property cases: allocations >= 0 и сумма равна deposit | `b1a81ab` | REVIEWED | 258/258; allocation properties PASS | ci APPROVE | N/A после unit evidence |
 | P2-02 | PR-11 | finance | единый cost-basis denominator для position/group/total | `b1a81ab` | REVIEWED | 258/258; cost-basis contracts PASS | ci APPROVE | `/structure` безопасный smoke владельцем |
-| P2-03 | PR-10 | data | cost basis snapshot до/после event; late tax сохраняет as-of basis | pending | CONFIRMED | pending | finance | reconciliation smoke |
-| P2-04 | PR-10 | data | explicit canceled деактивирует; неполное окно не деактивирует | pending | CONFIRMED | pending | finance | tracker reconciliation smoke |
+| P2-03 | PR-10 | data | cost basis snapshot до/после event; late tax сохраняет as-of basis | `330b48c` | REVIEWED | 287/287; as-of basis PASS | finance APPROVE | reconciliation smoke |
+| P2-04 | PR-10 | data | explicit canceled деактивирует; неполное окно не деактивирует | `330b48c`, `c290c0b` | REVIEWED | 287/287; sparse cancel/partial window PASS | finance APPROVE | tracker reconciliation smoke |
 | P2-05 | PR-08 | finance | withdrawal-only и mixed-flow month | `b1a81ab`, `3b78422` | REVIEWED | 258/258; year-chart contracts PASS | ci APPROVE | year-chart smoke владельцем |
 | P2-06 | PR-04 | notifications | fresh/stale/completed lease и fenced finalize старого owner | `7a75ad7` | REVIEWED | 270/270; lease/fencing contracts PASS | security APPROVE | scheduler lease ledger; disposable PostgreSQL pending |
 | P2-07 | PR-04 | notifications | timeout без retry; parse error один fallback; recipient idempotency/concurrency | `7a75ad7`, `90bd645`, `c947ff3` | REVIEWED | 270/270; timeout/BadRequest/partial contracts PASS | security APPROVE | очищенный delivery smoke |
-| P2-08 | PR-10 | data | catalog/ledger до и после `migrate --check` идентичны | pending | CONFIRMED | pending | ci-deploy | production `migrate --check` read-only |
-| P2-09 | PR-10 | data | PostgreSQL без `income_events`: savepoint/fallback продолжает запросы | pending | CONFIRMED | pending | finance | PostgreSQL integration evidence |
-| P2-10 | PR-10 | data | malformed date не меняет DB/watermark и не логирует payload | pending | CONFIRMED | pending | security | tracker sync без date errors |
+| P2-08 | PR-10 | data | catalog/ledger до и после `migrate --check` идентичны | `330b48c`, `c290c0b` | REVIEWED | PostgreSQL 16 empty/lagging/current checksum PASS | finance APPROVE | production `migrate --check` read-only |
+| P2-09 | PR-10 | data | PostgreSQL без `income_events`: savepoint/fallback продолжает запросы | `330b48c` | REVIEWED | PostgreSQL 16 savepoint/follow-up SQL PASS | finance APPROVE | PostgreSQL integration evidence |
+| P2-10 | PR-10 | data | malformed date не меняет DB/watermark и не логирует payload | `330b48c` | REVIEWED | 287/287; page rollback/watermark PASS | finance APPROVE | tracker sync без date errors |
 | P2-11 | PR-12 | security | missing/malformed `VERIFY_SSL`; false только explicit test profile | `51ed49c` | REVIEWED | 258/258; TLS config contracts PASS | finance APPROVE | production config-path evidence без значения секрета |
 | P2-12 | PR-02 | ci-deploy | dirty canonical checkout останавливается до build; exact HEAD/image | `55d11f2`, `545449a` | REVIEWED | 258/258; exact-image contracts PASS | security APPROVE | clean exact-SHA deployment |
 | P2-13 | PR-02 | ci-deploy | HTTP 401/invalid JSON/`ok=false`; bot/tracker health readiness | `55d11f2`, `545449a`, `81d8642` | REVIEWED | 258/258; readiness contracts PASS | security APPROVE | healthy services без restart loop |
