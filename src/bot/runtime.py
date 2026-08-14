@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import os
+import unicodedata
 from contextlib import contextmanager
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
@@ -531,7 +532,9 @@ def neutralize_csv_cell(value):
     if not isinstance(value, str):
         return value
     index = 0
-    while index < len(value) and (value[index].isspace() or ord(value[index]) < 32):
+    while index < len(value) and (
+        value[index].isspace() or unicodedata.category(value[index]) in {"Cc", "Cf"}
+    ):
         index += 1
     if index < len(value) and value[index] in {"=", "+", "-", "@"}:
         return "'" + value

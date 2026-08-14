@@ -209,7 +209,7 @@ class ReportRenderTests(unittest.TestCase):
     def test_save_debug_report_html_writes_file(self):
         html = "<html><body>test</body></html>"
         with tempfile.TemporaryDirectory() as parent:
-            directory = Path(parent) / "debug"
+            directory = Path(parent).resolve() / "debug"
             with mock.patch.dict(os.environ, {"REPORT_DEBUG_DIR": str(directory)}):
                 path = report_render.save_debug_report_html(html)
             self.assertTrue(Path(path).exists())

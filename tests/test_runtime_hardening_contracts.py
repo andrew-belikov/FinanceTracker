@@ -7,6 +7,7 @@ import sys
 import tempfile
 import unittest
 import weakref
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -39,6 +40,14 @@ class CsvSafetyTests(unittest.TestCase):
             values = [row["value"] for row in csv.DictReader(io.StringIO(path.read_text()))]
         self.assertEqual(values, ["'=1+1", "'  +SUM(A1:A2)", "'\t@cmd", "'-1", "safe"])
 
+    def test_csv_skips_all_unicode_control_and_format_prefixes(self):
+        prefixes = ("\x7f", "\x80", "\u200b", "\ufeff")
+        values = [f"{prefix}=synthetic" for prefix in prefixes]
+        self.assertEqual(
+            [runtime.neutralize_csv_cell(value) for value in values],
+            [f"'{value}" for value in values],
+        )
+
     def test_dataset_archive_neutralizes_csv_only_and_keeps_json_canonical(self):
         operation_fields = [
             "operation_id", "date_utc", "local_date", "operation_type", "operation_group",
@@ -47,7 +56,7 @@ class CsvSafetyTests(unittest.TestCase):
             "yield_amount", "description", "description_has_mojibake", "source",
         ]
         operation = {key: "" for key in operation_fields}
-        operation["name"] = " =synthetic-formula"
+        operation["name"] = "\u200b=synthetic-formula"
         exported = {
             "meta": {"period_end": "2026-08-14"},
             "operations": [dict(operation)],
@@ -64,10 +73,37 @@ class CsvSafetyTests(unittest.TestCase):
                 csv_rows = list(
                     csv.DictReader(io.StringIO(archive.read("operations.csv").decode("utf-8")))
                 )
-            self.assertEqual(raw_json["operations"][0]["name"], " =synthetic-formula")
-            self.assertEqual(csv_rows[0]["name"], "' =synthetic-formula")
+            self.assertEqual(raw_json["operations"][0]["name"], "\u200b=synthetic-formula")
+            self.assertEqual(csv_rows[0]["name"], "'\u200b=synthetic-formula")
         finally:
             Path(archive_path).unlink(missing_ok=True)
+
+    def test_dataset_archive_removes_partial_zip_when_write_fails(self):
+        exported = {"meta": {"period_end": "2026-08-14"}}
+        created_paths = []
+        real_named_temporary_file = tempfile.NamedTemporaryFile
+
+        with tempfile.TemporaryDirectory() as directory:
+            def create_archive_temp(*args, **kwargs):
+                handle = real_named_temporary_file(*args, dir=directory, **kwargs)
+                created_paths.append(Path(handle.name))
+                return handle
+
+            with patch.object(
+                dataset,
+                "build_dataset_export",
+                return_value=(exported, [], [], [], []),
+            ), patch.object(dataset, "build_dataset_readme", return_value="synthetic"), patch.object(
+                dataset.tempfile,
+                "NamedTemporaryFile",
+                side_effect=create_archive_temp,
+            ), patch.object(dataset.zipfile.ZipFile, "write", side_effect=OSError("synthetic")):
+                with self.assertRaises(OSError):
+                    dataset.create_dataset_archive()
+
+            self.assertEqual(len(created_paths), 1)
+            self.assertFalse(created_paths[0].exists())
+            self.assertEqual(list(Path(directory).glob("fintracker_dataset_*.zip")), [])
 
 
 class HandlerBudgetTests(unittest.IsolatedAsyncioTestCase):
@@ -202,7 +238,7 @@ class DebugArtifactTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 debug_artifacts.save_debug_text(kind="payload", suffix=".json", text="private")
         with tempfile.TemporaryDirectory() as parent:
-            directory = Path(parent) / "debug"
+            directory = Path(parent).resolve() / "debug"
             with patch.dict(
                 os.environ,
                 {
@@ -228,6 +264,69 @@ class DebugArtifactTests(unittest.TestCase):
             self.assertFalse(oldest.exists())
             self.assertTrue(Path(newest).exists())
             self.assertTrue(all(stat.S_IMODE(path.stat().st_mode) == 0o600 for path in existing))
+
+    def test_debug_artifact_cleanup_is_race_safe_and_retention_is_bounded(self):
+        with tempfile.TemporaryDirectory() as parent:
+            directory = Path(parent).resolve() / "debug"
+            environment = {
+                "REPORT_DEBUG_DIR": str(directory),
+                "REPORT_DEBUG_MAX_FILES": "2",
+                "REPORT_DEBUG_MAX_AGE_SECONDS": "3600",
+            }
+
+            def save_many(worker: int):
+                return [
+                    debug_artifacts.save_debug_text(
+                        kind="payload",
+                        suffix=".json",
+                        text=f"{worker}-{index}",
+                    )
+                    for index in range(100)
+                ]
+
+            with patch.dict(os.environ, environment), ThreadPoolExecutor(max_workers=2) as pool:
+                results = list(pool.map(save_many, range(2)))
+
+            self.assertEqual(len(results), 2)
+            remaining = list(directory.glob(f"{debug_artifacts.DEBUG_PREFIX}*"))
+            self.assertEqual(len(remaining), 2)
+
+    def test_debug_directory_rejects_symlink_parent_and_kind_traversal(self):
+        with tempfile.TemporaryDirectory() as parent:
+            parent_path = Path(parent).resolve()
+            target = parent_path / "target"
+            target.mkdir()
+            symlink = parent_path / "linked"
+            symlink.symlink_to(target, target_is_directory=True)
+            configured = symlink / "debug"
+            with patch.dict(os.environ, {"REPORT_DEBUG_DIR": str(configured)}):
+                with self.assertRaises(ValueError):
+                    debug_artifacts.save_debug_text(
+                        kind="payload",
+                        suffix=".json",
+                        text="private",
+                    )
+            self.assertFalse((target / "debug").exists())
+
+            safe_directory = parent_path / "safe" / "debug"
+            with patch.dict(os.environ, {"REPORT_DEBUG_DIR": str(safe_directory)}):
+                with self.assertRaises(ValueError):
+                    debug_artifacts.save_debug_text(
+                        kind="../../escape",
+                        suffix=".json",
+                        text="private",
+                    )
+            self.assertEqual(list(parent_path.glob("escape*")), [])
+
+            traversing_directory = parent_path / "safe" / ".." / "outside"
+            with patch.dict(os.environ, {"REPORT_DEBUG_DIR": str(traversing_directory)}):
+                with self.assertRaises(ValueError):
+                    debug_artifacts.save_debug_text(
+                        kind="payload",
+                        suffix=".json",
+                        text="private",
+                    )
+            self.assertFalse((parent_path / "outside").exists())
 
 
 class ComposeIsolationTests(unittest.TestCase):
