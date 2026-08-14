@@ -46,6 +46,14 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn('test -f "$APP_ENV_FILE"', CI_TEXT + DEPLOY_TEXT)
         self.assertNotIn("cat \"$APP_ENV_FILE\"", CI_TEXT + DEPLOY_TEXT)
 
+    def test_ci_direct_compose_validation_sets_synthetic_reporter_key(self):
+        marker = "- name: Validate docker compose configuration"
+        self.assertIn(marker, CI_TEXT)
+        step = CI_TEXT.split(marker, 1)[1].split("\n      - name:", 1)[0]
+        self.assertIn("env:", step)
+        self.assertIn("REPORTER_SERVICE_KEY: ci_reporter_service_key", step)
+        self.assertIn('docker compose --env-file "$APP_ENV_FILE" config --quiet', step)
+
     def test_deploy_requires_successful_ci_run_for_same_exact_sha(self):
         self.assertNotRegex(DEPLOY_TEXT, r"(?m)^\s*push:\s*$")
         self.assertIn("CI_RUN_ID", DEPLOY_TEXT)
