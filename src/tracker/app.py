@@ -62,7 +62,26 @@ configure_logging()
 
 logger = get_logger(__name__)
 
-MAX_LOG_RESPONSE_BODY_CHARS = 4000
+class RuntimeConfigurationError(ValueError):
+    """Raised when required runtime configuration is absent or unsafe."""
+
+
+def parse_verify_ssl(raw_value, *, app_env, allow_insecure_test):
+    normalized = "true" if raw_value is None else raw_value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized not in {"0", "false", "no", "off"}:
+        raise RuntimeConfigurationError("VERIFY_SSL must be a strict boolean")
+    if app_env.strip().lower() != "test" or not allow_insecure_test:
+        raise RuntimeConfigurationError(
+            "VERIFY_SSL=false is allowed only with explicit test break-glass"
+        )
+    return False
+
+
+def validate_database_credentials(*, db_dsn, db_password):
+    if not (db_dsn or "").strip() and not (db_password or "").strip():
+        raise RuntimeConfigurationError("Database credentials must be explicitly configured")
 
 # ============ CONFIG из окружения ============
 
@@ -126,9 +145,17 @@ SNAPSHOT_INTERVAL_MINUTES = int(os.getenv("SNAPSHOT_INTERVAL_MINUTES", "5"))
 # interval | cron
 SNAPSHOT_MODE = os.getenv("SNAPSHOT_MODE", "interval").strip().lower()
 
-# SSL-проверка (у тебя сейчас нужен режим БЕЗ проверки)
-VERIFY_SSL_ENV = os.getenv("VERIFY_SSL", "false").lower()
-VERIFY_SSL = VERIFY_SSL_ENV in ("1", "true", "yes")
+APP_ENV = os.getenv("APP_ENV", "dev")
+ALLOW_INSECURE_TLS_FOR_TESTS = (
+    os.getenv("ALLOW_INSECURE_TLS_FOR_TESTS", "false").strip().lower()
+    in {"1", "true", "yes", "on"}
+)
+VERIFY_SSL_ENV = os.getenv("VERIFY_SSL")
+VERIFY_SSL = parse_verify_ssl(
+    VERIFY_SSL_ENV,
+    app_env=APP_ENV,
+    allow_insecure_test=ALLOW_INSECURE_TLS_FOR_TESTS,
+)
 
 if not VERIFY_SSL:
     urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -144,11 +171,10 @@ DB_HOST = os.getenv("DB_HOST", "db")
 DB_PORT = int(os.getenv("DB_PORT", "5432"))
 DB_NAME = os.getenv("DB_NAME", "fintracker")
 DB_USER = os.getenv("DB_USER", "aqua4")
-DB_PASSWORD = os.getenv("DB_PASSWORD", "change_me")
-
-DB_DSN = os.getenv(
-    "DB_DSN",
-    f"postgresql+psycopg2://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}",
+DB_PASSWORD = os.getenv("DB_PASSWORD", "").strip()
+EXPLICIT_DB_DSN = os.getenv("DB_DSN", "").strip()
+DB_DSN = EXPLICIT_DB_DSN or (
+    f"postgresql+psycopg2://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
 )
 
 Base = declarative_base()
@@ -542,27 +568,16 @@ def _url_path(url: str) -> str:
     return "/" + parts[3] if len(parts) > 3 else "/"
 
 
-def _truncate_log_text(value: str, limit: int = MAX_LOG_RESPONSE_BODY_CHARS) -> tuple[str, bool]:
-    if len(value) <= limit:
-        return value, False
-    return value[:limit] + "...<truncated>", True
-
-
 def _build_response_body_ctx(resp, base_ctx: Optional[dict] = None) -> dict:
+    """Return allowlisted response metadata without serializing an upstream body."""
     ctx = dict(base_ctx or {})
     content_type = resp.headers.get("Content-Type")
     if content_type:
         ctx["content_type"] = content_type
-
-    try:
-        ctx["response_body"] = resp.json()
-        ctx["response_body_truncated"] = False
-        return ctx
-    except Exception:
-        truncated_body, truncated = _truncate_log_text(resp.text)
-        ctx["response_body"] = truncated_body
-        ctx["response_body_truncated"] = truncated
-        return ctx
+    content_length = resp.headers.get("Content-Length")
+    if content_length and content_length.isdecimal():
+        ctx["response_body_bytes"] = int(content_length)
+    return ctx
 
 
 def _build_api_session() -> requests.Session:
@@ -747,8 +762,8 @@ def post_api(method_path: str, payload: dict) -> dict:
             error_ctx,
         )
         logger.error(
-            "api_http_error_body",
-            "Logged T-Invest API error response body.",
+            "api_http_error_metadata",
+            "Logged allowlisted T-Invest API error response metadata.",
             _build_response_body_ctx(resp, error_ctx),
         )
         raise RuntimeError(f"API HTTP {resp.status_code}")
@@ -768,8 +783,8 @@ def post_api(method_path: str, payload: dict) -> dict:
             error_ctx,
         )
         logger.error(
-            "api_json_decode_error_body",
-            "Logged non-JSON T-Invest API response body.",
+            "api_json_decode_error_metadata",
+            "Logged allowlisted non-JSON response metadata.",
             _build_response_body_ctx(resp, error_ctx),
         )
         raise
@@ -1957,6 +1972,15 @@ def main() -> int:
         logger.error(
             "missing_api_token",
             "TINVEST_API_TOKEN не задан. Передай его через переменную окружения.",
+        )
+        return 1
+    try:
+        validate_database_credentials(db_dsn=EXPLICIT_DB_DSN, db_password=DB_PASSWORD)
+    except RuntimeConfigurationError as exc:
+        logger.error(
+            "invalid_runtime_configuration",
+            "Required tracker runtime configuration is missing or malformed.",
+            {"error_type": type(exc).__name__},
         )
         return 1
 
