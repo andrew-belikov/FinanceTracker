@@ -338,13 +338,16 @@ def build_history_chart(path: str) -> str | None:
     # Подготавливаем массивы значений для графика
     values = []
     cum_deps = []
-    cum_deductions = []
 
     # Превращаем ts_sorted в список кортежей для удобства
     ts_data = [(row["snapshot_date"], float(row["total_value"])) for row in ts_sorted]
     # Превращаем deps_sorted в список кортежей
     deps_data = [(row["d"], float(row["s"])) for row in deps_sorted]
-    deductions_data = [(row["d"], float(row["s"])) for row in deductions_sorted]
+    deduction_events = [
+        (row["d"], float(row["s"]))
+        for row in deductions_sorted
+        if start_date <= row["d"] <= end_date and float(row["s"]) > 0
+    ]
 
     for d in week_dates:
         # 1. Стоимость портфеля на дату d (берем последний снапшот <= d)
@@ -358,13 +361,16 @@ def build_history_chart(path: str) -> str | None:
         relevant_deps = [amt for (dt, amt) in deps_data if dt <= d]
         total_d = sum(relevant_deps)
         cum_deps.append(total_d)
-        cum_deductions.append(sum(amt for dt, amt in deductions_data if dt <= d))
 
     fig, ax = plt.subplots(figsize=(10.5, 4.8))
+    deductions_total = sum(amount for _, amount in deduction_events)
+    subtitle = "Пополнения — собственные взносы."
+    if deductions_total > 0:
+        subtitle += f" Вычеты ИИС за период: {fmt_compact_rub(deductions_total)}."
     set_chart_header(
         fig,
         f"{ACCOUNT_FRIENDLY_NAME}: портфель и пополнения",
-        "Пополнения — собственные взносы; вычеты ИИС показаны отдельно.",
+        subtitle,
     )
     apply_chart_style(ax, rub_axis_formatter)
 
@@ -407,14 +413,25 @@ def build_history_chart(path: str) -> str | None:
         linewidth=2.6,
         zorder=3,
     )
-    if any(cum_deductions):
-        ax.plot(
-            week_dates,
-            cum_deductions,
-            color=CHART_COLORS["deductions"],
-            linewidth=2.0,
-            linestyle=(0, (2, 2)),
-            zorder=2,
+
+    for index, (event_date, amount) in enumerate(deduction_events):
+        relevant_snaps = [value for snapshot_date, value in ts_data if snapshot_date <= event_date]
+        if not relevant_snaps:
+            continue
+
+        x_offset = -12 if event_date >= week_dates[len(week_dates) // 2] else 12
+        y_offset = 24 if index % 2 == 0 else -28
+        annotate_point(
+            ax,
+            event_date,
+            relevant_snaps[-1],
+            f"Вычет {fmt_compact_rub(amount, signed=True)}",
+            CHART_COLORS["deductions"],
+            x_offset=x_offset,
+            y_offset=y_offset,
+            marker_size=36,
+            bbox_edge_color=CHART_COLORS["deductions"],
+            show_arrow=True,
         )
 
     tick_dates, tick_labels = build_date_ticks(week_dates, max_ticks=7)
@@ -469,16 +486,6 @@ def build_history_chart(path: str) -> str | None:
             CHART_COLORS["deposits"],
             y_offset=deposits_offset,
         )
-    if any(cum_deductions):
-        annotate_series_last_point(
-            ax,
-            week_dates,
-            cum_deductions,
-            f"Вычеты ИИС {fmt_compact_rub(cum_deductions[-1])}",
-            CHART_COLORS["deductions"],
-            y_offset=-34,
-        )
-
     fig.tight_layout(rect=(0, 0, 1, 0.9))
     fig.savefig(path, dpi=170, facecolor=fig.get_facecolor())
     plt.close(fig)

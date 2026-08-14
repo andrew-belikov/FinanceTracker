@@ -69,6 +69,53 @@ class HistoryChartTests(unittest.TestCase):
         for actual_channel, expected_channel in zip(actual_color, expected_color):
             self.assertAlmostEqual(actual_channel, expected_channel, places=2)
 
+    def test_iis_deductions_are_event_markers_and_do_not_compress_value_axis(self):
+        timeseries = [
+            {"snapshot_date": date(2026, 1, 1), "total_value": 1000000},
+            {"snapshot_date": date(2026, 1, 8), "total_value": 1080000},
+            {"snapshot_date": date(2026, 1, 15), "total_value": 1120000},
+            {"snapshot_date": date(2026, 1, 22), "total_value": 1150000},
+        ]
+        deposits = [
+            {"d": date(2026, 1, 1), "s": 900000},
+            {"d": date(2026, 1, 12), "s": 50000},
+        ]
+        deductions = [
+            {"d": date(2026, 1, 10), "s": 52000},
+            {"d": date(2026, 1, 20), "s": 30000},
+        ]
+        captured: dict[str, object] = {}
+
+        def fake_savefig(fig, *args, **kwargs):
+            captured["fig"] = fig
+
+        with (
+            mock.patch.object(charts, "db_session", return_value=nullcontext(object())),
+            mock.patch.object(charts, "resolve_reporting_account_id", return_value="account-1"),
+            mock.patch.object(charts, "get_portfolio_timeseries", return_value=timeseries),
+            mock.patch.object(charts, "get_deposits_by_date", return_value=deposits),
+            mock.patch.object(charts, "get_iis_tax_deductions_by_date", return_value=deductions),
+            mock.patch.object(charts.plt, "close", return_value=None),
+            mock.patch("matplotlib.figure.Figure.savefig", new=fake_savefig),
+        ):
+            result = charts.build_history_chart("/tmp/history-deductions-test.png")
+
+        self.assertEqual(result, "/tmp/history-deductions-test.png")
+        figure = captured["fig"]
+        ax = figure.axes[0]
+
+        labels = {text.get_text() for text in ax.texts}
+        self.assertIn("Вычет +52 тыс ₽", labels)
+        self.assertIn("Вычет +30 тыс ₽", labels)
+        figure_texts = [text.get_text() for text in figure.texts]
+        self.assertIn(
+            "Пополнения — собственные взносы. Вычеты ИИС за период: 82 тыс ₽.",
+            figure_texts,
+        )
+
+        self.assertNotIn(charts.CHART_COLORS["deductions"], [line.get_color() for line in ax.lines])
+        self.assertGreater(ax.get_ylim()[0], 500000)
+
 
 if __name__ == "__main__":
     unittest.main()
