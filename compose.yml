@@ -23,7 +23,7 @@ services:
     build:
       context: .
       dockerfile: docker/Dockerfile.xray-client
-    image: financetracker-xray-client
+    image: ${XRAY_CLIENT_IMAGE:-financetracker-xray-client}
     container_name: financetracker-xray-client-1
     environment:
       APP_ENV: ${APP_ENV:-dev}
@@ -44,13 +44,13 @@ services:
     restart: unless-stopped
 
   migrate:
-    image: financetracker-tracker
+    image: ${TRACKER_IMAGE:-financetracker-tracker}
     entrypoint: ["python", "-u", "migrate.py"]
     depends_on:
       db:
         condition: service_healthy
     env_file:
-      - .env
+      - ${APP_ENV_FILE:-.env}
     environment:
       APP_ENV: ${APP_ENV:-dev}
       APP_SERVICE: iis_tracker_migrate
@@ -66,7 +66,7 @@ services:
     build:
       context: .
       dockerfile: docker/Dockerfile.tracker
-    image: financetracker-tracker
+    image: ${TRACKER_IMAGE:-financetracker-tracker}
     container_name: financetracker-tracker-1
     depends_on:
       db:
@@ -74,7 +74,7 @@ services:
       migrate:
         condition: service_completed_successfully
     env_file:
-      - .env
+      - ${APP_ENV_FILE:-.env}
     environment:
       APP_ENV: ${APP_ENV:-dev}
       APP_SERVICE: ${APP_SERVICE_TRACKER:-iis_tracker}
@@ -83,15 +83,23 @@ services:
       DB_NAME: ${POSTGRES_DB}
       DB_USER: ${POSTGRES_USER}
       DB_PASSWORD: ${POSTGRES_PASSWORD}
+      TRACKER_READY_FILE: /tmp/financetracker-tracker.ready
+      TRACKER_READY_MAX_AGE_SECONDS: ${TRACKER_READY_MAX_AGE_SECONDS:-}
     volumes:
       - ./docker/certs:/opt/finance/certs:ro
+    healthcheck:
+      test: ["CMD", "python", "-u", "tracker_healthcheck.py"]
+      interval: 15s
+      timeout: 5s
+      retries: 4
+      start_period: 30s
     restart: unless-stopped
 
   bot:
     build:
       context: .
       dockerfile: docker/Dockerfile.bot
-    image: financetracker-bot
+    image: ${BOT_IMAGE:-financetracker-bot}
     container_name: financetracker-bot-1
     depends_on:
       db:
@@ -99,9 +107,9 @@ services:
       migrate:
         condition: service_completed_successfully
       xray-client:
-        condition: service_started
+        condition: service_healthy
     env_file:
-      - .env
+      - ${APP_ENV_FILE:-.env}
     environment:
       APP_ENV: ${APP_ENV:-dev}
       APP_SERVICE: ${APP_SERVICE_BOT:-iis_tracker_bot}
@@ -116,13 +124,22 @@ services:
       BOT_PROXY_ENABLED: ${BOT_PROXY_ENABLED:-false}
       BOT_PROXY_ENDPOINT: socks5h://xray-client:1080
       BOT_PROXY_NO_PROXY: localhost,127.0.0.1,db,tracker,reporter,xray-client
+      BOT_READY_FILE: /tmp/financetracker-bot.ready
+      BOT_READY_MAX_AGE_SECONDS: ${BOT_READY_MAX_AGE_SECONDS:-120}
+      BOT_READY_HEARTBEAT_SECONDS: ${BOT_READY_HEARTBEAT_SECONDS:-30}
+    healthcheck:
+      test: ["CMD", "python", "-u", "bot_healthcheck.py"]
+      interval: 15s
+      timeout: 5s
+      retries: 4
+      start_period: 30s
     restart: unless-stopped
 
   reporter:
     build:
       context: .
       dockerfile: docker/Dockerfile.reporter
-    image: financetracker-reporter
+    image: ${REPORTER_IMAGE:-financetracker-reporter}
     container_name: financetracker-reporter-1
     depends_on:
       db:
@@ -130,7 +147,7 @@ services:
       migrate:
         condition: service_completed_successfully
     env_file:
-      - .env
+      - ${APP_ENV_FILE:-.env}
     environment:
       APP_ENV: ${APP_ENV:-dev}
       APP_SERVICE: ${APP_SERVICE_REPORTER:-iis_tracker_reporter}

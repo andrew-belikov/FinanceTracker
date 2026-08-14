@@ -76,7 +76,15 @@ def probe_telegram(timeout: float, proxy_url: str | None) -> tuple[bool, str]:
                 build_telegram_probe_url(),
                 headers={"User-Agent": "FinanceTrackerBotProxySmoke/1.0"},
             )
-            return True, f"http_status={response.status_code}"
+            if response.status_code != 200:
+                return False, f"http_status={response.status_code}"
+            try:
+                payload = response.json()
+            except ValueError:
+                return False, "http_status=200 invalid_json"
+            if not isinstance(payload, dict) or payload.get("ok") is not True:
+                return False, "http_status=200 telegram_ok=false"
+            return True, "http_status=200 telegram_ok=true"
     except Exception as exc:  # pragma: no cover - network-dependent
         return False, str(exc)
 

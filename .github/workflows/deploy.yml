@@ -1,27 +1,20 @@
 name: Deploy FinanceTracker
 
 on:
-  push:
+  workflow_run:
+    workflows:
+      - CI
+    types:
+      - completed
     branches:
       - main
-  workflow_dispatch:
-    inputs:
-      mode:
-        description: Deployment mode
-        required: true
-        default: smoke
-        type: choice
-        options:
-          - smoke
-          - deploy
-      ref:
-        description: Git ref to deploy from canonical server checkout
-        required: true
-        default: main
-        type: string
+
+permissions:
+  contents: read
 
 jobs:
   deploy:
+    if: ${{ github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'main' }}
     concurrency:
       group: financetracker-deploy
       cancel-in-progress: false
@@ -35,64 +28,159 @@ jobs:
 
     env:
       PROJECT_DIR: /home/andrey/projects/FinanceTracker
-      DEPLOY_MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.mode || 'deploy' }}
-      DEPLOY_REF: ${{ github.event_name == 'workflow_dispatch' && inputs.ref || github.ref_name }}
+      DEPLOY_SHA: ${{ github.event.workflow_run.head_sha }}
+      CI_RUN_ID: ${{ github.event.workflow_run.id }}
+      COMPOSE_PROJECT_NAME: financetracker
 
     steps:
-      - name: Show runner context
+      - name: Verify successful CI identity
         run: |
-          whoami
-          hostname
-          pwd
+          test "${{ github.event.workflow_run.name }}" = "CI"
+          test "${{ github.event.workflow_run.conclusion }}" = "success"
+          test "${{ github.event.workflow_run.event }}" = "push"
+          test "${{ github.event.workflow_run.head_branch }}" = "main"
+          test -n "$CI_RUN_ID"
+          printf '%s' "$DEPLOY_SHA" | grep -Eq '^[0-9a-f]{40}$'
 
-      - name: Verify canonical project directory
+      - name: Create clean disposable exact-SHA checkout
         run: |
-          test -d "$PROJECT_DIR"
-          ls -la "$PROJECT_DIR"
+          test -d "$PROJECT_DIR/.git"
+          test -z "$(git -C "$PROJECT_DIR" status --porcelain --untracked-files=all)"
+          remote_url="$(git -C "$PROJECT_DIR" remote get-url origin)"
+          test -n "$remote_url"
+          deploy_dir="$(mktemp -d /tmp/financetracker-deploy.XXXXXXXX)"
+          git clone --no-hardlinks --no-checkout "$remote_url" "$deploy_dir"
+          git -C "$deploy_dir" fetch origin "$DEPLOY_SHA"
+          git -C "$deploy_dir" checkout --detach "$DEPLOY_SHA"
+          test "$(git -C "$deploy_dir" rev-parse HEAD)" = "$DEPLOY_SHA"
+          test -z "$(git -C "$deploy_dir" status --porcelain --untracked-files=all)"
+          printf 'DEPLOY_DIR=%s\n' "$deploy_dir" >> "$GITHUB_ENV"
+          printf 'APP_ENV_FILE=%s/.env\n' "$PROJECT_DIR" >> "$GITHUB_ENV"
 
-      - name: Show repository context
+      - name: Run exact-SHA pre-deploy checks
         run: |
-          cd "$PROJECT_DIR"
-          git remote -v
-          git branch --show-current
-          git status --short
-
-      - name: Update canonical checkout
-        run: |
-          cd "$PROJECT_DIR"
-          git fetch origin
-          git checkout "$DEPLOY_REF"
-          git pull --ff-only origin "$DEPLOY_REF"
-
-      - name: Run pre-deploy checks
-        run: |
-          cd "$PROJECT_DIR"
+          cd "$DEPLOY_DIR"
+          test "$(git rev-parse HEAD)" = "$DEPLOY_SHA"
+          test -z "$(git status --porcelain --untracked-files=all)"
+          test "${APP_ENV_FILE:-}" = "$PROJECT_DIR/.env"
+          test -f "$APP_ENV_FILE"
+          test ! -L "$APP_ENV_FILE"
+          test -r "$APP_ENV_FILE"
+          test "$(stat -c '%a' "$APP_ENV_FILE")" = "600"
+          test "$(stat -c '%u' "$APP_ENV_FILE")" = "$(id -u)"
           python3 -m compileall src
-          docker compose config > /dev/null
-          docker compose ps
+          docker compose --env-file "$APP_ENV_FILE" config --quiet
 
       - name: Prepare optional integration network
-        if: ${{ env.DEPLOY_MODE == 'deploy' }}
         run: |
-          docker network inspect localllm_localllm > /dev/null 2>&1 \
+          docker network inspect localllm_localllm >/dev/null 2>&1 \
             || docker network create localllm_localllm
 
-      - name: Apply deploy
-        if: ${{ env.DEPLOY_MODE == 'deploy' }}
+      - name: Build exact-SHA images
+        env:
+          BOT_IMAGE: financetracker-bot:git-${{ github.event.workflow_run.head_sha }}
+          TRACKER_IMAGE: financetracker-tracker:git-${{ github.event.workflow_run.head_sha }}
+          REPORTER_IMAGE: financetracker-reporter:git-${{ github.event.workflow_run.head_sha }}
+          XRAY_CLIENT_IMAGE: financetracker-xray-client:git-${{ github.event.workflow_run.head_sha }}
         run: |
-          cd "$PROJECT_DIR"
-          docker compose up -d --build --force-recreate --remove-orphans \
-            --wait --wait-timeout 180
+          cd "$DEPLOY_DIR"
+          test "$(git rev-parse HEAD)" = "$DEPLOY_SHA"
+          test -z "$(git status --porcelain --untracked-files=all)"
+          docker compose --env-file "$APP_ENV_FILE" build
+          bot_image_id="$(docker image inspect --format '{{.Id}}' "$BOT_IMAGE")"
+          tracker_image_id="$(docker image inspect --format '{{.Id}}' "$TRACKER_IMAGE")"
+          reporter_image_id="$(docker image inspect --format '{{.Id}}' "$REPORTER_IMAGE")"
+          xray_client_image_id="$(docker image inspect --format '{{.Id}}' "$XRAY_CLIENT_IMAGE")"
+          for image_id in "$bot_image_id" "$tracker_image_id" "$reporter_image_id" "$xray_client_image_id"; do
+            printf '%s' "$image_id" | grep -Eq '^sha256:[0-9a-f]{64}$'
+          done
+          {
+            printf 'EXPECTED_BOT_IMAGE_ID=%s\n' "$bot_image_id"
+            printf 'EXPECTED_TRACKER_IMAGE_ID=%s\n' "$tracker_image_id"
+            printf 'EXPECTED_REPORTER_IMAGE_ID=%s\n' "$reporter_image_id"
+            printf 'EXPECTED_XRAY_CLIENT_IMAGE_ID=%s\n' "$xray_client_image_id"
+          } >> "$GITHUB_ENV"
 
-      - name: Verify database migrations
-        if: ${{ env.DEPLOY_MODE == 'deploy' }}
+      - name: Apply exact-SHA deploy
+        env:
+          BOT_IMAGE: financetracker-bot:git-${{ github.event.workflow_run.head_sha }}
+          TRACKER_IMAGE: financetracker-tracker:git-${{ github.event.workflow_run.head_sha }}
+          REPORTER_IMAGE: financetracker-reporter:git-${{ github.event.workflow_run.head_sha }}
+          XRAY_CLIENT_IMAGE: financetracker-xray-client:git-${{ github.event.workflow_run.head_sha }}
         run: |
-          cd "$PROJECT_DIR"
-          docker compose run --rm migrate --check
+          cd "$DEPLOY_DIR"
+          verify_image_tag() {
+            actual_id="$(docker image inspect --format '{{.Id}}' "$1")"
+            test "$actual_id" = "$2"
+          }
+          verify_container_image() {
+            service="$1"
+            expected_id="$2"
+            output_name="$3"
+            container_id="$(docker compose --env-file "$APP_ENV_FILE" ps --all --quiet "$service")"
+            test -n "$container_id"
+            actual_id="$(docker inspect --format '{{.Image}}' "$container_id")"
+            test "$actual_id" = "$expected_id"
+            printf '%s=%s\n' "$output_name" "$actual_id" >> "$GITHUB_ENV"
+          }
+
+          verify_image_tag "$BOT_IMAGE" "$EXPECTED_BOT_IMAGE_ID"
+          verify_image_tag "$TRACKER_IMAGE" "$EXPECTED_TRACKER_IMAGE_ID"
+          verify_image_tag "$REPORTER_IMAGE" "$EXPECTED_REPORTER_IMAGE_ID"
+          verify_image_tag "$XRAY_CLIENT_IMAGE" "$EXPECTED_XRAY_CLIENT_IMAGE_ID"
+          export BOT_IMAGE="$EXPECTED_BOT_IMAGE_ID"
+          export TRACKER_IMAGE="$EXPECTED_TRACKER_IMAGE_ID"
+          export REPORTER_IMAGE="$EXPECTED_REPORTER_IMAGE_ID"
+          export XRAY_CLIENT_IMAGE="$EXPECTED_XRAY_CLIENT_IMAGE_ID"
+          docker compose --env-file "$APP_ENV_FILE" up -d --no-build --force-recreate --remove-orphans --wait --wait-timeout 180
+          verify_container_image "bot" "$EXPECTED_BOT_IMAGE_ID" "ACTUAL_BOT_IMAGE_ID"
+          verify_container_image "tracker" "$EXPECTED_TRACKER_IMAGE_ID" "ACTUAL_TRACKER_IMAGE_ID"
+          verify_container_image "reporter" "$EXPECTED_REPORTER_IMAGE_ID" "ACTUAL_REPORTER_IMAGE_ID"
+          verify_container_image "xray-client" "$EXPECTED_XRAY_CLIENT_IMAGE_ID" "ACTUAL_XRAY_CLIENT_IMAGE_ID"
+          verify_container_image "migrate" "$EXPECTED_TRACKER_IMAGE_ID" "ACTUAL_MIGRATE_IMAGE_ID"
+
+          check_name="financetracker-migrate-check-$DEPLOY_SHA"
+          cleanup_check_container() {
+            docker rm -f "$check_name" >/dev/null 2>&1 || true
+          }
+          trap cleanup_check_container EXIT
+          docker compose --env-file "$APP_ENV_FILE" run --name "$check_name" migrate --check
+          check_image_id="$(docker inspect --format '{{.Image}}' "$check_name")"
+          test "$check_image_id" = "$EXPECTED_TRACKER_IMAGE_ID"
+          cleanup_check_container
+          trap - EXIT
+
+      - name: Record deployed source and image identity
+        env:
+          BOT_IMAGE: financetracker-bot:git-${{ github.event.workflow_run.head_sha }}
+          TRACKER_IMAGE: financetracker-tracker:git-${{ github.event.workflow_run.head_sha }}
+          REPORTER_IMAGE: financetracker-reporter:git-${{ github.event.workflow_run.head_sha }}
+          XRAY_CLIENT_IMAGE: financetracker-xray-client:git-${{ github.event.workflow_run.head_sha }}
+        run: |
+          {
+            printf '## FinanceTracker deploy identity\n\n'
+            printf -- '- CI run: `%s`\n' "$CI_RUN_ID"
+            printf -- '- Source SHA: `%s`\n' "$DEPLOY_SHA"
+            printf -- '- Image `%s`: `%s`\n' "$BOT_IMAGE" "$ACTUAL_BOT_IMAGE_ID"
+            printf -- '- Image `%s`: `%s`\n' "$TRACKER_IMAGE" "$ACTUAL_TRACKER_IMAGE_ID"
+            printf -- '- Image `%s`: `%s`\n' "$REPORTER_IMAGE" "$ACTUAL_REPORTER_IMAGE_ID"
+            printf -- '- Image `%s`: `%s`\n' "$XRAY_CLIENT_IMAGE" "$ACTUAL_XRAY_CLIENT_IMAGE_ID"
+            printf -- '- Migrate image: `%s`\n' "$ACTUAL_MIGRATE_IMAGE_ID"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Show post-deploy status
-        if: ${{ env.DEPLOY_MODE == 'deploy' }}
+        if: ${{ always() }}
         run: |
-          cd "$PROJECT_DIR"
-          docker compose ps --all
-          docker compose logs --tail=200 migrate bot tracker reporter
+          if test -n "${DEPLOY_DIR:-}" && test -d "$DEPLOY_DIR"; then
+            cd "$DEPLOY_DIR"
+            docker compose --env-file "$APP_ENV_FILE" ps --all
+          fi
+
+      - name: Remove disposable checkout
+        if: ${{ always() }}
+        run: |
+          case "${DEPLOY_DIR:-}" in
+            /tmp/financetracker-deploy.*) rm -rf -- "$DEPLOY_DIR" ;;
+            "") ;;
+            *) echo "refusing to remove unexpected deploy path" >&2; exit 1 ;;
+          esac
