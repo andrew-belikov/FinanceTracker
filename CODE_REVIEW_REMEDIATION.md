@@ -47,7 +47,7 @@ deployment, migration или security-последствия.
 
 | ID | Пакет | Ответственный агент | Воспроизводящий тест / автоматическая проверка | PR / commit | Статус | Локальные проверки | Независимое review | Production-доказательство |
 |---|---|---|---|---|---|---|---|---|
-| P0-01 | IR-00 | security | secret scan текущих файлов и Git history; синтетические VLESS fixtures | PR #27, #33 | REVIEWED | 317/317; tracked tree 0; history 0 | finance: repository part APPROVE | старая VLESS identity отсутствует; новая активна на обоих маршрутах `ru_hop`; homeserver xray healthy; значения не раскрывались |
+| P0-01 | IR-00 | security | secret scan текущих файлов и Git history; синтетические VLESS fixtures | PR #27, #33 | EXTERNAL_BLOCKED: branches/local clean; GitHub `refs/pull/1..25/head` pending Support purge | 317/317; tracked/local history 0; fresh GitHub mirror: 2 DB fallback findings только в read-only pull refs | finance: repository part APPROVE | старая VLESS identity отсутствует; новая активна на обоих маршрутах `ru_hop`; homeserver xray healthy; значения не раскрывались |
 | P1-01 | PR-03 | notifications | точные query-row contracts для income/invest jobs и callback markup | PR #30 | REVIEWED | 317/317; row/markup contracts PASS | security APPROVE | bot job smoke без `KeyError`; кнопка только у пополнения |
 | P1-02 | PR-02 | ci-deploy | workflow contract: green CI и равенство CI/deploy SHA | PR #28 | REVIEWED | 317/317; workflow contracts PASS | security APPROVE | CI/deploy run одного SHA |
 | P1-03 | PR-07 | data | table-driven day/month/year/DST local bounds → UTC `[start,end)` | PR #31, #33 | REVIEWED | 317/317; timezone/DST и year-chart boundary contracts PASS | adversarial final APPROVE | disposable PostgreSQL 16 подтвердил локальную границу года; production pending |
@@ -105,9 +105,15 @@ deployment, migration или security-последствия.
 ## Production gate
 
 Ротация скомпрометированной VLESS identity и согласованное переписывание Git
-history выполнены отдельно до merge: старая identity удалена, новый маршрут
-healthy, current/history scan не содержит находок. Значения credentials в
-доказательствах не сохраняются.
+history веток выполнены отдельно до merge: старая identity удалена, новый
+маршрут healthy, current/local history scan не содержит находок. Значения
+credentials в доказательствах не сохраняются.
+
+Свежий GitHub mirror подтвердил серверный остаток: read-only
+`refs/pull/1..25/head` старых закрытых PR сохраняют два value-safe finding одного
+legacy DB fallback. Ветки и `refs/pull/26..33` чисты. Обычным push эти refs не
+изменяются; для удаления cached views, PR refs и server-side объектов требуется
+GitHub Support purge по официальной процедуре sensitive-data removal.
 
 До отдельного разрешения владельца по-прежнему запрещены merge в `main` и
 production deploy remediation-кода. После такого разрешения production-
