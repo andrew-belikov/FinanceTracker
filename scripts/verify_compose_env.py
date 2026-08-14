@@ -12,6 +12,7 @@ EXPECTED = {
     "POSTGRES_DB": "compose_contract_db",
     "POSTGRES_USER": "compose_contract_user",
     "POSTGRES_PASSWORD": "compose_contract_password",
+    "REPORTER_SERVICE_KEY": "compose_contract_reporter_key",
 }
 
 
@@ -67,6 +68,18 @@ def main() -> int:
                 "DB_PASSWORD": EXPECTED["POSTGRES_PASSWORD"],
             }
             for service in ("migrate", "tracker", "bot", "reporter")
+        },
+        "bot": {
+            "DB_NAME": EXPECTED["POSTGRES_DB"],
+            "DB_USER": EXPECTED["POSTGRES_USER"],
+            "DB_PASSWORD": EXPECTED["POSTGRES_PASSWORD"],
+            "REPORTER_SERVICE_KEY": EXPECTED["REPORTER_SERVICE_KEY"],
+        },
+        "reporter": {
+            "DB_NAME": EXPECTED["POSTGRES_DB"],
+            "DB_USER": EXPECTED["POSTGRES_USER"],
+            "DB_PASSWORD": EXPECTED["POSTGRES_PASSWORD"],
+            "REPORTER_SERVICE_KEY": EXPECTED["REPORTER_SERVICE_KEY"],
         },
     }
     failures: list[str] = []
