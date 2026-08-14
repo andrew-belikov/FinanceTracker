@@ -41,6 +41,9 @@ services:
       timeout: 15s
       retries: 6
       start_period: 10s
+    networks:
+      - bot_proxy_internal
+      - xray_egress
     restart: unless-stopped
 
   migrate:
@@ -121,6 +124,7 @@ services:
       DB_PASSWORD: ${POSTGRES_PASSWORD}
       REPORTER_INTERNAL_URL: ${REPORTER_INTERNAL_URL:-http://reporter:8088}
       REPORTER_REQUEST_TIMEOUT_SECONDS: ${REPORTER_REQUEST_TIMEOUT_SECONDS:-180}
+      REPORTER_SERVICE_KEY: ${REPORTER_SERVICE_KEY:?REPORTER_SERVICE_KEY must be set}
       BOT_PROXY_ENABLED: ${BOT_PROXY_ENABLED:-false}
       BOT_PROXY_ENDPOINT: socks5h://xray-client:1080
       BOT_PROXY_NO_PROXY: localhost,127.0.0.1,db,tracker,reporter,xray-client
@@ -133,6 +137,10 @@ services:
       timeout: 5s
       retries: 4
       start_period: 30s
+    networks:
+      - default
+      - bot_proxy_internal
+      - bot_reporter_internal
     restart: unless-stopped
 
   reporter:
@@ -160,10 +168,17 @@ services:
       REPORTER_HOST: 0.0.0.0
       REPORTER_PORT: ${REPORTER_PORT:-8088}
       REPORTER_MAX_BODY_BYTES: ${REPORTER_MAX_BODY_BYTES:-65536}
+      REPORTER_SERVICE_KEY: ${REPORTER_SERVICE_KEY:?REPORTER_SERVICE_KEY must be set}
+      REPORTER_MAX_CONCURRENT_REQUESTS: ${REPORTER_MAX_CONCURRENT_REQUESTS:-2}
+      REPORTER_SOCKET_TIMEOUT_SECONDS: ${REPORTER_SOCKET_TIMEOUT_SECONDS:-10}
+      REPORTER_REQUEST_TIMEOUT_SECONDS: ${REPORTER_REQUEST_TIMEOUT_SECONDS:-180}
       REPORTER_INTERNAL_URL: ${REPORTER_INTERNAL_URL:-http://reporter:8088}
       REPORT_PDF_ENGINE: ${REPORT_PDF_ENGINE:-weasyprint}
       REPORT_DEBUG_SAVE_HTML: ${REPORT_DEBUG_SAVE_HTML:-false}
       REPORT_DEBUG_SAVE_PAYLOAD: ${REPORT_DEBUG_SAVE_PAYLOAD:-false}
+      REPORT_DEBUG_DIR: ${REPORT_DEBUG_DIR:-}
+      REPORT_DEBUG_MAX_FILES: ${REPORT_DEBUG_MAX_FILES:-10}
+      REPORT_DEBUG_MAX_AGE_SECONDS: ${REPORT_DEBUG_MAX_AGE_SECONDS:-86400}
       OLLAMA_ENABLED: ${OLLAMA_ENABLED:-false}
       OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://ollama:11434}
       OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen2.5:1.5b}
@@ -181,6 +196,7 @@ services:
       start_period: 5s
     networks:
       - default
+      - bot_reporter_internal
       - localllm_localllm
     restart: unless-stopped
 
@@ -190,6 +206,11 @@ volumes:
     name: financetracker_fintracker-db
 
 networks:
+  bot_proxy_internal:
+    internal: true
+  bot_reporter_internal:
+    internal: true
+  xray_egress: {}
   localllm_localllm:
     external: true
     name: localllm_localllm

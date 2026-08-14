@@ -30,6 +30,17 @@ class FakeResponse:
 
 
 class ReportClientTests(unittest.TestCase):
+    def setUp(self):
+        self.service_key_patch = mock.patch.object(
+            report_client,
+            "REPORTER_SERVICE_KEY",
+            "synthetic-service-key",
+        )
+        self.service_key_patch.start()
+
+    def tearDown(self):
+        self.service_key_patch.stop()
+
     def test_request_monthly_report_pdf_saves_pdf_to_temp_file(self):
         response = FakeResponse(
             b"%PDF-test",
@@ -50,8 +61,19 @@ class ReportClientTests(unittest.TestCase):
             proxy_handler = build_opener.call_args.args[0]
             self.assertEqual(proxy_handler.proxies, {})
             opener.open.assert_called_once()
+            sent_request = opener.open.call_args.args[0]
+            self.assertEqual(sent_request.get_header("X-reporter-service-key"), "synthetic-service-key")
         finally:
             Path(path).unlink(missing_ok=True)
+
+    def test_missing_service_key_fails_before_network(self):
+        with mock.patch.object(report_client, "REPORTER_SERVICE_KEY", ""), mock.patch.object(
+            report_client.request,
+            "build_opener",
+        ) as build_opener:
+            with self.assertRaises(report_client.ReporterClientError):
+                report_client.request_monthly_report_pdf(year=2026, month=4)
+        build_opener.assert_not_called()
 
     def test_request_monthly_report_pdf_surfaces_http_json_error(self):
         http_error = error.HTTPError(

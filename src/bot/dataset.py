@@ -4,6 +4,7 @@ import tempfile
 import zipfile
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
+from pathlib import Path
 
 from common.text_utils import has_mojibake
 from queries import (
@@ -527,10 +528,6 @@ def create_dataset_archive() -> tuple[str, str]:
         dataset, daily_rows, positions_rows, operations_rows, income_rows = build_dataset_export(session)
 
     archive_name = f"fintracker_dataset_{dataset['meta']['period_end']}.zip"
-    archive_tmp = tempfile.NamedTemporaryFile(prefix="fintracker_dataset_", suffix=".zip", delete=False)
-    archive_path = archive_tmp.name
-    archive_tmp.close()
-
     json_text = json.dumps(dataset, ensure_ascii=False, indent=2, default=json_default)
     readme_text = build_dataset_readme(dataset)
 
@@ -646,12 +643,31 @@ def create_dataset_archive() -> tuple[str, str]:
         write_csv_file(os.path.join(temp_dir, "operations.csv"), operations_fields, operations_rows)
         write_csv_file(os.path.join(temp_dir, "income_events.csv"), income_fields, income_rows)
 
-        with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-            archive.write(dataset_json_path, arcname="dataset.json")
-            archive.write(readme_path, arcname="README_AI.md")
-            archive.write(os.path.join(temp_dir, "daily_timeseries.csv"), arcname="daily_timeseries.csv")
-            archive.write(os.path.join(temp_dir, "positions_current.csv"), arcname="positions_current.csv")
-            archive.write(os.path.join(temp_dir, "operations.csv"), arcname="operations.csv")
-            archive.write(os.path.join(temp_dir, "income_events.csv"), arcname="income_events.csv")
+        archive_path = None
+        try:
+            archive_tmp = tempfile.NamedTemporaryFile(
+                prefix="fintracker_dataset_",
+                suffix=".zip",
+                delete=False,
+            )
+            archive_path = archive_tmp.name
+            archive_tmp.close()
+            with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+                archive.write(dataset_json_path, arcname="dataset.json")
+                archive.write(readme_path, arcname="README_AI.md")
+                archive.write(
+                    os.path.join(temp_dir, "daily_timeseries.csv"),
+                    arcname="daily_timeseries.csv",
+                )
+                archive.write(
+                    os.path.join(temp_dir, "positions_current.csv"),
+                    arcname="positions_current.csv",
+                )
+                archive.write(os.path.join(temp_dir, "operations.csv"), arcname="operations.csv")
+                archive.write(os.path.join(temp_dir, "income_events.csv"), arcname="income_events.csv")
+        except BaseException:
+            if archive_path is not None:
+                Path(archive_path).unlink(missing_ok=True)
+            raise
 
     return archive_path, archive_name

@@ -2,6 +2,7 @@ import os
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from decimal import Decimal
 from pathlib import Path
 
@@ -207,12 +208,12 @@ class ReportRenderTests(unittest.TestCase):
 
     def test_save_debug_report_html_writes_file(self):
         html = "<html><body>test</body></html>"
-        path = report_render.save_debug_report_html(html)
-        try:
+        with tempfile.TemporaryDirectory() as parent:
+            directory = Path(parent).resolve() / "debug"
+            with mock.patch.dict(os.environ, {"REPORT_DEBUG_DIR": str(directory)}):
+                path = report_render.save_debug_report_html(html)
             self.assertTrue(Path(path).exists())
             self.assertIn("test", Path(path).read_text(encoding="utf-8"))
-        finally:
-            Path(path).unlink(missing_ok=True)
 
 
 if __name__ == "__main__":
