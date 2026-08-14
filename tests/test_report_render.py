@@ -131,6 +131,17 @@ class ReportRenderTests(unittest.TestCase):
         self.assertTrue(narrative["executive_summary"])
         self.assertTrue(narrative["performance_commentary"])
 
+    def test_deterministic_cashflow_notes_show_tax_refund_separately(self):
+        payload = MonthlyReportPayloadBuilderTests()._build_payload(tax_refunds=Decimal("18"))
+
+        narrative = report_render.build_deterministic_monthly_narrative(payload)
+
+        tax_note = next(item for item in narrative["cashflow_notes"] if "налоги:" in item)
+        refund_note = next(item for item in narrative["cashflow_notes"] if "Возврат налога:" in item)
+        self.assertIn("12.10 ₽", tax_note)
+        self.assertNotIn("18.00 ₽", tax_note)
+        self.assertIn("18.00 ₽", refund_note)
+
     def test_build_monthly_report_html_renders_five_pages_and_embeds_charts(self):
         payload = build_sample_payload()
         charts = report_render.build_monthly_report_charts(payload)

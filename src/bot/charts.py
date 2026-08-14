@@ -13,10 +13,12 @@ from queries import (
     get_first_snapshot_in_period,
     get_last_snapshot_before_date,
     get_monthly_deposits,
+    get_monthly_net_external_flows,
     get_iis_tax_deductions_by_date,
     get_monthly_iis_tax_deductions,
     get_monthly_portfolio_values,
     get_portfolio_timeseries,
+    get_net_external_flow_for_period,
     resolve_reporting_account_id,
 )
 from runtime import (
@@ -655,14 +657,19 @@ def build_year_monthly_delta_chart(path: str, year: int, end_date_exclusive: dat
             raise ValueError(REPORTING_ACCOUNT_UNAVAILABLE_TEXT)
 
         portfolio_rows = get_monthly_portfolio_values(session, account_id, period_start_dt, period_end_dt_exclusive, is_ytd)
-        deposits_rows = get_monthly_deposits(session, account_id, period_start_dt, period_end_dt_exclusive)
+        external_flow_rows = get_monthly_net_external_flows(
+            session,
+            account_id,
+            period_start_dt,
+            period_end_dt_exclusive,
+        )
 
         if not portfolio_rows:
             return None
 
-        deposits_by_month = {
+        external_flow_by_month = {
             row["month_start"]: float(row["amount"] or 0)
-            for row in deposits_rows
+            for row in external_flow_rows
         }
 
         months = [row["month_start"] for row in portfolio_rows]
@@ -679,30 +686,32 @@ def build_year_monthly_delta_chart(path: str, year: int, end_date_exclusive: dat
         first_snapshot = get_first_snapshot_in_period(session, account_id, first_month_start, first_month_end_exclusive)
         first_month_base = float(first_snapshot["total_value"] or 0) if first_snapshot is not None else values[0]
         first_period_start = first_snapshot["snapshot_date"] if first_snapshot is not None else first_month_start
+        has_pre_period_baseline = False
 
         if first_month_start.month == 1:
             prev_snapshot = get_last_snapshot_before_date(session, account_id, first_month_start)
             if prev_snapshot is not None:
                 first_month_base = float(prev_snapshot["total_value"] or 0)
                 first_period_start = first_month_start
+                has_pre_period_baseline = True
 
-        if first_period_start == first_month_start:
-            first_month_deposits = deposits_by_month.get(first_month_start, 0.0)
+        if has_pre_period_baseline:
+            first_month_external_flow = external_flow_by_month.get(first_month_start, 0.0)
         else:
-            first_month_deposits = get_deposits_sum_for_period(
+            first_month_external_flow = get_net_external_flow_for_period(
                 session,
                 account_id,
-                datetime.combine(first_period_start, time.min),
+                datetime.combine(first_period_start + timedelta(days=1), time.min),
                 datetime.combine(first_month_end_exclusive, time.min),
             )
 
-        first_month_delta = values[0] - first_month_base - first_month_deposits
+        first_month_delta = values[0] - first_month_base - first_month_external_flow
         delta_points.append((months[0], first_month_delta))
 
         for idx in range(1, len(months)):
             month_start = months[idx]
-            month_deposits = deposits_by_month.get(month_start, 0.0)
-            month_delta = values[idx] - values[idx - 1] - month_deposits
+            month_external_flow = external_flow_by_month.get(month_start, 0.0)
+            month_delta = values[idx] - values[idx - 1] - month_external_flow
             delta_points.append((month_start, month_delta))
 
     if not delta_points:
@@ -716,7 +725,7 @@ def build_year_monthly_delta_chart(path: str, year: int, end_date_exclusive: dat
     best_idx = max(range(len(deltas)), key=lambda idx: deltas[idx])
     worst_idx = min(range(len(deltas)), key=lambda idx: deltas[idx])
     subtitle = (
-        f"Без собственных пополнений; вычеты ИИС входят в результат. Лучший месяц: {format_month_short_label(month_labels[best_idx])} "
+        f"Без внешних пополнений и выводов; вычеты ИИС входят в результат. Лучший месяц: {format_month_short_label(month_labels[best_idx])} "
         f"{fmt_compact_rub(deltas[best_idx], signed=True)}, "
         f"худший: {format_month_short_label(month_labels[worst_idx])} "
         f"{fmt_compact_rub(deltas[worst_idx], signed=True)}."

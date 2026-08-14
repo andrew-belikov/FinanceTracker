@@ -157,7 +157,7 @@ class ReportPayloadHelpersTests(unittest.TestCase):
 
 
 class MonthlyReportPayloadBuilderTests(unittest.TestCase):
-    def _build_payload(self):
+    def _build_payload(self, *, tax_refunds=Decimal("0")):
         fake_session = FakeSession()
         start_snapshot = {
             "id": 10,
@@ -370,6 +370,42 @@ class MonthlyReportPayloadBuilderTests(unittest.TestCase):
                 "price": Decimal("0"),
                 "quantity": Decimal("0"),
             },
+            {
+                "operation_id": "withdrawal-1",
+                "date": datetime(2026, 4, 25, 10, tzinfo=timezone.utc),
+                "amount": Decimal("-500"),
+                "currency": "RUB",
+                "operation_type": "OPERATION_TYPE_OUTPUT",
+                "state": "OPERATION_STATE_EXECUTED",
+                "instrument_uid": None,
+                "asset_uid": None,
+                "figi": None,
+                "name": "Вывод",
+                "commission": Decimal("0"),
+                "yield": Decimal("0"),
+                "description": "withdrawal",
+                "source": "broker",
+                "price": Decimal("0"),
+                "quantity": Decimal("0"),
+            },
+            {
+                "operation_id": "foreign-deposit-1",
+                "date": datetime(2026, 4, 10, 10, tzinfo=timezone.utc),
+                "amount": Decimal("10"),
+                "currency": "usd",
+                "operation_type": "OPERATION_TYPE_INPUT",
+                "state": "OPERATION_STATE_EXECUTED",
+                "instrument_uid": None,
+                "asset_uid": None,
+                "figi": None,
+                "name": "Foreign deposit",
+                "commission": Decimal("0"),
+                "yield": Decimal("0"),
+                "description": "synthetic foreign deposit",
+                "source": "test",
+                "price": Decimal("0"),
+                "quantity": Decimal("0"),
+            },
         ]
         income_rows = [
             {
@@ -473,11 +509,11 @@ class MonthlyReportPayloadBuilderTests(unittest.TestCase):
                 ),
             ),
             mock.patch.object(report_payload, "get_deposits_for_period", side_effect=deposits_for_period),
-            mock.patch.object(report_payload, "get_net_external_flow_for_period", return_value=Decimal("4500")),
             mock.patch.object(report_payload, "get_income_for_period", return_value=(Decimal("128.60"), Decimal("50.25"))),
             mock.patch.object(report_payload, "get_iis_tax_deductions_for_period", return_value=Decimal("52000")),
             mock.patch.object(report_payload, "get_commissions_for_period", return_value=Decimal("35")),
             mock.patch.object(report_payload, "get_taxes_for_period", return_value=Decimal("12.10")),
+            mock.patch.object(report_payload, "get_tax_refunds_for_period", return_value=tax_refunds),
             mock.patch.object(
                 report_payload,
                 "get_rebalance_targets",
@@ -522,6 +558,16 @@ class MonthlyReportPayloadBuilderTests(unittest.TestCase):
         self.assertEqual(payload["summary_metrics"]["start_value"], "10000")
         self.assertEqual(payload["summary_metrics"]["end_value"], "11150")
         self.assertEqual(payload["summary_metrics"]["withdrawals"], "500")
+        self.assertEqual(payload["summary_metrics"]["net_external_flow"], "4500")
+        self.assertEqual(payload["data_quality"]["unsupported_operation_currencies"], ["USD"])
+        self.assertEqual(
+            next(
+                item
+                for item in payload["operation_cashflows_by_currency"]
+                if item["currency"] == "USD"
+            )["deposits"],
+            "10",
+        )
         self.assertEqual(payload["summary_metrics"]["period_twr_pct"], "8.1")
         self.assertEqual(payload["summary_metrics"]["open_pl_end_total"], "315")
         self.assertEqual(payload["summary_metrics"]["iis_tax_deduction_income"], "52000")
@@ -541,6 +587,20 @@ class MonthlyReportPayloadBuilderTests(unittest.TestCase):
         self.assertEqual(ai_input["meta"]["style"], "calm precise non-promotional")
         self.assertTrue(ai_input["overview_facts"]["highlights"])
         self.assertLessEqual(len(ai_input["cashflow_facts"]["operations_top"]), 5)
+
+    def test_tax_refund_is_a_separate_ai_overview_and_cashflow_fact(self):
+        payload = self._build_payload(tax_refunds=Decimal("18"))
+        ai_input = report_payload.build_monthly_ai_input(payload, max_input_chars=None)
+
+        self.assertEqual(payload["summary_metrics"]["taxes"], "12.10")
+        self.assertEqual(payload["summary_metrics"]["tax_refunds"], "18")
+        self.assertEqual(ai_input["overview_facts"]["taxes"], "12.10 ₽")
+        self.assertEqual(ai_input["overview_facts"]["tax_refunds"], "18.00 ₽")
+        self.assertEqual(ai_input["cashflow_facts"]["taxes"], "12.10 ₽")
+        self.assertEqual(ai_input["cashflow_facts"]["tax_refunds"], "18.00 ₽")
+        self.assertTrue(
+            any("Возврат налога" in item and "18.00 ₽" in item for item in ai_input["overview_facts"]["highlights"])
+        )
 
 
 if __name__ == "__main__":

@@ -641,6 +641,7 @@ def build_deterministic_monthly_narrative(payload: dict[str, Any]) -> dict[str, 
         f"всего доходов: {_display_rub(summary.get('total_income_net'), precision=2)}, "
         f"комиссии: {_display_rub(summary.get('commissions'), precision=2)}, "
         f"налоги: {_display_rub(summary.get('taxes'), precision=2)}.",
+        f"Возврат налога: {_display_rub(summary.get('tax_refunds'), precision=2)}.",
     ]
 
     quality_notes: list[str] = []
