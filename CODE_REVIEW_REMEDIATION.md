@@ -48,7 +48,7 @@ deployment, migration или security-последствия.
 | ID | Пакет | Ответственный агент | Воспроизводящий тест / автоматическая проверка | PR / commit | Статус | Локальные проверки | Независимое review | Production-доказательство |
 |---|---|---|---|---|---|---|---|---|
 | P0-01 | IR-00 | security | secret scan текущих файлов и Git history; синтетические VLESS fixtures | `51ed49c`, `29a9db3` | EXTERNAL_BLOCKED: tracked tree clean, rotation/history pending | 258/258; tracked tree 0; history 14 value-safe findings | finance: repository part APPROVE | отзыв двух server-side VLESS identities; history rewrite только после отдельного разрешения |
-| P1-01 | PR-03 | notifications | точные query-row contracts для income/invest jobs и callback markup | pending | CONFIRMED | pending | data | bot job smoke без `KeyError`; кнопка только у пополнения |
+| P1-01 | PR-03 | notifications | точные query-row contracts для income/invest jobs и callback markup | `7a75ad7` | REVIEWED | 270/270; row/markup contracts PASS | security APPROVE | bot job smoke без `KeyError`; кнопка только у пополнения |
 | P1-02 | PR-02 | ci-deploy | workflow contract: green CI и равенство CI/deploy SHA | `55d11f2` | REVIEWED | 258/258; workflow contracts PASS | security APPROVE | CI/deploy run одного SHA |
 | P1-03 | PR-07 | data | table-driven day/month/year/DST local bounds → UTC `[start,end)` | pending | CONFIRMED | pending | finance | tracker sync и отчётные границы без ошибок |
 | P1-04 | PR-08 | finance | withholding `-13` + operation tax `-5` = expense `18`; tax refund отдельно | `b1a81ab`, `3b78422` | REVIEWED | 258/258; tax/refund contracts PASS | ci APPROVE | очищенный отчётный smoke |
@@ -67,8 +67,8 @@ deployment, migration или security-последствия.
 | P2-03 | PR-10 | data | cost basis snapshot до/после event; late tax сохраняет as-of basis | pending | CONFIRMED | pending | finance | reconciliation smoke |
 | P2-04 | PR-10 | data | explicit canceled деактивирует; неполное окно не деактивирует | pending | CONFIRMED | pending | finance | tracker reconciliation smoke |
 | P2-05 | PR-08 | finance | withdrawal-only и mixed-flow month | `b1a81ab`, `3b78422` | REVIEWED | 258/258; year-chart contracts PASS | ci APPROVE | year-chart smoke владельцем |
-| P2-06 | PR-04 | notifications | fresh/stale/completed lease и fenced finalize старого owner | pending | CONFIRMED | pending | ci-deploy | scheduler lease ledger |
-| P2-07 | PR-04 | notifications | timeout без retry; parse error один fallback; recipient idempotency/concurrency | pending | CONFIRMED | pending | security | очищенный delivery smoke |
+| P2-06 | PR-04 | notifications | fresh/stale/completed lease и fenced finalize старого owner | `7a75ad7` | REVIEWED | 270/270; lease/fencing contracts PASS | security APPROVE | scheduler lease ledger; disposable PostgreSQL pending |
+| P2-07 | PR-04 | notifications | timeout без retry; parse error один fallback; recipient idempotency/concurrency | `7a75ad7`, `90bd645`, `c947ff3` | REVIEWED | 270/270; timeout/BadRequest/partial contracts PASS | security APPROVE | очищенный delivery smoke |
 | P2-08 | PR-10 | data | catalog/ledger до и после `migrate --check` идентичны | pending | CONFIRMED | pending | ci-deploy | production `migrate --check` read-only |
 | P2-09 | PR-10 | data | PostgreSQL без `income_events`: savepoint/fallback продолжает запросы | pending | CONFIRMED | pending | finance | PostgreSQL integration evidence |
 | P2-10 | PR-10 | data | malformed date не меняет DB/watermark и не логирует payload | pending | CONFIRMED | pending | security | tracker sync без date errors |
@@ -82,7 +82,7 @@ deployment, migration или security-последствия.
 | P2-18 | PR-05 | security | missing DB secret fail-fast без DSN в логах | `51ed49c`, `29a9db3`, `81d8642` | REVIEWED | 258/258; entrypoint fail-fast PASS | ci APPROVE | startup config evidence без секрета |
 | P2-19 | PR-13 | security | concurrent history/TWR paths уникальны; cleanup success/error | pending | CONFIRMED | pending | notifications | temp-artifact absence после smoke |
 | P2-20 | PR-13 | security | slow builder не блокирует heartbeat; timeout освобождает budget | pending | CONFIRMED | pending | notifications | bot responsiveness smoke |
-| P2-21 | PR-04 | notifications | partial recipients: retry только failed, затем complete | pending | CONFIRMED | pending | adversarial | recipient delivery ledger |
+| P2-21 | PR-04 | notifications | partial recipients: retry только failed, затем complete | `7a75ad7`, `90bd645`, `c947ff3` | REVIEWED | 270/270; recipient ledger contracts PASS | security APPROVE | recipient delivery ledger; disposable PostgreSQL pending |
 | P3-01 | PR-01 | ci-deploy | clean locked install с hashes; action refs immutable | `55d11f2`, `3633f03` | REVIEWED | locked Python 3.12; 258/258; hash contracts PASS | security APPROVE | CI exact dependency evidence |
 | P3-02 | PR-13 | security | protected debug dir, retention и cleanup | pending | CONFIRMED | pending | adversarial | отсутствие persistent debug artifacts |
 | P3-03 | PR-13 | security | CSV cells `=`, `+`, `-`, `@` нейтрализуются | pending | CONFIRMED | pending | finance | dataset archive inspection без данных пользователя |

@@ -21,6 +21,11 @@ def fake_db_session():
     yield object()
 
 
+async def deliver_now(**kwargs):
+    await kwargs["send"]()
+    return True
+
+
 class MonthPdfDeliveryTests(unittest.TestCase):
     def _build_context(self):
         return SimpleNamespace(bot=object())
@@ -38,6 +43,8 @@ class MonthPdfDeliveryTests(unittest.TestCase):
                  patch.object(jobs, "claim_daily_job_run", side_effect=[True, True]), \
                  patch.object(jobs, "complete_daily_job_run") as complete_run, \
                  patch.object(jobs, "release_daily_job_run") as release_run, \
+                 patch.object(jobs, "_send_tracked_notification", side_effect=deliver_now), \
+                 patch.object(jobs, "_heartbeat_scheduled_job_run", return_value=True), \
                  patch.object(jobs, "build_month_summary", return_value="fallback month"), \
                  patch.object(jobs, "build_triggers_messages", return_value=[]), \
                  patch.object(jobs, "build_week_summary") as build_week_summary, \
@@ -63,12 +70,14 @@ class MonthPdfDeliveryTests(unittest.TestCase):
                     {
                         "job_name": jobs.DAILY_JOB_NAME,
                         "run_date": today.date(),
+                        "attempt_id": ANY,
                         "sent_total": 1,
                         "failed_total": 0,
                     },
                     {
                         "job_name": jobs.MONTHLY_PDF_JOB_NAME,
                         "run_date": today.date(),
+                        "attempt_id": ANY,
                         "sent_total": 1,
                         "failed_total": 0,
                     },
@@ -86,6 +95,8 @@ class MonthPdfDeliveryTests(unittest.TestCase):
              patch.object(jobs, "claim_daily_job_run", side_effect=[True, True]), \
              patch.object(jobs, "complete_daily_job_run") as complete_run, \
              patch.object(jobs, "release_daily_job_run") as release_run, \
+             patch.object(jobs, "_send_tracked_notification", side_effect=deliver_now), \
+             patch.object(jobs, "_heartbeat_scheduled_job_run", return_value=True), \
              patch.object(jobs, "build_month_summary", return_value="fallback month"), \
              patch.object(jobs, "build_triggers_messages", return_value=[]), \
              patch.object(
@@ -103,6 +114,7 @@ class MonthPdfDeliveryTests(unittest.TestCase):
             ANY,
             job_name=jobs.MONTHLY_PDF_JOB_NAME,
             run_date=today.date(),
+            attempt_id=ANY,
         )
         complete_calls = [call.kwargs for call in complete_run.call_args_list]
         self.assertEqual(
@@ -111,6 +123,7 @@ class MonthPdfDeliveryTests(unittest.TestCase):
                 {
                     "job_name": jobs.DAILY_JOB_NAME,
                     "run_date": today.date(),
+                    "attempt_id": ANY,
                     "sent_total": 1,
                     "failed_total": 0,
                 },
@@ -130,6 +143,8 @@ class MonthPdfDeliveryTests(unittest.TestCase):
                  patch.object(jobs, "claim_daily_job_run", side_effect=[False, True]), \
                  patch.object(jobs, "complete_daily_job_run") as complete_run, \
                  patch.object(jobs, "release_daily_job_run") as release_run, \
+                 patch.object(jobs, "_send_tracked_notification", side_effect=deliver_now), \
+                 patch.object(jobs, "_heartbeat_scheduled_job_run", return_value=True), \
                  patch.object(jobs, "build_month_summary", return_value="fallback month"), \
                  patch.object(jobs, "build_triggers_messages", return_value=[]), \
                  patch.object(jobs, "build_week_summary") as build_week_summary, \
@@ -150,6 +165,7 @@ class MonthPdfDeliveryTests(unittest.TestCase):
                 ANY,
                 job_name=jobs.MONTHLY_PDF_JOB_NAME,
                 run_date=today.date(),
+                attempt_id=ANY,
                 sent_total=1,
                 failed_total=0,
             )

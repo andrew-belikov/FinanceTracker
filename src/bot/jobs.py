@@ -2,20 +2,29 @@ from __future__ import annotations
 
 import asyncio
 import os
+import uuid
 from datetime import datetime, timedelta, timezone
 
+from telegram.error import BadRequest, NetworkError
 from telegram.ext import ContextTypes
 
 from common.finance import annualize_simple_yield_pct
 from iis_tax_deduction import build_iis_tax_deduction_markup
 from queries import (
     claim_daily_job_run,
+    claim_notification_delivery,
     complete_daily_job_run,
+    complete_notification_delivery,
     get_pending_invest_notifications,
+    get_notification_delivery_status,
     get_unnotified_income_events,
+    heartbeat_daily_job_run,
     mark_income_event_notified,
     mark_invest_notification_sent,
+    mark_notification_delivery_uncertain,
+    notification_deliveries_complete,
     release_daily_job_run,
+    release_notification_delivery,
     resolve_reporting_account_id,
 )
 from report_client import ReporterClientError, request_monthly_report_pdf
@@ -157,9 +166,15 @@ def _claim_scheduled_job_run(
     run_date,
     trigger_source: str,
     scheduled_for: str,
-) -> tuple[bool, bool]:
+) -> tuple[bool, bool, str | None]:
+    attempt_id = uuid.uuid4().hex
     with db_session() as session:
-        run_claimed = claim_daily_job_run(session, job_name=job_name, run_date=run_date)
+        run_claimed = claim_daily_job_run(
+            session,
+            job_name=job_name,
+            run_date=run_date,
+            attempt_id=attempt_id,
+        )
 
     if run_claimed is False:
         logger.info(
@@ -172,7 +187,7 @@ def _claim_scheduled_job_run(
                 "job_name": job_name,
             },
         )
-        return False, True
+        return False, True, None
 
     if run_claimed is None:
         logger.warning(
@@ -184,45 +199,171 @@ def _claim_scheduled_job_run(
                 "job_name": job_name,
             },
         )
-        return True, False
+        return False, False, None
 
-    return True, True
+    return True, True, attempt_id
+
+
+def _heartbeat_scheduled_job_run(
+    *,
+    tracking_available: bool,
+    job_name: str,
+    run_date,
+    attempt_id: str | None,
+) -> bool:
+    if not tracking_available or attempt_id is None:
+        return False
+    with db_session() as session:
+        return heartbeat_daily_job_run(
+            session,
+            job_name=job_name,
+            run_date=run_date,
+            attempt_id=attempt_id,
+        ) is True
 
 
 def _finalize_scheduled_job_run(
     *,
     tracking_available: bool,
+    attempt_id: str | None,
     job_name: str,
     run_date,
     trigger_source: str,
     sent_total: int,
     failed_total: int,
 ) -> None:
-    if not tracking_available:
+    if not tracking_available or attempt_id is None:
         return
 
     with db_session() as session:
-        if should_release_daily_job_run(sent_total=sent_total, failed_total=failed_total):
-            release_daily_job_run(session, job_name=job_name, run_date=run_date)
+        if failed_total > 0:
+            released = release_daily_job_run(
+                session,
+                job_name=job_name,
+                run_date=run_date,
+                attempt_id=attempt_id,
+            )
             logger.warning(
                 "daily_job_run_released_for_retry",
-                "Released daily job claim because all sends failed.",
+                "Released scheduled job claim because at least one intended delivery failed.",
                 {
                     "today": run_date.isoformat(),
                     "trigger_source": trigger_source,
                     "sent_total": sent_total,
                     "failed_total": failed_total,
                     "job_name": job_name,
+                    "released": bool(released),
                 },
             )
         else:
-            complete_daily_job_run(
+            completed = complete_daily_job_run(
                 session,
                 job_name=job_name,
                 run_date=run_date,
+                attempt_id=attempt_id,
                 sent_total=sent_total,
                 failed_total=failed_total,
             )
+            if not completed:
+                logger.warning(
+                    "daily_job_run_fence_rejected",
+                    "Scheduled job completion was rejected because the lease owner changed.",
+                    {"today": run_date.isoformat(), "job_name": job_name},
+                )
+
+
+async def _send_tracked_notification(
+    *,
+    notification_kind: str,
+    notification_key: str,
+    chat_id: int,
+    message_type: str,
+    send,
+    reclaim_stale: bool = True,
+) -> bool:
+    attempt_id = uuid.uuid4().hex
+    with db_session() as session:
+        claimed = claim_notification_delivery(
+            session,
+            notification_kind=notification_kind,
+            notification_key=notification_key,
+            chat_id=chat_id,
+            message_type=message_type,
+            attempt_id=attempt_id,
+            reclaim_stale=reclaim_stale,
+        )
+    if claimed is None:
+        raise RuntimeError("Notification delivery ledger migration is unavailable")
+    if not claimed:
+        with db_session() as session:
+            delivery_status = get_notification_delivery_status(
+                session,
+                notification_kind=notification_kind,
+                notification_key=notification_key,
+                chat_id=chat_id,
+                message_type=message_type,
+            )
+        if delivery_status == "sent":
+            return False
+        if delivery_status == "uncertain":
+            if reclaim_stale:
+                raise RuntimeError("Notification delivery has an ambiguous outcome")
+            return False
+        raise RuntimeError("Notification delivery is owned by another active worker")
+
+    try:
+        await send()
+    except Exception as exc:
+        with db_session() as session:
+            if isinstance(exc, NetworkError) and not isinstance(exc, BadRequest):
+                mark_notification_delivery_uncertain(
+                    session,
+                    notification_kind=notification_kind,
+                    notification_key=notification_key,
+                    chat_id=chat_id,
+                    message_type=message_type,
+                    attempt_id=attempt_id,
+                )
+            else:
+                release_notification_delivery(
+                    session,
+                    notification_kind=notification_kind,
+                    notification_key=notification_key,
+                    chat_id=chat_id,
+                    message_type=message_type,
+                    attempt_id=attempt_id,
+                )
+        raise
+
+    with db_session() as session:
+        completed = complete_notification_delivery(
+            session,
+            notification_kind=notification_kind,
+            notification_key=notification_key,
+            chat_id=chat_id,
+            message_type=message_type,
+            attempt_id=attempt_id,
+        )
+    if not completed:
+        raise RuntimeError("Notification delivery lease was lost before completion")
+    return True
+
+
+def _all_notification_deliveries_complete(
+    *,
+    notification_kind: str,
+    notification_key: str,
+    message_types: set[str],
+) -> bool:
+    with db_session() as session:
+        completed = notification_deliveries_complete(
+            session,
+            notification_kind=notification_kind,
+            notification_key=notification_key,
+            chat_ids=set(TARGET_CHAT_IDS),
+            message_types=message_types,
+        )
+    return completed is True
 
 
 async def jobqueue_smoke_test_job(context: ContextTypes.DEFAULT_TYPE):
@@ -420,7 +561,7 @@ async def _run_payout_weekly_job(
     now_local = now_local or datetime.now(PAYOUT_WEEKLY_TZ)
     week_start = now_local.date()
     week_end = week_start + timedelta(days=6)
-    should_run, tracking_available = _claim_scheduled_job_run(
+    should_run, tracking_available, run_attempt_id = _claim_scheduled_job_run(
         job_name=PAYOUT_WEEKLY_JOB_NAME,
         run_date=week_start,
         trigger_source=trigger_source,
@@ -469,19 +610,45 @@ async def _run_payout_weekly_job(
         )
 
     if message:
+        if not _heartbeat_scheduled_job_run(
+            tracking_available=tracking_available,
+            job_name=PAYOUT_WEEKLY_JOB_NAME,
+            run_date=week_start,
+            attempt_id=run_attempt_id,
+        ):
+            return
         for chat_id in TARGET_CHAT_IDS:
+            if not _heartbeat_scheduled_job_run(
+                tracking_available=tracking_available,
+                job_name=PAYOUT_WEEKLY_JOB_NAME,
+                run_date=week_start,
+                attempt_id=run_attempt_id,
+            ):
+                return
             try:
-                await safe_send_message(context.bot, chat_id, message, parse_mode=None)
-                sent_total += 1
-                logger.info(
-                    "payout_weekly_sent",
-                    "Weekly payout digest sent.",
-                    {
-                        "chat_id": chat_id,
-                        "week_start": week_start.isoformat(),
-                        "week_end": week_end.isoformat(),
-                    },
+                delivered_now = await _send_tracked_notification(
+                    notification_kind="scheduled_job",
+                    notification_key=f"{PAYOUT_WEEKLY_JOB_NAME}:{week_start.isoformat()}",
+                    chat_id=chat_id,
+                    message_type="weekly_payout_digest",
+                    send=lambda chat_id=chat_id: safe_send_message(
+                        context.bot,
+                        chat_id,
+                        message,
+                        parse_mode=None,
+                    ),
                 )
+                sent_total += int(delivered_now)
+                if delivered_now:
+                    logger.info(
+                        "payout_weekly_sent",
+                        "Weekly payout digest sent.",
+                        {
+                            "chat_id": chat_id,
+                            "week_start": week_start.isoformat(),
+                            "week_end": week_end.isoformat(),
+                        },
+                    )
             except Exception:
                 failed_total += 1
                 logger.exception(
@@ -496,6 +663,7 @@ async def _run_payout_weekly_job(
 
     _finalize_scheduled_job_run(
         tracking_available=tracking_available,
+        attempt_id=run_attempt_id,
         job_name=PAYOUT_WEEKLY_JOB_NAME,
         run_date=week_start,
         trigger_source=trigger_source,
@@ -527,7 +695,7 @@ async def _run_yesterday_peak_alert_job(
     target_date = now_local.date() - timedelta(days=1)
     started_at = datetime.now(TZ)
     started_monotonic = datetime.now(timezone.utc)
-    should_run, tracking_available = _claim_scheduled_job_run(
+    should_run, tracking_available, run_attempt_id = _claim_scheduled_job_run(
         job_name=YESTERDAY_PEAK_ALERT_JOB_NAME,
         run_date=target_date,
         trigger_source=trigger_source,
@@ -563,15 +731,43 @@ async def _run_yesterday_peak_alert_job(
         )
 
     if message:
+        if not _heartbeat_scheduled_job_run(
+            tracking_available=tracking_available,
+            job_name=YESTERDAY_PEAK_ALERT_JOB_NAME,
+            run_date=target_date,
+            attempt_id=run_attempt_id,
+        ):
+            return
         for chat_id in TARGET_CHAT_IDS:
+            if not _heartbeat_scheduled_job_run(
+                tracking_available=tracking_available,
+                job_name=YESTERDAY_PEAK_ALERT_JOB_NAME,
+                run_date=target_date,
+                attempt_id=run_attempt_id,
+            ):
+                return
             try:
-                await safe_send_message(context.bot, chat_id, message, parse_mode="Markdown")
-                sent_total += 1
-                logger.info(
-                    "yesterday_peak_alert_sent",
-                    "Yesterday peak alert sent.",
-                    {"chat_id": chat_id, "target_date": target_date.isoformat()},
+                delivered_now = await _send_tracked_notification(
+                    notification_kind="scheduled_job",
+                    notification_key=(
+                        f"{YESTERDAY_PEAK_ALERT_JOB_NAME}:{target_date.isoformat()}"
+                    ),
+                    chat_id=chat_id,
+                    message_type="yesterday_peak_alert",
+                    send=lambda chat_id=chat_id: safe_send_message(
+                        context.bot,
+                        chat_id,
+                        message,
+                        parse_mode="Markdown",
+                    ),
                 )
+                sent_total += int(delivered_now)
+                if delivered_now:
+                    logger.info(
+                        "yesterday_peak_alert_sent",
+                        "Yesterday peak alert sent.",
+                        {"chat_id": chat_id, "target_date": target_date.isoformat()},
+                    )
             except Exception:
                 failed_total += 1
                 logger.exception(
@@ -582,6 +778,7 @@ async def _run_yesterday_peak_alert_job(
 
     _finalize_scheduled_job_run(
         tracking_available=tracking_available,
+        attempt_id=run_attempt_id,
         job_name=YESTERDAY_PEAK_ALERT_JOB_NAME,
         run_date=target_date,
         trigger_source=trigger_source,
@@ -626,7 +823,7 @@ async def _run_daily_job(
     started_at = datetime.now(TZ)
     started_monotonic = datetime.now(timezone.utc)
     scheduled_for = DAILY_JOB_SCHEDULE_LABEL
-    daily_should_run, daily_tracking_available = _claim_scheduled_job_run(
+    daily_should_run, daily_tracking_available, daily_attempt_id = _claim_scheduled_job_run(
         job_name=DAILY_JOB_NAME,
         run_date=today,
         trigger_source=trigger_source,
@@ -634,8 +831,9 @@ async def _run_daily_job(
     )
     month_pdf_should_run = False
     month_pdf_tracking_available = False
+    month_pdf_attempt_id = None
     if is_month_end:
-        month_pdf_should_run, month_pdf_tracking_available = _claim_scheduled_job_run(
+        month_pdf_should_run, month_pdf_tracking_available, month_pdf_attempt_id = _claim_scheduled_job_run(
             job_name=MONTHLY_PDF_JOB_NAME,
             run_date=today,
             trigger_source=trigger_source,
@@ -728,6 +926,7 @@ async def _run_daily_job(
     if not month_pdf_should_run and not month_text and not week_text and not triggers:
         _finalize_scheduled_job_run(
             tracking_available=daily_tracking_available,
+            attempt_id=daily_attempt_id,
             job_name=DAILY_JOB_NAME,
             run_date=today,
             trigger_source=trigger_source,
@@ -748,20 +947,67 @@ async def _run_daily_job(
     month_sent_total = 0
     month_failed_total = 0
 
+    if daily_should_run and not _heartbeat_scheduled_job_run(
+        tracking_available=daily_tracking_available,
+        job_name=DAILY_JOB_NAME,
+        run_date=today,
+        attempt_id=daily_attempt_id,
+    ):
+        daily_should_run = False
+    if month_pdf_should_run and not _heartbeat_scheduled_job_run(
+        tracking_available=month_pdf_tracking_available,
+        job_name=MONTHLY_PDF_JOB_NAME,
+        run_date=today,
+        attempt_id=month_pdf_attempt_id,
+    ):
+        month_pdf_should_run = False
+    if not daily_should_run and not month_pdf_should_run:
+        if month_pdf_path and os.path.exists(month_pdf_path):
+            os.remove(month_pdf_path)
+        return
+
     try:
         for chat_id in TARGET_CHAT_IDS:
+            if daily_should_run and not _heartbeat_scheduled_job_run(
+                tracking_available=daily_tracking_available,
+                job_name=DAILY_JOB_NAME,
+                run_date=today,
+                attempt_id=daily_attempt_id,
+            ):
+                daily_should_run = False
+            if month_pdf_should_run and not _heartbeat_scheduled_job_run(
+                tracking_available=month_pdf_tracking_available,
+                job_name=MONTHLY_PDF_JOB_NAME,
+                run_date=today,
+                attempt_id=month_pdf_attempt_id,
+            ):
+                month_pdf_should_run = False
+            if not daily_should_run and not month_pdf_should_run:
+                break
             # Отдельные try/except на каждое сообщение: чтобы одно падение не глушило всё.
             if daily_should_run and is_month_end:
                 if month_text:
                     try:
-                        await safe_send_message(context.bot, chat_id, month_text, parse_mode="Markdown")
-                        daily_sent_total += 1
-                        sent_total += 1
-                        logger.info(
-                            "daily_job_message_sent",
-                            "Daily job message sent.",
-                            {"chat_id": chat_id, "message_type": "month_report"},
+                        delivered_now = await _send_tracked_notification(
+                            notification_kind="scheduled_job",
+                            notification_key=f"{DAILY_JOB_NAME}:{today.isoformat()}",
+                            chat_id=chat_id,
+                            message_type="month_report",
+                            send=lambda chat_id=chat_id: safe_send_message(
+                                context.bot,
+                                chat_id,
+                                month_text,
+                                parse_mode="Markdown",
+                            ),
                         )
+                        daily_sent_total += int(delivered_now)
+                        sent_total += int(delivered_now)
+                        if delivered_now:
+                            logger.info(
+                                "daily_job_message_sent",
+                                "Daily job message sent.",
+                                {"chat_id": chat_id, "message_type": "month_report"},
+                            )
                     except Exception:
                         daily_failed_total += 1
                         failed_total += 1
@@ -786,20 +1032,27 @@ async def _run_daily_job(
             if month_pdf_should_run:
                 if month_pdf_path and month_pdf_filename:
                     try:
-                        await safe_send_document(
-                            context.bot,
-                            chat_id,
-                            file_path=month_pdf_path,
-                            filename=month_pdf_filename,
-                            caption="PDF-версия месячного отчёта.",
+                        delivered_now = await _send_tracked_notification(
+                            notification_kind="scheduled_job",
+                            notification_key=f"{MONTHLY_PDF_JOB_NAME}:{today.isoformat()}",
+                            chat_id=chat_id,
+                            message_type="month_pdf",
+                            send=lambda chat_id=chat_id: safe_send_document(
+                                context.bot,
+                                chat_id,
+                                file_path=month_pdf_path,
+                                filename=month_pdf_filename,
+                                caption="PDF-версия месячного отчёта.",
+                            ),
                         )
-                        month_sent_total += 1
-                        sent_total += 1
-                        logger.info(
-                            "daily_job_message_sent",
-                            "Daily job message sent.",
-                            {"chat_id": chat_id, "message_type": "month_pdf"},
-                        )
+                        month_sent_total += int(delivered_now)
+                        sent_total += int(delivered_now)
+                        if delivered_now:
+                            logger.info(
+                                "daily_job_message_sent",
+                                "Daily job message sent.",
+                                {"chat_id": chat_id, "message_type": "month_pdf"},
+                            )
                     except Exception:
                         month_failed_total += 1
                         failed_total += 1
@@ -823,14 +1076,26 @@ async def _run_daily_job(
 
             if daily_should_run and is_friday and week_text:
                 try:
-                    await safe_send_message(context.bot, chat_id, week_text, parse_mode="Markdown")
-                    daily_sent_total += 1
-                    sent_total += 1
-                    logger.info(
-                        "daily_job_message_sent",
-                        "Daily job message sent.",
-                        {"chat_id": chat_id, "message_type": "week_report"},
+                    delivered_now = await _send_tracked_notification(
+                        notification_kind="scheduled_job",
+                        notification_key=f"{DAILY_JOB_NAME}:{today.isoformat()}",
+                        chat_id=chat_id,
+                        message_type="week_report",
+                        send=lambda chat_id=chat_id: safe_send_message(
+                            context.bot,
+                            chat_id,
+                            week_text,
+                            parse_mode="Markdown",
+                        ),
                     )
+                    daily_sent_total += int(delivered_now)
+                    sent_total += int(delivered_now)
+                    if delivered_now:
+                        logger.info(
+                            "daily_job_message_sent",
+                            "Daily job message sent.",
+                            {"chat_id": chat_id, "message_type": "week_report"},
+                        )
                 except Exception:
                     daily_failed_total += 1
                     failed_total += 1
@@ -841,16 +1106,28 @@ async def _run_daily_job(
                     )
 
             if daily_should_run:
-                for msg in triggers:
+                for trigger_index, msg in enumerate(triggers):
                     try:
-                        await safe_send_message(context.bot, chat_id, msg, parse_mode="Markdown")
-                        daily_sent_total += 1
-                        sent_total += 1
-                        logger.info(
-                            "daily_job_message_sent",
-                            "Daily job message sent.",
-                            {"chat_id": chat_id, "message_type": "trigger"},
+                        delivered_now = await _send_tracked_notification(
+                            notification_kind="scheduled_job",
+                            notification_key=f"{DAILY_JOB_NAME}:{today.isoformat()}",
+                            chat_id=chat_id,
+                            message_type=f"trigger:{trigger_index}",
+                            send=lambda chat_id=chat_id, msg=msg: safe_send_message(
+                                context.bot,
+                                chat_id,
+                                msg,
+                                parse_mode="Markdown",
+                            ),
                         )
+                        daily_sent_total += int(delivered_now)
+                        sent_total += int(delivered_now)
+                        if delivered_now:
+                            logger.info(
+                                "daily_job_message_sent",
+                                "Daily job message sent.",
+                                {"chat_id": chat_id, "message_type": "trigger"},
+                            )
                     except Exception:
                         daily_failed_total += 1
                         failed_total += 1
@@ -867,6 +1144,7 @@ async def _run_daily_job(
     if daily_should_run:
         _finalize_scheduled_job_run(
             tracking_available=daily_tracking_available,
+            attempt_id=daily_attempt_id,
             job_name=DAILY_JOB_NAME,
             run_date=today,
             trigger_source=trigger_source,
@@ -876,6 +1154,7 @@ async def _run_daily_job(
     if month_pdf_should_run:
         _finalize_scheduled_job_run(
             tracking_available=month_pdf_tracking_available,
+            attempt_id=month_pdf_attempt_id,
             job_name=MONTHLY_PDF_JOB_NAME,
             run_date=today,
             trigger_source=trigger_source,
@@ -913,32 +1192,35 @@ async def check_income_events(context: ContextTypes.DEFAULT_TYPE):
         event_type = row["event_type"]
         text_msg = build_income_event_notification_text(row)
 
-        sent_ok = True
-        reply_markup = build_iis_tax_deduction_markup(
-            str(row["operation_id"]),
-            marked=row.get("cashflow_category") == IIS_TAX_DEDUCTION_CATEGORY,
-        )
+        notification_kind = "income_event"
+        notification_key = str(row["id"])
         for chat_id in TARGET_CHAT_IDS:
             try:
-                await safe_send_message(
-                    context.bot,
-                    chat_id,
-                    text_msg,
-                    parse_mode="Markdown",
-                    reply_markup=reply_markup,
+                delivered_now = await _send_tracked_notification(
+                    notification_kind=notification_kind,
+                    notification_key=notification_key,
+                    chat_id=chat_id,
+                    message_type="income",
+                    reclaim_stale=False,
+                    send=lambda chat_id=chat_id: safe_send_message(
+                        context.bot,
+                        chat_id,
+                        text_msg,
+                        parse_mode="Markdown",
+                    ),
                 )
-                logger.info(
-                    "income_event_notification_sent",
-                    "Income event notification sent.",
-                    {
-                        "income_event_id": row["id"],
-                        "chat_id": chat_id,
-                        "event_type": event_type,
-                        "figi": row["figi"],
-                    },
-                )
+                if delivered_now:
+                    logger.info(
+                        "income_event_notification_sent",
+                        "Income event notification sent.",
+                        {
+                            "income_event_id": row["id"],
+                            "chat_id": chat_id,
+                            "event_type": event_type,
+                            "figi": row["figi"],
+                        },
+                    )
             except Exception:
-                sent_ok = False
                 logger.exception(
                     "income_event_notification_failed",
                     "Failed to send income event notification.",
@@ -950,7 +1232,11 @@ async def check_income_events(context: ContextTypes.DEFAULT_TYPE):
                     },
                 )
 
-        if not sent_ok:
+        if not _all_notification_deliveries_complete(
+            notification_kind=notification_kind,
+            notification_key=notification_key,
+            message_types={"income"},
+        ):
             continue
 
         with db_session() as session:
@@ -977,21 +1263,39 @@ async def check_invest_notifications(context: ContextTypes.DEFAULT_TYPE):
                 header=f"💸 Получено пополнение: {fmt_decimal_rub(amount, precision=0)}",
             )
 
-        sent_ok = True
+        notification_kind = "invest_notification"
+        notification_key = str(row["operation_id"])
+        reply_markup = build_iis_tax_deduction_markup(
+            notification_key,
+            marked=row.get("cashflow_category") == IIS_TAX_DEDUCTION_CATEGORY,
+        )
         for chat_id in TARGET_CHAT_IDS:
             try:
-                await safe_send_message(context.bot, chat_id, text_msg, parse_mode="Markdown")
-                logger.info(
-                    "invest_notification_sent",
-                    "Invest notification sent.",
-                    {
-                        "operation_id": row["operation_id"],
-                        "chat_id": chat_id,
-                        "amount": decimal_to_str(amount),
-                    },
+                delivered_now = await _send_tracked_notification(
+                    notification_kind=notification_kind,
+                    notification_key=notification_key,
+                    chat_id=chat_id,
+                    message_type="invest",
+                    reclaim_stale=False,
+                    send=lambda chat_id=chat_id: safe_send_message(
+                        context.bot,
+                        chat_id,
+                        text_msg,
+                        parse_mode="Markdown",
+                        reply_markup=reply_markup,
+                    ),
                 )
+                if delivered_now:
+                    logger.info(
+                        "invest_notification_sent",
+                        "Invest notification sent.",
+                        {
+                            "operation_id": row["operation_id"],
+                            "chat_id": chat_id,
+                            "amount": decimal_to_str(amount),
+                        },
+                    )
             except Exception:
-                sent_ok = False
                 logger.exception(
                     "invest_notification_failed",
                     "Failed to send invest notification.",
@@ -1002,7 +1306,11 @@ async def check_invest_notifications(context: ContextTypes.DEFAULT_TYPE):
                     },
                 )
 
-        if not sent_ok:
+        if not _all_notification_deliveries_complete(
+            notification_kind=notification_kind,
+            notification_key=notification_key,
+            message_types={"invest"},
+        ):
             continue
 
         with db_session() as session:

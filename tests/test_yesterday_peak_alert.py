@@ -21,6 +21,11 @@ def fake_db_session():
     yield object()
 
 
+async def deliver_now(**kwargs):
+    await kwargs["send"]()
+    return True
+
+
 class YesterdayPeakAlertMessageTests(unittest.TestCase):
     def test_message_includes_yesterday_value_and_previous_peak_date(self):
         now_local = datetime(2026, 4, 21, 8, 0, 0, tzinfo=services.TZ)
@@ -86,6 +91,12 @@ class YesterdayPeakAlertJobTests(unittest.TestCase):
              patch.object(jobs, "claim_daily_job_run", return_value=True) as claim_run, \
              patch.object(jobs, "complete_daily_job_run") as complete_run, \
              patch.object(jobs, "release_daily_job_run") as release_run, \
+             patch.object(jobs, "_heartbeat_scheduled_job_run", return_value=True), \
+             patch.object(
+                 jobs,
+                 "_send_tracked_notification",
+                 new=AsyncMock(side_effect=deliver_now),
+             ), \
              patch.object(jobs, "build_yesterday_peak_alert_message", return_value="peak alert"), \
              patch.object(jobs, "safe_send_message", new=AsyncMock()) as send_message:
             asyncio.run(
@@ -100,6 +111,7 @@ class YesterdayPeakAlertJobTests(unittest.TestCase):
             ANY,
             job_name=jobs.YESTERDAY_PEAK_ALERT_JOB_NAME,
             run_date=date(2026, 4, 20),
+            attempt_id=ANY,
         )
         self.assertEqual(send_message.await_count, 2)
         release_run.assert_not_called()
@@ -107,6 +119,7 @@ class YesterdayPeakAlertJobTests(unittest.TestCase):
             ANY,
             job_name=jobs.YESTERDAY_PEAK_ALERT_JOB_NAME,
             run_date=date(2026, 4, 20),
+            attempt_id=ANY,
             sent_total=2,
             failed_total=0,
         )
