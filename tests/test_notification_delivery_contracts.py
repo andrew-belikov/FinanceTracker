@@ -161,6 +161,117 @@ class DurableLedgerSqlContractTests(unittest.TestCase):
 
 
 class RecipientLedgerBehaviorTests(unittest.IsolatedAsyncioTestCase):
+    async def test_fresh_started_claim_blocks_concurrent_worker(self):
+        send = AsyncMock()
+        with (
+            patch.object(jobs, "db_session", side_effect=lambda: fake_db_session()),
+            patch.object(jobs, "claim_notification_delivery", return_value=False) as claim,
+            patch.object(jobs, "get_notification_delivery_status", return_value="started"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "active worker"):
+                await jobs._send_tracked_notification(
+                    notification_kind="income_event",
+                    notification_key="17",
+                    chat_id=101,
+                    message_type="income",
+                    send=send,
+                )
+
+        send.assert_not_awaited()
+        self.assertTrue(claim.call_args.kwargs["reclaim_stale"])
+
+    async def test_uncertain_delivery_is_terminal_and_not_reclaimed(self):
+        send = AsyncMock()
+        with (
+            patch.object(jobs, "db_session", side_effect=lambda: fake_db_session()),
+            patch.object(jobs, "claim_notification_delivery", return_value=False),
+            patch.object(jobs, "get_notification_delivery_status", return_value="uncertain"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "ambiguous outcome"):
+                await jobs._send_tracked_notification(
+                    notification_kind="income_event",
+                    notification_key="17",
+                    chat_id=101,
+                    message_type="income",
+                    send=send,
+                )
+
+        send.assert_not_awaited()
+
+    async def test_income_stale_started_claim_recovers_after_pre_send_crash(self):
+        row = {
+            "id": 17,
+            "figi": "FIGI1",
+            "event_type": "coupon",
+            "net_amount": Decimal("100"),
+            "net_yield_pct": Decimal("1.25"),
+            "coupon_period_days": 182,
+            "instrument_name": "Облигация",
+        }
+        ledger = _CrashRecoveryLedger(
+            notification_kind="income_event",
+            notification_key="17",
+            chat_id=101,
+            message_type="income",
+        )
+        with (
+            patch.object(jobs, "db_session", side_effect=lambda: fake_db_session()),
+            patch.object(jobs, "resolve_reporting_account_id", return_value="account"),
+            patch.object(jobs, "get_unnotified_income_events", return_value=[row]),
+            patch.object(jobs, "TARGET_CHAT_IDS", {101}),
+            patch.object(jobs, "safe_send_message", new=AsyncMock()) as send,
+            patch.object(jobs, "claim_notification_delivery", side_effect=ledger.claim),
+            patch.object(jobs, "complete_notification_delivery", side_effect=ledger.complete),
+            patch.object(jobs, "get_notification_delivery_status", side_effect=ledger.status),
+            patch.object(
+                jobs,
+                "notification_deliveries_complete",
+                side_effect=ledger.all_complete,
+            ),
+            patch.object(jobs, "mark_income_event_notified") as mark,
+        ):
+            await jobs.check_income_events(SimpleNamespace(bot=object()))
+
+        send.assert_awaited_once()
+        self.assertEqual(ledger.delivery_status, "sent")
+        mark.assert_called_once_with(ANY, 17)
+
+    async def test_invest_stale_started_claim_recovers_after_pre_send_crash(self):
+        row = {
+            "operation_id": "deposit-1",
+            "date": datetime(2026, 8, 14, 8, 0),
+            "amount": Decimal("10000"),
+            "cashflow_category": None,
+        }
+        ledger = _CrashRecoveryLedger(
+            notification_kind="invest_notification",
+            notification_key="deposit-1",
+            chat_id=101,
+            message_type="invest",
+        )
+        with (
+            patch.object(jobs, "db_session", side_effect=lambda: fake_db_session()),
+            patch.object(jobs, "resolve_reporting_account_id", return_value="account"),
+            patch.object(jobs, "get_pending_invest_notifications", return_value=[row]),
+            patch.object(jobs, "build_invest_text_for_account", return_value="Пополнение"),
+            patch.object(jobs, "TARGET_CHAT_IDS", {101}),
+            patch.object(jobs, "safe_send_message", new=AsyncMock()) as send,
+            patch.object(jobs, "claim_notification_delivery", side_effect=ledger.claim),
+            patch.object(jobs, "complete_notification_delivery", side_effect=ledger.complete),
+            patch.object(jobs, "get_notification_delivery_status", side_effect=ledger.status),
+            patch.object(
+                jobs,
+                "notification_deliveries_complete",
+                side_effect=ledger.all_complete,
+            ),
+            patch.object(jobs, "mark_invest_notification_sent", return_value=True) as mark,
+        ):
+            await jobs.check_invest_notifications(SimpleNamespace(bot=object()))
+
+        send.assert_awaited_once()
+        self.assertEqual(ledger.delivery_status, "sent")
+        mark.assert_called_once()
+
     async def test_restart_skips_recipient_already_delivered(self):
         state = set()
         send = AsyncMock()
@@ -358,6 +469,53 @@ class RecipientLedgerBehaviorTests(unittest.IsolatedAsyncioTestCase):
         release_delivery.assert_not_called()
         self.assertEqual(release_run.call_count, 2)
         complete_run.assert_not_called()
+
+
+class _CrashRecoveryLedger:
+    def __init__(
+        self,
+        *,
+        notification_kind: str,
+        notification_key: str,
+        chat_id: int,
+        message_type: str,
+    ):
+        self.identity = (notification_kind, notification_key, chat_id, message_type)
+        self.delivery_status = "started"
+        self.claimed_at = datetime(2026, 8, 13, 8, 0)
+        self.attempt_id = "crashed-owner"
+
+    def claim(self, _session, **kwargs):
+        identity = (
+            kwargs["notification_kind"],
+            kwargs["notification_key"],
+            kwargs["chat_id"],
+            kwargs["message_type"],
+        )
+        if identity != self.identity:
+            return False
+        stale_before = datetime(2026, 8, 14, 8, 0) - timedelta(minutes=15)
+        if (
+            kwargs["reclaim_stale"]
+            and self.delivery_status == "started"
+            and self.claimed_at < stale_before
+        ):
+            self.attempt_id = kwargs["attempt_id"]
+            self.claimed_at = datetime(2026, 8, 14, 8, 0)
+            return True
+        return False
+
+    def complete(self, _session, **kwargs):
+        if kwargs["attempt_id"] != self.attempt_id or self.delivery_status != "started":
+            return False
+        self.delivery_status = "sent"
+        return True
+
+    def status(self, _session, **_kwargs):
+        return self.delivery_status
+
+    def all_complete(self, _session, **_kwargs):
+        return self.delivery_status == "sent"
 
 
 class _RecordingResult:

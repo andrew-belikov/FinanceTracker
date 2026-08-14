@@ -1201,7 +1201,6 @@ async def check_income_events(context: ContextTypes.DEFAULT_TYPE):
                     notification_key=notification_key,
                     chat_id=chat_id,
                     message_type="income",
-                    reclaim_stale=False,
                     send=lambda chat_id=chat_id: safe_send_message(
                         context.bot,
                         chat_id,
@@ -1276,7 +1275,6 @@ async def check_invest_notifications(context: ContextTypes.DEFAULT_TYPE):
                     notification_key=notification_key,
                     chat_id=chat_id,
                     message_type="invest",
-                    reclaim_stale=False,
                     send=lambda chat_id=chat_id: safe_send_message(
                         context.bot,
                         chat_id,
