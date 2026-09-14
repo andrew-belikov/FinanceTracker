@@ -129,7 +129,9 @@ docker compose logs --tail=100 tracker bot reporter
 | [BEHAVIOR.md](docs/BEHAVIOR.md) | Команды бота, формулы, источники данных и fallback-поведение |
 | [CONFIG.md](docs/CONFIG.md) | Переменные окружения и настройка сервисов |
 | [RUNBOOK.md](docs/RUNBOOK.md) | Запуск, обновление, backup, миграции и диагностика |
-| [ARCHITECTURE.md](docs/ARCHITECTURE.md) | Сервисы и потоки данных |
+| [ARCHITECTURE.md](docs/ARCHITECTURE.md) | Текущие сервисы и потоки данных |
+| [TARGET_ARCHITECTURE.md](docs/TARGET_ARCHITECTURE.md) | Утверждённая целевая структура и границы модулей |
+| [CONTRACTS.md](docs/CONTRACTS.md) | Нормативные контракты данных, интеграций и эксплуатации |
 | [PDF_REPORT.md](docs/PDF_REPORT.md) | Состав и правила формирования месячного PDF |
 | [LOGGING_STANDARD.md](docs/LOGGING_STANDARD.md) | Контракт structured logging |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Локальная проверка и правила внесения изменений |
