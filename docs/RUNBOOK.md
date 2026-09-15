@@ -88,8 +88,9 @@ docker compose logs --since=1h --no-log-prefix bot tracker \
 
 `deploy.yml` запускает `scripts/predeploy_backup.sh` до candidate containers.
 Скрипт создаёт no-clobber custom dump, migration ledger, manifest с source SHA и
-CI run, SHA-256, затем восстанавливает dump во временную database и выполняет
-на ней `migrate --check`. Любая ошибка блокирует deploy.
+CI run, SHA-256, затем восстанавливает dump во временную database, применяет к
+ней migrations candidate-версии и выполняет `migrate --check`. Любая ошибка
+блокирует deploy; production database при этом не меняется.
 
 Задайте GitHub environment variable `FINANCETRACKER_BACKUP_DIR` на существующий
 каталог вне checkout и Docker volumes. Храните копии не менее 30 дней и 10

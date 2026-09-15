@@ -65,8 +65,10 @@ jobs:
           test -r "$APP_ENV_FILE"
           test "$(stat -c '%a' "$APP_ENV_FILE")" = "600"
           test "$(stat -c '%u' "$APP_ENV_FILE")" = "$(id -u)"
+          # The application and compose file default this optional integration to false.
+          # Keep legacy production .env files deployable without enabling Ollama implicitly.
           OLLAMA_ENABLED="$(sed -nE 's/^[[:space:]]*OLLAMA_ENABLED[[:space:]]*=[[:space:]]*(true|false)[[:space:]]*$/\1/p' "$APP_ENV_FILE" | tail -n 1)"
-          test -n "$OLLAMA_ENABLED"
+          OLLAMA_ENABLED="${OLLAMA_ENABLED:-false}"
           printf 'OLLAMA_ENABLED=%s\n' "$OLLAMA_ENABLED" >> "$GITHUB_ENV"
           if test "$OLLAMA_ENABLED" = "true"; then
             printf 'COMPOSE_FILE=%s/compose.yml:%s/compose.ollama.yml\n' "$DEPLOY_DIR" "$DEPLOY_DIR" >> "$GITHUB_ENV"

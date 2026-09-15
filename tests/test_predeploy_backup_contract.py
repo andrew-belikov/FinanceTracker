@@ -21,12 +21,17 @@ class PredeployBackupContractTests(unittest.TestCase):
             "sha256sum",
             "createdb -U",
             "pg_restore -U",
+            "run --rm --no-deps migrate\n",
             "migrate --check",
             '"restore_drill":"passed"',
         ):
             with self.subTest(required=required):
                 self.assertIn(required, SCRIPT)
         self.assertLess(SCRIPT.index("pg_restore -U"), SCRIPT.index('"restore_drill":"passed"'))
+        self.assertLess(
+            SCRIPT.index('run --rm --no-deps migrate\n'),
+            SCRIPT.index("migrate --check"),
+        )
         self.assertNotIn("pg_restore --clean", SCRIPT)
 
 
