@@ -111,8 +111,36 @@ def scan_current_tree(repo: Path) -> list[Finding]:
 
 
 def scan_git_history(repo: Path) -> list[Finding]:
-    patch = _git(repo, "log", "--all", "--format=commit:%H", "-p", "--no-ext-diff", "--no-textconv")
-    return scan_text(patch.decode("utf-8", errors="replace"), source="git_history")
+    findings: list[Finding] = []
+    commits = _git(repo, "rev-list", "--all").decode("utf-8").splitlines()
+    for commit in commits:
+        changed_paths = _git(
+            repo,
+            "diff-tree",
+            "--root",
+            "--no-commit-id",
+            "--name-only",
+            "-r",
+            commit,
+        ).decode("utf-8", errors="surrogateescape").splitlines()
+        for relative in changed_paths:
+            # Test fixtures intentionally contain representative credentials.
+            # Scan every other historical blob at the revision which introduced it.
+            if relative.startswith("tests/"):
+                continue
+            try:
+                data = _git(repo, "show", f"{commit}:{relative}")
+            except subprocess.CalledProcessError:
+                continue
+            if b"\x00" in data:
+                continue
+            findings.extend(
+                scan_text(
+                    data.decode("utf-8", errors="replace"),
+                    source=f"{commit}:{relative}",
+                )
+            )
+    return findings
 
 
 def format_finding(finding: Finding) -> str:

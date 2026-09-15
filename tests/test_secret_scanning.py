@@ -84,6 +84,24 @@ class SecretScanningTests(unittest.TestCase):
         self.assertRegex(rendered, r"source_sha256=[0-9a-f]{16}")
         self.assertIn("line=7", rendered)
 
+    def test_history_scan_excludes_test_fixtures(self):
+        secret = "postgresql://" + "user" + ":" + "secret" + "@localhost:5432/fixture"
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            tests_dir = repo / "tests"
+            tests_dir.mkdir()
+            subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+            subprocess.run(["git", "config", "user.email", "security@example.invalid"], cwd=repo, check=True)
+            subprocess.run(["git", "config", "user.name", "Security Test"], cwd=repo, check=True)
+            fixture = tests_dir / "fixture.py"
+            fixture.write_text(secret, encoding="utf-8")
+            subprocess.run(["git", "add", "tests/fixture.py"], cwd=repo, check=True)
+            subprocess.run(["git", "commit", "-qm", "add fixture"], cwd=repo, check=True)
+
+            findings = load_scanner().scan_git_history(repo)
+
+        self.assertEqual(findings, [])
+
 
 if __name__ == "__main__":
     unittest.main()
