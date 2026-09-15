@@ -1,19 +1,17 @@
 import ast
 import importlib.util
 import json
-import os
 from pathlib import Path
 import stat
-import sys
 import tempfile
 import unittest
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SRC_ROOT = PROJECT_ROOT / "src"
-sys.path.insert(0, str(SRC_ROOT))
-sys.path.insert(0, str(SRC_ROOT / "bot"))
-sys.path.insert(0, str(SRC_ROOT / "tracker"))
+
+
+
 
 
 def load_module(name: str, path: Path):
@@ -49,7 +47,7 @@ def write_proc_entry(root: Path, pid: int, command: str, *, start_ticks: str = "
 class ReadyStateContractTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.module_path = SRC_ROOT / "common" / "readiness_state.py"
+        cls.module_path = SRC_ROOT / "financetracker" / "common" / "readiness_state.py"
         if not cls.module_path.exists():
             raise AssertionError("shared readiness state module is missing")
         cls.readiness = load_module("readiness_state_under_test", cls.module_path)
@@ -126,11 +124,11 @@ class ReadyStateContractTests(unittest.TestCase):
     def test_healthchecks_require_ready_state_owned_by_live_service(self):
         tracker_health = load_module(
             "tracker_healthcheck_under_test",
-            SRC_ROOT / "tracker" / "tracker_healthcheck.py",
+            SRC_ROOT / "financetracker" / "tracker" / "tracker_healthcheck.py",
         )
         bot_health = load_module(
             "bot_healthcheck_under_test",
-            SRC_ROOT / "bot" / "bot_healthcheck.py",
+            SRC_ROOT / "financetracker" / "bot" / "bot_healthcheck.py",
         )
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -201,7 +199,7 @@ class StartupReadinessContractTests(unittest.TestCase):
             "write_tracker_ready_state": lambda: writes.append("ready"),
         }
         job_with_retry = load_function(
-            SRC_ROOT / "tracker" / "app.py",
+            SRC_ROOT / "financetracker" / "tracker" / "app.py",
             "job_with_retry",
             namespace,
         )
@@ -233,18 +231,18 @@ class StartupReadinessContractTests(unittest.TestCase):
             "init_db": lambda: calls.append("init"),
             "job_with_retry": lambda: False,
         }
-        main = load_function(SRC_ROOT / "tracker" / "app.py", "main", namespace)
+        main = load_function(SRC_ROOT / "financetracker" / "tracker" / "app.py", "main", namespace)
         self.assertEqual(main(), 1)
         self.assertEqual(calls, ["clear", "validate", "init"])
 
     def test_tracker_initial_sync_failure_cannot_mark_ready(self):
-        text = (SRC_ROOT / "tracker" / "app.py").read_text(encoding="utf-8")
+        text = (SRC_ROOT / "financetracker" / "tracker" / "app.py").read_text(encoding="utf-8")
         self.assertIn("clear_tracker_ready_state()", text)
         self.assertRegex(text, r"if not job_with_retry\(\):\s+return 1")
         self.assertIn("write_tracker_ready_state()", text)
 
     def test_bot_marks_ready_only_after_startup_smoke(self):
-        text = (SRC_ROOT / "bot" / "entrypoint.py").read_text(encoding="utf-8")
+        text = (SRC_ROOT / "financetracker" / "bot" / "entrypoint.py").read_text(encoding="utf-8")
         smoke_index = text.index("smoke_exit_code = run_startup_smoke()")
         ready_index = text.index("write_bot_ready_state()", smoke_index)
         process_index = text.index("run_bot_process()", ready_index)

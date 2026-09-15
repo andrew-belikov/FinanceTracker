@@ -1,21 +1,14 @@
 import http.client
 import json
 import socket
-import sys
 import threading
 import time
 import unittest
-from pathlib import Path
 from typing import Dict, Optional
 from unittest import mock
 
-
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(PROJECT_ROOT / "src"))
-sys.path.insert(0, str(PROJECT_ROOT / "src" / "bot"))
-
-import report_server
-from report_server import build_reporter_server
+from financetracker.reporting import report_server
+from financetracker.reporting.report_server import build_reporter_server
 
 
 class ReporterServerTests(unittest.TestCase):

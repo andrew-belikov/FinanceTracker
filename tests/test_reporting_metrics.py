@@ -6,11 +6,18 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from financetracker.domain.performance import (
+    compute_period_delta_excluding_external_flow,
+    compute_twr_series,
+    compute_xirr,
+    project_run_rate_value,
+)
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-SERVICES_FILE = PROJECT_ROOT / "src" / "bot" / "services.py"
-RUNTIME_FILE = PROJECT_ROOT / "src" / "bot" / "runtime.py"
-QUERIES_FILE = PROJECT_ROOT / "src" / "bot" / "queries.py"
+SERVICES_FILE = PROJECT_ROOT / "src" / "financetracker" / "bot" / "services.py"
+RUNTIME_FILE = PROJECT_ROOT / "src" / "financetracker" / "bot" / "runtime.py"
+QUERIES_FILE = PROJECT_ROOT / "src" / "financetracker" / "bot" / "queries.py"
 
 def load_selected_symbols(file_path: Path, wanted_assignments: set[str], wanted_functions: set[str], namespace=None):
     module_ast = ast.parse(file_path.read_text(encoding="utf-8"), filename=str(file_path))
@@ -47,7 +54,7 @@ def load_symbols():
     shared_namespace = {
         "os": os,
         "TZ": ZoneInfo("Europe/Moscow"),
-        "utc_naive_to_local_date": lambda value, zone: (
+        "utc_to_local_date": lambda value, zone: (
             value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value
         ).astimezone(zone).date(),
     }
@@ -83,11 +90,6 @@ def load_symbols():
         {
             "build_net_external_flow_by_day",
             "build_xirr_external_cashflows",
-            "compute_period_delta_excluding_external_flow",
-            "compute_twr_series",
-            "compute_xnpv",
-            "compute_xirr",
-            "project_run_rate_value",
         },
         namespace=shared_namespace,
     )
@@ -99,11 +101,6 @@ choose_reporting_account_id = SYMBOLS["choose_reporting_account_id"]
 resolve_reporting_account_id = SYMBOLS["resolve_reporting_account_id"]
 build_net_external_flow_by_day = SYMBOLS["build_net_external_flow_by_day"]
 build_xirr_external_cashflows = SYMBOLS["build_xirr_external_cashflows"]
-compute_period_delta_excluding_external_flow = SYMBOLS["compute_period_delta_excluding_external_flow"]
-compute_twr_series = SYMBOLS["compute_twr_series"]
-compute_xnpv = SYMBOLS["compute_xnpv"]
-compute_xirr = SYMBOLS["compute_xirr"]
-project_run_rate_value = SYMBOLS["project_run_rate_value"]
 
 
 class FakeResult:

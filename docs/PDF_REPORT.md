@@ -44,10 +44,10 @@ PDF должен быть:
 
 Текущие опорные модули проекта:
 
-- [`src/bot/dataset.py`](/Users/andrew/Dev/FinanceTracker/src/bot/dataset.py)
-- [`src/bot/services.py`](/Users/andrew/Dev/FinanceTracker/src/bot/services.py)
-- [`src/bot/charts.py`](/Users/andrew/Dev/FinanceTracker/src/bot/charts.py)
-- [`src/bot/queries.py`](/Users/andrew/Dev/FinanceTracker/src/bot/queries.py)
+- [`reporting/report_payload.py`](../src/financetracker/reporting/report_payload.py)
+- [`reporting/report_render.py`](../src/financetracker/reporting/report_render.py)
+- [`reporting/repository.py`](../src/financetracker/reporting/repository.py)
+- [`reporting/chart_style.py`](../src/financetracker/reporting/chart_style.py)
 
 ## Общие принципы верстки
 

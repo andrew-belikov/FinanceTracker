@@ -1,7 +1,7 @@
 from decimal import Decimal
 import unittest
 
-from src.common.finance import annualize_simple_yield_pct
+from financetracker.common.finance import annualize_simple_yield_pct
 
 
 class AnnualizedCouponYieldTests(unittest.TestCase):

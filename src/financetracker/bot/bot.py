@@ -1,0 +1,378 @@
+"""
+Telegram-бот для проекта iis_tracker.
+
+Функции:
+- Команды:
+    /today      — сводка по портфелю "Семейный капитал" на сегодня
+    /week       — сводка по текущей неделе
+    /month      — отчёт по текущему месяцу
+    /monthpdf   — PDF-отчёт по текущему месяцу
+    /calendar   — ожидаемые купоны и объявленные дивиденды на 90 дней
+    /year       — отчёт за год (YTD или календарный)
+    /dataset    — архив json+csv+md для AI-анализа
+    /structure  — текущая структура портфеля
+    /history    — график стоимости портфеля и суммы пополнений
+    /twr        — TWR, XIRR и run-rate на конец года + график по дням
+    /help       — список команд
+
+- Ежедневная задача (в заданное время JobQueue по TIMEZONE):
+    * по пятницам — недельный отчёт (/week)
+    * в последний день месяца — отчёт за месяц (/month)
+    * триггеры:
+        - годовой план по пополнениям выполнен (400k за год)
+    * (ежедневная сводка /today автоматически НЕ отправляется)
+- Утренняя задача:
+    * новый максимум портфеля по итогам вчерашнего дня
+- Понедельничная задача:
+    * ожидаемые купоны и объявленные дивиденды на текущей неделе
+
+Безопасность:
+- ALLOWED_USER_IDS — белый список Telegram user_id.
+- Все остальные пользователи игнорируются.
+"""
+
+from telegram import BotCommand
+from telegram.error import NetworkError, TimedOut
+from telegram.ext import (
+    Application,
+    CallbackQueryHandler,
+    CommandHandler,
+    ContextTypes,
+    MessageHandler,
+    filters,
+)
+from telegram.request import HTTPXRequest
+
+from financetracker.bot.handlers import (
+    cmd_calendar,
+    cmd_dataset,
+    cmd_help,
+    cmd_history,
+    cmd_invest,
+    cmd_month,
+    cmd_monthpdf,
+    cmd_rebalance,
+    cmd_start,
+    cmd_structure,
+    cmd_targets,
+    cmd_today,
+    cmd_twr,
+    cmd_week,
+    cmd_year,
+    debug_command_probe,
+    handle_iis_tax_deduction_callback,
+)
+from financetracker.bot.iis_tax_deduction import CALLBACK_PREFIX
+from financetracker.bot.jobs import (
+    check_income_events,
+    check_invest_notifications,
+    daily_job,
+    daily_job_startup_catchup,
+    DAILY_JOB_STARTUP_CATCHUP_DELAY_SECONDS,
+    get_bot_exit_code,
+    jobqueue_smoke_test_job,
+    payout_weekly_job,
+    payout_weekly_startup_catchup,
+    PAYOUT_WEEKLY_STARTUP_CATCHUP_DELAY_SECONDS,
+    polling_watchdog_job,
+    reset_polling_watchdog_state,
+    yesterday_peak_alert_job,
+    yesterday_peak_alert_startup_catchup,
+    YESTERDAY_PEAK_ALERT_STARTUP_CATCHUP_DELAY_SECONDS,
+)
+from financetracker.bot.runtime import (
+    BOT_PROXY_ENABLED,
+    DAILY_JOB_SCHEDULE_LABEL,
+    JOBQUEUE_SMOKE_TEST_DELAY_SECONDS,
+    JOBQUEUE_SMOKE_TEST_ON_START,
+    POLLING_WATCHDOG_INTERVAL_SECONDS,
+    PAYOUT_WEEKLY_SCHEDULE_LABEL,
+    TARGET_CHAT_IDS,
+    TELEGRAM_BOT_TOKEN,
+    TELEGRAM_GET_UPDATES_CONNECTION_POOL_SIZE,
+    TELEGRAM_GET_UPDATES_CONNECT_TIMEOUT_SECONDS,
+    TELEGRAM_GET_UPDATES_POOL_TIMEOUT_SECONDS,
+    TELEGRAM_GET_UPDATES_READ_TIMEOUT_SECONDS,
+    TELEGRAM_GET_UPDATES_TIMEOUT_SECONDS,
+    TELEGRAM_GET_UPDATES_WRITE_TIMEOUT_SECONDS,
+    TELEGRAM_POLL_INTERVAL_SECONDS,
+    TELEGRAM_REQUEST_CONNECTION_POOL_SIZE,
+    TELEGRAM_REQUEST_CONNECT_TIMEOUT_SECONDS,
+    TELEGRAM_REQUEST_POOL_TIMEOUT_SECONDS,
+    TELEGRAM_REQUEST_READ_TIMEOUT_SECONDS,
+    TELEGRAM_REQUEST_WRITE_TIMEOUT_SECONDS,
+    TZ_NAME,
+    YESTERDAY_PEAK_ALERT_SCHEDULE_LABEL,
+    ALLOWLIST_CONFIGURATION_ERROR,
+    EXPLICIT_DB_DSN,
+    DB_PASSWORD,
+    RuntimeConfigurationError,
+    build_daily_job_time,
+    build_payout_weekly_job_time,
+    build_yesterday_peak_alert_time,
+    build_telegram_request_kwargs,
+    logger,
+    reset_update_tracking_state,
+    resolve_telegram_proxy_url,
+    validate_database_credentials,
+)
+
+
+COMMAND_SPECS = (
+    ("start", "Приветствие и быстрый старт", cmd_start),
+    ("help", "Список всех команд", cmd_help),
+    ("today", "Сводка по портфелю на сегодня", cmd_today),
+    ("week", "Сводка по текущей неделе", cmd_week),
+    ("month", "Отчёт по текущему месяцу", cmd_month),
+    ("monthpdf", "PDF-отчёт по текущему месяцу", cmd_monthpdf),
+    ("calendar", "Купоны и дивиденды на 90 дней", cmd_calendar),
+    ("year", "Отчёт за текущий или указанный год", cmd_year),
+    ("dataset", "ZIP-архив данных для анализа", cmd_dataset),
+    ("structure", "Текущая структура портфеля", cmd_structure),
+    ("history", "График стоимости и пополнений", cmd_history),
+    ("twr", "TWR, XIRR и годовой run-rate", cmd_twr),
+    ("targets", "Целевое распределение активов", cmd_targets),
+    ("rebalance", "Отклонения и план ребалансировки", cmd_rebalance),
+    ("invest", "Распределить новое пополнение", cmd_invest),
+)
+COMMAND_HANDLERS = tuple((name, handler) for name, _, handler in COMMAND_SPECS)
+BOT_COMMANDS = tuple(BotCommand(name, description) for name, description, _ in COMMAND_SPECS)
+
+BOT_STARTUP_RETRY_EXIT_CODE = 76
+
+
+def register_handlers(app: Application) -> None:
+    app.add_handler(MessageHandler(filters.COMMAND, debug_command_probe), group=-1)
+    app.add_handler(
+        CallbackQueryHandler(
+            handle_iis_tax_deduction_callback,
+            pattern=rf"^{CALLBACK_PREFIX}:(?:set|unset):",
+        )
+    )
+    for command_name, handler in COMMAND_HANDLERS:
+        app.add_handler(CommandHandler(command_name, handler))
+
+
+async def sync_bot_commands(app: Application) -> None:
+    await app.bot.set_my_commands(BOT_COMMANDS)
+    logger.info(
+        "bot_commands_synced",
+        "Telegram bot commands synchronized.",
+        {
+            "commands_count": len(BOT_COMMANDS),
+            "commands": [command.command for command in BOT_COMMANDS],
+        },
+    )
+
+
+def configure_jobs(app: Application) -> None:
+    job_queue = app.job_queue
+    if job_queue is None:
+        raise RuntimeError(
+            "JobQueue не инициализирован. Убедись, что установлен пакет "
+            '"python-telegram-bot[job-queue]" и что Application создаётся корректно.'
+        )
+
+    job_time = build_daily_job_time()
+    peak_alert_time = build_yesterday_peak_alert_time()
+    payout_weekly_time = build_payout_weekly_job_time()
+    job_queue.run_daily(daily_job, time=job_time, name="daily_summary")
+    job_queue.run_daily(yesterday_peak_alert_job, time=peak_alert_time, name="yesterday_peak_alert")
+    job_queue.run_daily(
+        payout_weekly_job,
+        time=payout_weekly_time,
+        days=(1,),
+        name="weekly_payout_digest",
+    )
+    job_queue.run_once(
+        daily_job_startup_catchup,
+        when=DAILY_JOB_STARTUP_CATCHUP_DELAY_SECONDS,
+        name="daily_summary_startup_catchup",
+    )
+    job_queue.run_once(
+        yesterday_peak_alert_startup_catchup,
+        when=YESTERDAY_PEAK_ALERT_STARTUP_CATCHUP_DELAY_SECONDS,
+        name="yesterday_peak_alert_startup_catchup",
+    )
+    job_queue.run_once(
+        payout_weekly_startup_catchup,
+        when=PAYOUT_WEEKLY_STARTUP_CATCHUP_DELAY_SECONDS,
+        name="weekly_payout_digest_startup_catchup",
+    )
+    job_queue.run_repeating(check_income_events, interval=60, first=10, name="income_events_notifier")
+    job_queue.run_repeating(check_invest_notifications, interval=60, first=15, name="invest_notifier")
+    job_queue.run_repeating(
+        polling_watchdog_job,
+        interval=POLLING_WATCHDOG_INTERVAL_SECONDS,
+        first=POLLING_WATCHDOG_INTERVAL_SECONDS,
+        name="polling_watchdog",
+    )
+    logger.info(
+        "bot_jobqueue_jobs_registered",
+        "JobQueue jobs registered.",
+        {
+            "daily_job_schedule": DAILY_JOB_SCHEDULE_LABEL,
+            "yesterday_peak_alert_schedule": YESTERDAY_PEAK_ALERT_SCHEDULE_LABEL,
+            "payout_weekly_schedule": PAYOUT_WEEKLY_SCHEDULE_LABEL,
+            "schedule_timezone": TZ_NAME,
+            "target_chat_count": len(TARGET_CHAT_IDS),
+            "daily_job_startup_catchup_delay_seconds": DAILY_JOB_STARTUP_CATCHUP_DELAY_SECONDS,
+            "yesterday_peak_alert_startup_catchup_delay_seconds": YESTERDAY_PEAK_ALERT_STARTUP_CATCHUP_DELAY_SECONDS,
+            "payout_weekly_startup_catchup_delay_seconds": PAYOUT_WEEKLY_STARTUP_CATCHUP_DELAY_SECONDS,
+            "income_events_interval_seconds": 60,
+            "invest_interval_seconds": 60,
+            "polling_watchdog_interval_seconds": POLLING_WATCHDOG_INTERVAL_SECONDS,
+        },
+    )
+
+    if JOBQUEUE_SMOKE_TEST_ON_START:
+        job_queue.run_once(
+            jobqueue_smoke_test_job,
+            when=JOBQUEUE_SMOKE_TEST_DELAY_SECONDS,
+            name="jobqueue_smoke_test",
+        )
+        logger.info(
+            "bot_jobqueue_smoke_scheduled",
+            "Scheduled one-time JobQueue smoke-test.",
+            {
+                "delay_seconds": JOBQUEUE_SMOKE_TEST_DELAY_SECONDS,
+                "target_chat_count": len(TARGET_CHAT_IDS),
+            },
+        )
+
+
+def build_application() -> Application:
+    proxy_url = resolve_telegram_proxy_url()
+    request = HTTPXRequest(
+        **build_telegram_request_kwargs(
+            proxy_url=proxy_url,
+            connection_pool_size=TELEGRAM_REQUEST_CONNECTION_POOL_SIZE,
+            connect_timeout=TELEGRAM_REQUEST_CONNECT_TIMEOUT_SECONDS,
+            read_timeout=TELEGRAM_REQUEST_READ_TIMEOUT_SECONDS,
+            write_timeout=TELEGRAM_REQUEST_WRITE_TIMEOUT_SECONDS,
+            pool_timeout=TELEGRAM_REQUEST_POOL_TIMEOUT_SECONDS,
+        )
+    )
+    get_updates_request = HTTPXRequest(
+        **build_telegram_request_kwargs(
+            proxy_url=proxy_url,
+            connection_pool_size=TELEGRAM_GET_UPDATES_CONNECTION_POOL_SIZE,
+            connect_timeout=TELEGRAM_GET_UPDATES_CONNECT_TIMEOUT_SECONDS,
+            read_timeout=TELEGRAM_GET_UPDATES_READ_TIMEOUT_SECONDS,
+            write_timeout=TELEGRAM_GET_UPDATES_WRITE_TIMEOUT_SECONDS,
+            pool_timeout=TELEGRAM_GET_UPDATES_POOL_TIMEOUT_SECONDS,
+        )
+    )
+    app = (
+        Application.builder()
+        .token(TELEGRAM_BOT_TOKEN)
+        .request(request)
+        .get_updates_request(get_updates_request)
+        .post_init(sync_bot_commands)
+        .build()
+    )
+    register_handlers(app)
+    app.add_error_handler(on_application_error)
+    configure_jobs(app)
+    return app
+
+
+async def on_application_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    err = getattr(context, "error", None)
+    ctx = {
+        "error_type": type(err).__name__ if err is not None else None,
+    }
+    if err is not None:
+        logger.raw_logger.error(
+            "Unhandled Telegram application error.",
+            extra={"event": "bot_application_error", "ctx": ctx},
+            exc_info=(type(err), err, err.__traceback__),
+        )
+        return
+    logger.error(
+        "bot_application_error",
+        "Unhandled Telegram application error without exception object.",
+        ctx,
+    )
+
+
+def is_retryable_telegram_transport_error(exc: Exception) -> bool:
+    return isinstance(exc, (TimedOut, NetworkError))
+
+
+def main() -> int:
+    if not TELEGRAM_BOT_TOKEN:
+        logger.error(
+            "missing_telegram_bot_token",
+            "TELEGRAM_BOT_TOKEN не задан. Передай его через env-переменную.",
+        )
+        return 1
+    try:
+        if ALLOWLIST_CONFIGURATION_ERROR is not None:
+            raise ALLOWLIST_CONFIGURATION_ERROR
+        validate_database_credentials(db_dsn=EXPLICIT_DB_DSN, db_password=DB_PASSWORD)
+    except RuntimeConfigurationError as exc:
+        logger.error(
+            "invalid_runtime_configuration",
+            "Required bot runtime configuration is missing or malformed.",
+            {"error_type": type(exc).__name__},
+        )
+        return 1
+
+    reset_update_tracking_state()
+    reset_polling_watchdog_state()
+    app = build_application()
+
+    logger.info(
+        "bot_telegram_transport_configured",
+        "Configured Telegram transport for polling and bot API requests.",
+        {
+            "proxy_enabled": BOT_PROXY_ENABLED,
+            "request_pool_size": TELEGRAM_REQUEST_CONNECTION_POOL_SIZE,
+            "request_pool_timeout_seconds": TELEGRAM_REQUEST_POOL_TIMEOUT_SECONDS,
+            "get_updates_pool_size": TELEGRAM_GET_UPDATES_CONNECTION_POOL_SIZE,
+            "get_updates_pool_timeout_seconds": TELEGRAM_GET_UPDATES_POOL_TIMEOUT_SECONDS,
+            "get_updates_timeout_seconds": TELEGRAM_GET_UPDATES_TIMEOUT_SECONDS,
+            "get_updates_read_timeout_seconds": TELEGRAM_GET_UPDATES_READ_TIMEOUT_SECONDS,
+        },
+    )
+    logger.info(
+        "bot_started",
+        "Bot started.",
+        {
+            "daily_job_schedule": DAILY_JOB_SCHEDULE_LABEL,
+            "schedule_timezone": TZ_NAME,
+        },
+    )
+    try:
+        app.run_polling(
+            timeout=TELEGRAM_GET_UPDATES_TIMEOUT_SECONDS,
+            poll_interval=TELEGRAM_POLL_INTERVAL_SECONDS,
+        )
+    except Exception as exc:
+        if not is_retryable_telegram_transport_error(exc):
+            raise
+        logger.exception(
+            "bot_telegram_transport_failed",
+            "Telegram transport failed while initializing or polling; requesting supervised restart.",
+            {
+                "error_type": type(exc).__name__,
+                "retry_exit_code": BOT_STARTUP_RETRY_EXIT_CODE,
+                "proxy_enabled": BOT_PROXY_ENABLED,
+            },
+        )
+        return BOT_STARTUP_RETRY_EXIT_CODE
+    return get_bot_exit_code()
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except SystemExit:
+        raise
+    except Exception:
+        logger.exception(
+            "bot_process_failed",
+            "Bot process terminated with an unhandled exception.",
+        )
+        raise SystemExit(1)

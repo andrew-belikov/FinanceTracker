@@ -87,16 +87,21 @@ REPORTER_SERVICE_KEY=change-me-to-a-long-random-value
 
 ```bash
 docker volume create financetracker_fintracker-db
-docker network create localllm_localllm
 ```
 
-Сеть нужна Compose-стеку даже при выключенной Ollama. Если volume или сеть уже существуют, повторно создавать их не нужно.
+Внешняя сеть не нужна базовому stack. Создайте её только для включённой Ollama:
+
+```bash
+docker network create localllm_localllm
+```
 
 4. Соберите и запустите сервисы:
 
 ```bash
 docker compose up -d --build --wait
 ```
+
+При `OLLAMA_ENABLED=true` используйте `-f compose.ollama.yml`.
 
 5. Проверьте состояние и логи:
 
@@ -129,7 +134,9 @@ docker compose logs --tail=100 tracker bot reporter
 | [BEHAVIOR.md](docs/BEHAVIOR.md) | Команды бота, формулы, источники данных и fallback-поведение |
 | [CONFIG.md](docs/CONFIG.md) | Переменные окружения и настройка сервисов |
 | [RUNBOOK.md](docs/RUNBOOK.md) | Запуск, обновление, backup, миграции и диагностика |
-| [ARCHITECTURE.md](docs/ARCHITECTURE.md) | Сервисы и потоки данных |
+| [ARCHITECTURE.md](docs/ARCHITECTURE.md) | Текущие сервисы и потоки данных |
+| [TARGET_ARCHITECTURE.md](docs/TARGET_ARCHITECTURE.md) | Утверждённая целевая структура и границы модулей |
+| [CONTRACTS.md](docs/CONTRACTS.md) | Нормативные контракты данных, интеграций и эксплуатации |
 | [PDF_REPORT.md](docs/PDF_REPORT.md) | Состав и правила формирования месячного PDF |
 | [LOGGING_STANDARD.md](docs/LOGGING_STANDARD.md) | Контракт structured logging |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Локальная проверка и правила внесения изменений |
@@ -149,3 +156,18 @@ python3 scripts/scan_secrets.py --history
 ```
 
 Те же проверки выполняет GitHub Actions при каждом `push` и `pull_request`. Правила разработки и формат PR описаны в [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## Лицензия и версии
+
+Проект распространяется по [лицензии MIT](LICENSE).
+
+Версии приложения следуют SemVer в формате `MAJOR.MINOR.PATCH`. До стабилизации
+публичных контрактов используется серия `0.x.y`: `PATCH` исправляет ошибки без
+изменения контрактов, `MINOR` добавляет обратно-совместимые возможности, а
+`MAJOR` обозначает несовместимое изменение. Релиз создаётся только из commit SHA,
+прошедшего CI, получает annotated Git tag `vMAJOR.MINOR.PATCH` и запись в
+`CHANGELOG.md`.
+
+Для личного self-hosted сервиса на текущем этапе формальные SLO, RPO и RTO не
+заявляются. Их введение требует отдельного решения владельца вместе с измеримыми
+метриками, alerting и регулярной проверкой восстановления.

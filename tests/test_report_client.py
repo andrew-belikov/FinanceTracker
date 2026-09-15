@@ -1,6 +1,5 @@
 import io
 import json
-import sys
 import unittest
 from pathlib import Path
 from urllib import error
@@ -8,10 +7,10 @@ from unittest import mock
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(PROJECT_ROOT / "src"))
-sys.path.insert(0, str(PROJECT_ROOT / "src" / "bot"))
 
-import report_client  # noqa: E402
+
+
+from financetracker.bot import report_client  # noqa: E402
 
 
 class FakeResponse:

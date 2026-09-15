@@ -1,4 +1,3 @@
-import sys
 import unittest
 from contextlib import ExitStack
 from datetime import date, datetime, timezone
@@ -8,10 +7,10 @@ from unittest import mock
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(PROJECT_ROOT / "src"))
-sys.path.insert(0, str(PROJECT_ROOT / "src" / "bot"))
 
-import report_payload  # noqa: E402
+
+
+from financetracker.reporting import report_payload  # noqa: E402
 
 
 class FakeSession:
@@ -19,6 +18,22 @@ class FakeSession:
 
 
 class ReportPayloadHelpersTests(unittest.TestCase):
+    def test_monthly_payload_has_one_canonical_builder(self):
+        services_source = (
+            PROJECT_ROOT / "src" / "financetracker" / "bot" / "services.py"
+        ).read_text(encoding="utf-8")
+        report_payload_source = (
+            PROJECT_ROOT / "src" / "financetracker" / "reporting" / "report_payload.py"
+        ).read_text(encoding="utf-8")
+
+        self.assertNotIn("def build_monthly_report_payload(", services_source)
+        self.assertNotIn("def _resolve_month_report_period(", services_source)
+        self.assertNotIn("def _build_monthly_position_list(", services_source)
+        self.assertEqual(
+            report_payload_source.count("def build_monthly_report_payload("),
+            1,
+        )
+
     def test_serialize_report_payload_handles_decimal_dates_and_nested_data(self):
         payload = {
             "amount": Decimal("12.34"),

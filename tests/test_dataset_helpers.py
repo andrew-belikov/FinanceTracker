@@ -3,10 +3,16 @@ import unittest
 from pathlib import Path
 from copy import deepcopy
 
+from financetracker.domain.assets import build_logical_asset_id
+from financetracker.domain.operations import (
+    classify_operation_group,
+    is_income_event_backed_tax_operation,
+)
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-SERVICES_FILE = PROJECT_ROOT / "src" / "bot" / "services.py"
-RUNTIME_FILE = PROJECT_ROOT / "src" / "bot" / "runtime.py"
+SERVICES_FILE = PROJECT_ROOT / "src" / "financetracker" / "bot" / "services.py"
+RUNTIME_FILE = PROJECT_ROOT / "src" / "financetracker" / "bot" / "runtime.py"
 
 def load_selected_symbols(file_path: Path, wanted_assignments: set[str], wanted_functions: set[str], namespace=None):
     module_ast = ast.parse(file_path.read_text(encoding="utf-8"), filename=str(file_path))
@@ -64,7 +70,6 @@ def load_symbols():
         set(),
         {
             "classify_operation_group",
-            "build_logical_asset_id",
             "is_income_event_backed_tax_operation",
         },
         namespace=runtime_symbols,
@@ -72,10 +77,7 @@ def load_symbols():
 
 
 SYMBOLS = load_symbols()
-classify_operation_group = SYMBOLS["classify_operation_group"]
 decimal_to_str = SYMBOLS["decimal_to_str"]
-build_logical_asset_id = SYMBOLS["build_logical_asset_id"]
-is_income_event_backed_tax_operation = SYMBOLS["is_income_event_backed_tax_operation"]
 
 
 class DatasetHelpersTests(unittest.TestCase):
@@ -121,6 +123,11 @@ class DatasetHelpersTests(unittest.TestCase):
             build_logical_asset_id(asset_uid=None, instrument_uid=None, figi="figi-1"),
             "figi-1",
         )
+
+    def test_bot_services_reuses_canonical_logical_asset_identifier(self):
+        services_source = SERVICES_FILE.read_text(encoding="utf-8")
+        self.assertNotIn("def build_logical_asset_id(", services_source)
+        self.assertIn("from financetracker.domain.assets import build_logical_asset_id", services_source)
 
     def test_income_event_backed_tax_operation_detects_dividend_and_coupon_tax(self):
         self.assertTrue(is_income_event_backed_tax_operation("OPERATION_TYPE_DIVIDEND_TAX"))

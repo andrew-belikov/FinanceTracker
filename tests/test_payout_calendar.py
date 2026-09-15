@@ -1,11 +1,7 @@
-import importlib.util
-import os
 import asyncio
 from contextlib import contextmanager
 from datetime import date, datetime
 from decimal import Decimal
-from pathlib import Path
-import sys
 from types import SimpleNamespace
 import unittest
 from unittest import mock
@@ -14,32 +10,11 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-TRACKER_DIR = PROJECT_ROOT / "src" / "tracker"
-BOT_DIR = PROJECT_ROOT / "src" / "bot"
-sys.path.insert(0, str(PROJECT_ROOT / "src"))
-sys.path.insert(0, str(TRACKER_DIR))
-sys.path.insert(0, str(BOT_DIR))
+from financetracker.tracker import app as tracker_app
 
-APP_SPEC = importlib.util.spec_from_file_location(
-    "tracker_app_payout_calendar_under_test",
-    TRACKER_DIR / "app.py",
-)
-tracker_app = importlib.util.module_from_spec(APP_SPEC)
-assert APP_SPEC.loader is not None
-with mock.patch.dict(
-    os.environ,
-    {
-        "DB_DSN": "sqlite://",
-        "VERIFY_SSL": "true",
-        "TINVEST_API_TOKEN": "test-token",
-    },
-):
-    APP_SPEC.loader.exec_module(tracker_app)
-
-from services import render_payout_calendar_text
-from queries import get_payout_calendar_events
-import jobs as bot_jobs
+from financetracker.bot.services import render_payout_calendar_text
+from financetracker.bot.payout_repository import get_payout_calendar_events
+from financetracker.bot import jobs as bot_jobs
 
 
 async def deliver_now(**kwargs):
@@ -308,7 +283,7 @@ class PayoutCalendarSyncTests(unittest.TestCase):
         unknown_coupon[0]["payOneBond"] = {
             "units": "0",
             "nano": 0,
-            "currency": "rub",
+            "currency": "",
         }
         cancelled_dividend = self.dividend_events()
         cancelled_dividend[0]["dividendType"] = "Cancelled"
@@ -337,6 +312,7 @@ class PayoutCalendarSyncTests(unittest.TestCase):
         self.assertEqual(rows[0].event_type, "coupon")
         self.assertIsNone(rows[0].amount_per_unit)
         self.assertIsNone(rows[0].expected_amount)
+        self.assertEqual(rows[0].currency, "UNKNOWN")
 
 
 class PayoutCalendarRenderingTests(unittest.TestCase):

@@ -7,8 +7,8 @@ from unittest import mock
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-BOT_FILE = PROJECT_ROOT / "src" / "bot" / "bot.py"
-ENTRYPOINT_FILE = PROJECT_ROOT / "src" / "bot" / "entrypoint.py"
+BOT_FILE = PROJECT_ROOT / "src" / "financetracker" / "bot" / "bot.py"
+ENTRYPOINT_FILE = PROJECT_ROOT / "src" / "financetracker" / "bot" / "entrypoint.py"
 
 
 def load_selected_symbols(file_path: Path, wanted_assignments: set[str], wanted_functions: set[str], namespace=None):
@@ -105,6 +105,12 @@ class BotStartupResilienceTests(unittest.TestCase):
 
         self.assertTrue(should_retry(retry_exit_code))
         self.assertFalse(should_retry(1))
+
+    def test_entrypoint_starts_the_installed_bot_module(self):
+        source = ENTRYPOINT_FILE.read_text(encoding="utf-8")
+
+        self.assertIn("sys.executable", source)
+        self.assertIn('"financetracker.bot.bot"', source)
 
 
 if __name__ == "__main__":

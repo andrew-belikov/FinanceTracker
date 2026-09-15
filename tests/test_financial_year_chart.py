@@ -8,7 +8,7 @@ from zoneinfo import ZoneInfo
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-CHARTS_FILE = PROJECT_ROOT / "src" / "bot" / "charts.py"
+CHARTS_FILE = PROJECT_ROOT / "src" / "financetracker" / "bot" / "charts.py"
 
 
 def local_bounds_utc_naive(start: date, end: date, zone: ZoneInfo):
@@ -106,7 +106,7 @@ class YearMonthlyDeltaContractTests(unittest.TestCase):
             "time": time,
             "timedelta": timedelta,
             "TZ": timezone.utc,
-            "local_reporting_bounds_utc_naive": (
+            "local_reporting_bounds_utc": (
                 lambda start, end: local_bounds_utc_naive(start, end, ZoneInfo("UTC"))
             ),
             "db_session": fake_db_session,
@@ -194,7 +194,7 @@ class YearChartTimezoneBoundaryTests(unittest.TestCase):
             "time": time,
             "timedelta": timedelta,
             "TZ": zone,
-            "local_reporting_bounds_utc_naive": (
+            "local_reporting_bounds_utc": (
                 lambda start, end: local_bounds_utc_naive(start, end, zone)
             ),
             "db_session": fake_db_session,

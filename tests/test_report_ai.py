@@ -1,16 +1,15 @@
 import json
-import sys
 import unittest
 from pathlib import Path
 from unittest import mock
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(PROJECT_ROOT / "src"))
-sys.path.insert(0, str(PROJECT_ROOT / "src" / "bot"))
 
-import report_ai  # noqa: E402
-from report_render import build_deterministic_monthly_narrative  # noqa: E402
+
+
+from financetracker.reporting import report_ai  # noqa: E402
+from financetracker.reporting.report_render import build_deterministic_monthly_narrative  # noqa: E402
 from tests.test_report_payload import MonthlyReportPayloadBuilderTests  # noqa: E402
 
 
@@ -111,6 +110,18 @@ class ReportAITests(unittest.TestCase):
 
         with self.assertRaises(report_ai.ReportAIValidationError):
             report_ai.normalize_monthly_ai_output(payload)
+
+    def test_ollama_url_rejects_non_http_schemes_and_credentials(self):
+        for value in ("file:///tmp/model", "unix:///var/run/ollama.sock", "http://user:pass@ollama:11434"):
+            with self.subTest(value=value):
+                with self.assertRaises(report_ai.ReportAIError):
+                    report_ai.build_ollama_chat_url(value)
+
+    def test_ollama_url_keeps_only_the_chat_endpoint(self):
+        self.assertEqual(
+            report_ai.build_ollama_chat_url("https://ollama.example/api?ignored=yes#ignored"),
+            "https://ollama.example/api/api/chat",
+        )
 
 
 if __name__ == "__main__":

@@ -57,24 +57,37 @@ jobs:
           printf 'DEPLOY_DIR=%s\n' "$deploy_dir" >> "$GITHUB_ENV"
           printf 'APP_ENV_FILE=%s/.env\n' "$PROJECT_DIR" >> "$GITHUB_ENV"
 
-      - name: Run exact-SHA pre-deploy checks
+      - name: Resolve Compose files for optional Ollama
         run: |
-          cd "$DEPLOY_DIR"
-          test "$(git rev-parse HEAD)" = "$DEPLOY_SHA"
-          test -z "$(git status --porcelain --untracked-files=all)"
           test "${APP_ENV_FILE:-}" = "$PROJECT_DIR/.env"
           test -f "$APP_ENV_FILE"
           test ! -L "$APP_ENV_FILE"
           test -r "$APP_ENV_FILE"
           test "$(stat -c '%a' "$APP_ENV_FILE")" = "600"
           test "$(stat -c '%u' "$APP_ENV_FILE")" = "$(id -u)"
+          OLLAMA_ENABLED="$(sed -nE 's/^[[:space:]]*OLLAMA_ENABLED[[:space:]]*=[[:space:]]*(true|false)[[:space:]]*$/\1/p' "$APP_ENV_FILE" | tail -n 1)"
+          test -n "$OLLAMA_ENABLED"
+          printf 'OLLAMA_ENABLED=%s\n' "$OLLAMA_ENABLED" >> "$GITHUB_ENV"
+          if test "$OLLAMA_ENABLED" = "true"; then
+            printf 'COMPOSE_FILE=%s/compose.yml:%s/compose.ollama.yml\n' "$DEPLOY_DIR" "$DEPLOY_DIR" >> "$GITHUB_ENV"
+          else
+            printf 'COMPOSE_FILE=%s/compose.yml\n' "$DEPLOY_DIR" >> "$GITHUB_ENV"
+          fi
+
+      - name: Run exact-SHA pre-deploy checks
+        run: |
+          cd "$DEPLOY_DIR"
+          test "$(git rev-parse HEAD)" = "$DEPLOY_SHA"
+          test -z "$(git status --porcelain --untracked-files=all)"
           python3 -m compileall src
           docker compose --env-file "$APP_ENV_FILE" config --quiet
 
       - name: Prepare optional integration network
         run: |
-          docker network inspect localllm_localllm >/dev/null 2>&1 \
-            || docker network create localllm_localllm
+          if test "$OLLAMA_ENABLED" = "true"; then
+            docker network inspect localllm_localllm >/dev/null 2>&1 \
+              || docker network create localllm_localllm
+          fi
 
       - name: Build exact-SHA images
         env:
@@ -107,8 +120,10 @@ jobs:
           TRACKER_IMAGE: financetracker-tracker:git-${{ github.event.workflow_run.head_sha }}
           REPORTER_IMAGE: financetracker-reporter:git-${{ github.event.workflow_run.head_sha }}
           XRAY_CLIENT_IMAGE: financetracker-xray-client:git-${{ github.event.workflow_run.head_sha }}
+          BACKUP_DIR: ${{ vars.FINANCETRACKER_BACKUP_DIR }}
         run: |
           cd "$DEPLOY_DIR"
+          ./scripts/predeploy_backup.sh
           verify_image_tag() {
             actual_id="$(docker image inspect --format '{{.Id}}' "$1")"
             test "$actual_id" = "$2"

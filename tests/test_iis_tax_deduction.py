@@ -1,4 +1,3 @@
-import sys
 import unittest
 from contextlib import nullcontext
 from pathlib import Path
@@ -10,12 +9,12 @@ from telegram.error import BadRequest
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(PROJECT_ROOT / "src"))
-sys.path.insert(0, str(PROJECT_ROOT / "src" / "bot"))
 
-import handlers  # noqa: E402
-import runtime  # noqa: E402
-from iis_tax_deduction import (  # noqa: E402
+
+
+from financetracker.bot import handlers  # noqa: E402
+from financetracker.bot import runtime  # noqa: E402
+from financetracker.bot.iis_tax_deduction import (  # noqa: E402
     build_iis_tax_deduction_markup,
     render_iis_tax_deduction_message,
 )

@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-RUNTIME_FILE = PROJECT_ROOT / "src" / "bot" / "runtime.py"
+RUNTIME_FILE = PROJECT_ROOT / "src" / "financetracker" / "bot" / "runtime.py"
 
 
 class FakeLogger:
@@ -64,7 +64,7 @@ class PrivateChatAuthorizationTests(unittest.TestCase):
         update = self.update(chat_type="group")
         update.effective_message.reply_text = AsyncMock()
         handlers_tree = ast.parse(
-            (PROJECT_ROOT / "src" / "bot" / "handlers.py").read_text(encoding="utf-8")
+            (PROJECT_ROOT / "src" / "financetracker" / "bot" / "handlers.py").read_text(encoding="utf-8")
         )
         helper = next(
             deepcopy(node)
@@ -90,7 +90,7 @@ class PrivateChatAuthorizationTests(unittest.TestCase):
 
     def test_sensitive_handlers_guard_before_private_work(self):
         tree = ast.parse(
-            (PROJECT_ROOT / "src" / "bot" / "handlers.py").read_text(encoding="utf-8")
+            (PROJECT_ROOT / "src" / "financetracker" / "bot" / "handlers.py").read_text(encoding="utf-8")
         )
         sensitive = {
             "handle_iis_tax_deduction_callback",

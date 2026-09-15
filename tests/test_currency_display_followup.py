@@ -1,4 +1,3 @@
-import sys
 import unittest
 from contextlib import ExitStack, contextmanager
 from datetime import date, datetime, timezone
@@ -6,14 +5,15 @@ from decimal import Decimal
 from pathlib import Path
 from unittest import mock
 
+from sqlalchemy.exc import ProgrammingError
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(PROJECT_ROOT / "src"))
-sys.path.insert(0, str(PROJECT_ROOT / "src" / "bot"))
 
-import report_payload  # noqa: E402
-import queries  # noqa: E402
-import services  # noqa: E402
+
+
+from financetracker.reporting import report_payload  # noqa: E402
+from financetracker.bot import queries  # noqa: E402
+from financetracker.bot import services  # noqa: E402
 
 
 BREAKDOWN = [
@@ -229,7 +229,7 @@ class _MissingIncomeDb:
     def execute(self, *_args, **_kwargs):
         self.calls += 1
         if self.calls == 1:
-            raise queries.ProgrammingError("select income_events", {}, _UndefinedTableError())
+            raise ProgrammingError("select income_events", {}, _UndefinedTableError())
         return _MappingRows([])
 
 
@@ -250,19 +250,19 @@ class CurrencyBreakdownQueryTests(unittest.TestCase):
         self.assertEqual(rows[2]["coupons"], Decimal("9"))
         self.assertEqual(rows[2]["tax_refunds"], Decimal("2"))
 
-    def test_missing_optional_income_table_returns_empty_and_transaction_continues(self):
+    def test_missing_required_income_table_fails_closed(self):
         db = _MissingIncomeDb()
 
-        rows = queries.get_income_currency_breakdown_for_period(
-            db,
-            "acc",
-            datetime(2026, 4, 1),
-            datetime(2026, 5, 1),
-        )
+        with self.assertRaises(ProgrammingError):
+            queries.get_income_currency_breakdown_for_period(
+                db,
+                "acc",
+                datetime(2026, 4, 1),
+                datetime(2026, 5, 1),
+            )
 
-        self.assertEqual(rows, [])
         self.assertEqual(db.savepoints, 1)
-        self.assertEqual(db.calls, 2)
+        self.assertEqual(db.calls, 1)
 
 
 if __name__ == "__main__":

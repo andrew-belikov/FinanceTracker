@@ -1,30 +1,12 @@
-import importlib.util
 from pathlib import Path
-import sys
 import tempfile
 import unittest
 from unittest import mock
 
+from financetracker.tracker import migrate
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-TRACKER_DIR = PROJECT_ROOT / "src" / "tracker"
-sys.path.insert(0, str(PROJECT_ROOT / "src"))
-sys.path.insert(0, str(TRACKER_DIR))
-
-SPEC = importlib.util.spec_from_file_location(
-    "tracker_migrate_under_test",
-    TRACKER_DIR / "migrate.py",
-)
-migrate = importlib.util.module_from_spec(SPEC)
-assert SPEC.loader is not None
-with mock.patch.dict(
-    "os.environ",
-    {
-        "DB_DSN": "sqlite://",
-        "TINVEST_API_TOKEN": "test-token",
-    },
-):
-    SPEC.loader.exec_module(migrate)
+TRACKER_DIR = PROJECT_ROOT / "src" / "financetracker" / "tracker"
 
 
 class TrackerMigrationTests(unittest.TestCase):
@@ -36,11 +18,23 @@ class TrackerMigrationTests(unittest.TestCase):
                 "SELECT 2;",
                 encoding="utf-8",
             )
+            (root / "._20260101_first.sql").write_bytes(b"\x00\xa3resource-fork")
             (root / "README.md").write_text("ignored", encoding="utf-8")
 
             paths = migrate.discover_migrations(root)
 
         self.assertEqual([path.name for path in paths], ["20260101_first.sql"])
+
+    def test_versioned_baseline_replaces_orm_create_all(self):
+        baseline = (PROJECT_ROOT / "migrations" / "20260220_portfolio_baseline.sql").read_text(encoding="utf-8")
+        runner = (TRACKER_DIR / "migrate.py").read_text(encoding="utf-8")
+        self.assertIn("CREATE TABLE IF NOT EXISTS portfolio_snapshots", baseline)
+        self.assertIn("CREATE TABLE IF NOT EXISTS portfolio_positions", baseline)
+        self.assertNotIn("Base.metadata.create_all", runner)
+
+    def test_migration_runner_does_not_import_tracker_application(self):
+        runner = (TRACKER_DIR / "migrate.py").read_text(encoding="utf-8")
+        self.assertNotIn("financetracker.tracker.app", runner)
 
     def test_strips_outer_transaction_wrapper(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -93,6 +87,120 @@ class TrackerMigrationTests(unittest.TestCase):
 
         self.assertIn("ADD COLUMN IF NOT EXISTS cashflow_category TEXT", sql)
         self.assertIn("CREATE INDEX IF NOT EXISTS ix_operations_cashflow_category", sql)
+
+    def test_timezone_migration_explicitly_interprets_legacy_values_as_utc(self):
+        sql = (
+            PROJECT_ROOT / "migrations" / "20260915_timezone_aware_utc.sql"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("BEGIN;", sql)
+        self.assertIn("COMMIT;", sql)
+        self.assertIn("TYPE TIMESTAMPTZ", sql)
+        self.assertIn("AT TIME ZONE 'UTC'", sql)
+        self.assertIn("DROP VIEW IF EXISTS public.deposits", sql)
+        self.assertIn("CREATE VIEW public.deposits AS", sql)
+        self.assertIn("ALTER TABLE public.operations", sql)
+        self.assertIn("ALTER TABLE public.bot_notification_deliveries", sql)
+
+    def test_schema_contract_alignment_migrates_legacy_orm_column_types(self):
+        sql = (
+            PROJECT_ROOT / "migrations" / "20260915_schema_contract_alignment.sql"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("ALTER COLUMN figi TYPE TEXT", sql)
+        self.assertNotIn("ALTER COLUMN current_nkd TYPE", sql)
+        self.assertIn("ALTER COLUMN id TYPE BIGINT", sql)
+        self.assertIn("ALTER SEQUENCE IF EXISTS public.asset_aliases_id_seq AS BIGINT", sql)
+
+    def test_currency_migration_uses_explicit_unknown_sentinel(self):
+        sql = (
+            PROJECT_ROOT / "migrations" / "20260915_currency_unknown_sentinel.sql"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("SET currency = 'UNKNOWN'", sql)
+        self.assertIn("public.payout_calendar_events", sql)
+
+    def test_schema_manifest_is_versioned_and_covers_versioned_tables(self):
+        from financetracker.database import schema_manifest
+
+        self.assertGreater(schema_manifest.SCHEMA_MANIFEST_VERSION, 0)
+        self.assertIn("operations", schema_manifest.TABLES)
+        self.assertIn("income_events", schema_manifest.TABLES)
+        self.assertIn("payout_calendar_events", schema_manifest.TABLES)
+        self.assertIn("deposits", schema_manifest.VIEWS)
+        self.assertIn(
+            "uq_operations_account_operation",
+            schema_manifest.TABLES["operations"].unique_constraints,
+        )
+
+    def test_schema_manifest_digest_includes_migration_order(self):
+        from financetracker.database.schema_manifest import manifest_digest
+
+        self.assertNotEqual(
+            manifest_digest(("20260101_first.sql",)),
+            manifest_digest(("20260102_second.sql", "20260101_first.sql")),
+        )
+
+    def test_schema_manifest_reports_missing_column_type_and_index(self):
+        from financetracker.database import schema_manifest
+
+        class Inspector:
+            def has_table(self, _table):
+                return True
+
+            def get_columns(self, table):
+                return [
+                    {
+                        "name": name,
+                        "type": spec.type_name,
+                        "nullable": spec.nullable,
+                        "default": spec.default or "",
+                    }
+                    for name, spec in schema_manifest.TABLES[table].columns.items()
+                    if not (table == "operations" and name == "cashflow_category")
+                ]
+
+            def get_pk_constraint(self, table):
+                return {"constrained_columns": schema_manifest.TABLES[table].primary_key}
+
+            def get_unique_constraints(self, table):
+                return [
+                    {"name": name, "column_names": columns}
+                    for name, columns in (schema_manifest.TABLES[table].unique_constraints or {}).items()
+                ]
+
+            def get_indexes(self, table):
+                return [
+                    {"name": name, "column_names": columns}
+                    for name, columns in (schema_manifest.TABLES[table].indexes or {}).items()
+                    if name != "ix_operations_cashflow_category"
+                ]
+
+            def get_foreign_keys(self, table):
+                return [
+                    {
+                        "name": name,
+                        "constrained_columns": columns,
+                        "referred_table": remote_table,
+                        "referred_columns": remote_columns,
+                    }
+                    for name, (columns, remote_table, remote_columns) in (schema_manifest.TABLES[table].foreign_keys or {}).items()
+                ]
+
+        class Connection:
+            def execute(self, _query, _params):
+                class Result:
+                    @staticmethod
+                    def scalar_one_or_none():
+                        return "v"
+
+                return Result()
+
+        with mock.patch.object(schema_manifest, "inspect", return_value=Inspector()):
+            failures = schema_manifest.validate_schema_manifest(Connection())
+
+        self.assertIn("column operations.cashflow_category is missing", failures)
+        self.assertIn("index ix_operations_cashflow_category is missing or differs", failures)
 
 
 if __name__ == "__main__":

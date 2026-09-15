@@ -1,16 +1,9 @@
 import asyncio
-from pathlib import Path
-import sys
 from types import SimpleNamespace
 import unittest
 from unittest import mock
 
-
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(PROJECT_ROOT / "src"))
-sys.path.insert(0, str(PROJECT_ROOT / "src" / "bot"))
-
-import bot as bot_app
+import financetracker.bot.bot as bot_app
 
 
 class BotCommandsTests(unittest.TestCase):

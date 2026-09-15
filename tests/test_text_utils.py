@@ -1,12 +1,6 @@
 import unittest
-from pathlib import Path
-import sys
 
-
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(PROJECT_ROOT / "src"))
-
-from common.text_utils import has_mojibake, try_repair_cp866_utf8
+from financetracker.common.text_utils import has_mojibake, try_repair_cp866_utf8
 
 
 class TextUtilsTests(unittest.TestCase):

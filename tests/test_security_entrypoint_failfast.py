@@ -7,11 +7,11 @@ from unittest import mock
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-BOT_DIR = PROJECT_ROOT / "src" / "bot"
-TRACKER_DIR = PROJECT_ROOT / "src" / "tracker"
-sys.path.insert(0, str(PROJECT_ROOT / "src"))
-sys.path.insert(0, str(BOT_DIR))
-sys.path.insert(0, str(TRACKER_DIR))
+BOT_DIR = PROJECT_ROOT / "src" / "financetracker" / "bot"
+TRACKER_DIR = PROJECT_ROOT / "src" / "financetracker" / "tracker"
+
+
+
 
 
 def load_module(name: str, path: Path):

@@ -8,7 +8,7 @@ from unittest import mock
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-PROXY_SMOKE_FILE = PROJECT_ROOT / "src" / "bot" / "proxy_smoke.py"
+PROXY_SMOKE_FILE = PROJECT_ROOT / "src" / "financetracker" / "bot" / "proxy_smoke.py"
 
 
 def load_proxy_smoke_symbols():
@@ -66,7 +66,7 @@ class ProxySmokeContractTests(unittest.TestCase):
         self.assertNotIn("private payload", details)
 
     def test_entrypoint_stops_before_polling_when_smoke_fails(self):
-        entrypoint_file = PROJECT_ROOT / "src" / "bot" / "entrypoint.py"
+        entrypoint_file = PROJECT_ROOT / "src" / "financetracker" / "bot" / "entrypoint.py"
         entrypoint_ast = ast.parse(entrypoint_file.read_text(encoding="utf-8"))
         main_node = next(
             node

@@ -1,8 +1,6 @@
-import asyncio
-import sys
 import unittest
 from contextlib import contextmanager
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
@@ -12,12 +10,12 @@ from telegram.error import BadRequest, TimedOut
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(PROJECT_ROOT / "src"))
-sys.path.insert(0, str(PROJECT_ROOT / "src" / "bot"))
 
-import jobs  # noqa: E402
-import queries  # noqa: E402
-import runtime  # noqa: E402
+
+
+from financetracker.bot import jobs  # noqa: E402
+from financetracker.bot import queries  # noqa: E402
+from financetracker.bot import runtime  # noqa: E402
 
 
 @contextmanager

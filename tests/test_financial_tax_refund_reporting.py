@@ -4,10 +4,12 @@ from copy import deepcopy
 from decimal import Decimal
 from pathlib import Path
 
+from financetracker.reporting.narrative import build_deterministic_monthly_narrative
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-REPORT_PAYLOAD_FILE = PROJECT_ROOT / "src" / "bot" / "report_payload.py"
-REPORT_RENDER_FILE = PROJECT_ROOT / "src" / "bot" / "report_render.py"
+REPORT_PAYLOAD_FILE = PROJECT_ROOT / "src" / "financetracker" / "reporting" / "report_payload.py"
+REPORT_RENDER_FILE = PROJECT_ROOT / "src" / "financetracker" / "reporting" / "report_render.py"
 
 
 def load_function(path, name, namespace):
@@ -29,6 +31,7 @@ def display_rub(value, *, precision=0):
 
 def build_payload():
     return {
+        "meta": {"period_label_ru": "апрель 2026"},
         "summary_metrics": {
             "current_value": Decimal("100"),
             "period_pnl_abs": Decimal("0"),
@@ -84,20 +87,7 @@ class TaxRefundReportingTests(unittest.TestCase):
         self.assertTrue(any("Возврат налога" in item for item in overview["highlights"]))
 
     def test_deterministic_pdf_notes_keep_refund_separate_from_taxes(self):
-        namespace = {
-            "Any": object,
-            "Decimal": Decimal,
-            "_display_rub": display_rub,
-            "_display_pct": lambda value, precision=2: f"{Decimal(str(value or 0)):.{precision}f}%",
-            "_display_date": lambda value: value or "—",
-            "_to_decimal": lambda value: Decimal(str(value or 0)),
-            "_report_title_default": lambda _payload: "Report",
-        }
-        narrative = load_function(
-            REPORT_RENDER_FILE,
-            "build_deterministic_monthly_narrative",
-            namespace,
-        )(build_payload())
+        narrative = build_deterministic_monthly_narrative(build_payload())
 
         tax_note = next(item for item in narrative["cashflow_notes"] if "налоги:" in item)
         refund_note = next(item for item in narrative["cashflow_notes"] if "Возврат налога:" in item)

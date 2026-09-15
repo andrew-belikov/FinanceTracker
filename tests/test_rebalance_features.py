@@ -1,95 +1,19 @@
-import ast
 import unittest
-from copy import deepcopy
 from datetime import date
-from decimal import Decimal, InvalidOperation, ROUND_FLOOR, ROUND_HALF_UP
-from pathlib import Path
+from decimal import Decimal
 
-
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-SERVICES_FILE = PROJECT_ROOT / "src" / "bot" / "services.py"
-RUNTIME_FILE = PROJECT_ROOT / "src" / "bot" / "runtime.py"
-
-def load_selected_symbols(file_path: Path, wanted_assignments: set[str], wanted_functions: set[str], namespace=None):
-    module_ast = ast.parse(file_path.read_text(encoding="utf-8"), filename=str(file_path))
-    selected_nodes = []
-    for node in module_ast.body:
-        if isinstance(node, ast.Assign):
-            target_names = {
-                target.id
-                for target in node.targets
-                if isinstance(target, ast.Name)
-            }
-            if target_names & wanted_assignments:
-                selected_nodes.append(node)
-        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
-            if node.target.id in wanted_assignments:
-                selected_nodes.append(node)
-        elif isinstance(node, ast.FunctionDef) and node.name in wanted_functions:
-            copied = deepcopy(node)
-            copied.returns = None
-            for arg in copied.args.args:
-                arg.annotation = None
-            for arg in copied.args.kwonlyargs:
-                arg.annotation = None
-            selected_nodes.append(copied)
-
-    loaded_namespace = {} if namespace is None else dict(namespace)
-    isolated_module = ast.Module(body=selected_nodes, type_ignores=[])
-    code = compile(isolated_module, filename=str(file_path), mode="exec")
-    exec(code, loaded_namespace)
-    return loaded_namespace
-
-
-def load_symbols():
-    runtime_symbols = load_selected_symbols(
-        RUNTIME_FILE,
-        {"MONTHS_RU_GENITIVE"},
-        {"normalize_decimal"},
-        namespace={
-            "Decimal": Decimal,
-        },
-    )
-    return load_selected_symbols(
-        SERVICES_FILE,
-        {
-            "REBALANCE_ASSET_CLASSES",
-            "REBALANCE_TARGET_ALIASES",
-            "REBALANCE_CLASS_LABELS",
-            "REBALANCE_GROUP_TO_CLASS",
-            "REBALANCE_TOLERANCE_PCT",
-        },
-        {
-            "_instrument_type_to_group",
-            "quantize_ruble_amount",
-            "parse_decimal_input",
-            "parse_rebalance_targets_args",
-            "aggregate_rebalance_values_by_class",
-            "compute_rebalance_plan",
-            "compute_invest_plan",
-            "format_rebalance_weight",
-            "format_human_date_ru",
-            "_build_rebalance_diff_lines",
-            "build_help_text",
-        },
-        namespace={
-            **runtime_symbols,
-            "Decimal": Decimal,
-            "InvalidOperation": InvalidOperation,
-            "ROUND_HALF_UP": ROUND_HALF_UP,
-            "ROUND_FLOOR": ROUND_FLOOR,
-        },
-    )
-
-
-SYMBOLS = load_symbols()
-parse_rebalance_targets_args = SYMBOLS["parse_rebalance_targets_args"]
-aggregate_rebalance_values_by_class = SYMBOLS["aggregate_rebalance_values_by_class"]
-compute_rebalance_plan = SYMBOLS["compute_rebalance_plan"]
-compute_invest_plan = SYMBOLS["compute_invest_plan"]
-format_human_date_ru = SYMBOLS["format_human_date_ru"]
-_build_rebalance_diff_lines = SYMBOLS["_build_rebalance_diff_lines"]
-build_help_text = SYMBOLS["build_help_text"]
+from financetracker.bot.services import (
+    _build_rebalance_diff_lines,
+    build_help_text,
+    format_human_date_ru,
+)
+from financetracker.domain.rebalance import (
+    REBALANCE_ASSET_CLASSES,
+    aggregate_rebalance_values_by_class,
+    compute_invest_plan,
+    compute_rebalance_plan,
+    parse_rebalance_targets_args,
+)
 
 
 class RebalanceTargetsParsingTests(unittest.TestCase):
@@ -111,6 +35,16 @@ class RebalanceTargetsParsingTests(unittest.TestCase):
 
 
 class RebalanceMathTests(unittest.TestCase):
+    def test_domain_rebalance_plan_preserves_tolerance_and_decimal_deltas(self):
+        plan = compute_rebalance_plan(
+            {"stocks": Decimal("52000"), "bonds": Decimal("48000")},
+            {"stocks": Decimal("50"), "bonds": Decimal("50")},
+        )
+
+        rows_by_class = {row["asset_class"]: row for row in plan["rows"]}
+        self.assertEqual(rows_by_class["stocks"]["status"], "в норме")
+        self.assertEqual(rows_by_class["stocks"]["delta_value"], Decimal("-2000"))
+
     def test_aggregate_values_splits_supported_and_out_of_model_groups(self):
         class_values, other_groups = aggregate_rebalance_values_by_class(
             [
@@ -210,8 +144,8 @@ class RebalanceMathTests(unittest.TestCase):
 
     def test_invest_plan_never_creates_negative_allocation_for_two_rubles(self):
         plan = compute_invest_plan(
-            {asset_class: Decimal("0") for asset_class in SYMBOLS["REBALANCE_ASSET_CLASSES"]},
-            {asset_class: Decimal("25") for asset_class in SYMBOLS["REBALANCE_ASSET_CLASSES"]},
+            {asset_class: Decimal("0") for asset_class in REBALANCE_ASSET_CLASSES},
+            {asset_class: Decimal("25") for asset_class in REBALANCE_ASSET_CLASSES},
             Decimal("2"),
         )
 
@@ -224,7 +158,7 @@ class RebalanceMathTests(unittest.TestCase):
             {"stocks": Decimal("1"), "bonds": Decimal("2"), "etf": Decimal("3"), "currency": Decimal("94")},
             {"stocks": Decimal("33"), "bonds": Decimal("33"), "etf": Decimal("34"), "currency": Decimal("0")},
         )
-        empty = {asset_class: Decimal("0") for asset_class in SYMBOLS["REBALANCE_ASSET_CLASSES"]}
+        empty = {asset_class: Decimal("0") for asset_class in REBALANCE_ASSET_CLASSES}
 
         for amount in range(1, 101):
             for targets in target_sets:
