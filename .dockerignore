@@ -1,0 +1,19 @@
+# Default-deny Docker build context.  Images need only application sources,
+# locked dependencies, migrations and Docker runtime assets.
+*
+!src/
+!src/**
+!requirements/
+!requirements/**
+!migrations/
+!migrations/**
+!docker/
+!docker/**
+!pyproject.toml
+!README.md
+
+# Keep the policy itself visible to the builder for reproducibility.
+!.dockerignore
+
+# macOS AppleDouble sidecars are metadata, never source files or migrations.
+._*

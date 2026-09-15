@@ -1,0 +1,205 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.com/schemas/structured-log-event.schema.json",
+  "title": "Structured Log Event",
+  "description": "JSON schema for one structured log line emitted by runtime processes.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "ts",
+    "level",
+    "service",
+    "env",
+    "logger",
+    "event",
+    "msg"
+  ],
+  "properties": {
+    "ts": {
+      "type": "string",
+      "format": "date-time",
+      "description": "Event timestamp in ISO 8601 format with timezone."
+    },
+    "level": {
+      "type": "string",
+      "enum": [
+        "DEBUG",
+        "INFO",
+        "WARNING",
+        "ERROR",
+        "CRITICAL"
+      ],
+      "description": "Standard logging level."
+    },
+    "service": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Logical service name, typically sourced from APP_SERVICE."
+    },
+    "env": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Runtime environment name, typically sourced from APP_ENV."
+    },
+    "logger": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Logger name from the runtime logging subsystem."
+    },
+    "event": {
+      "type": "string",
+      "pattern": "^[a-z0-9_]+$",
+      "description": "Stable event identifier. First-party code must emit explicit snake_case names. Reserved fallback events: auto_log, logging_formatter_failed."
+    },
+    "msg": {
+      "type": "string",
+      "description": "Human-readable summary for operators."
+    },
+    "ctx": {
+      "type": "object",
+      "description": "Structured event context. Contains event-specific fields, fallback annotations and child-process metadata.",
+      "properties": {
+        "event_source": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "library"
+          ],
+          "description": "Present on fallback auto_log events. library marks third-party logs, auto marks first-party logs that missed an explicit event."
+        },
+        "stream": {
+          "type": "string",
+          "enum": [
+            "stdout",
+            "stderr"
+          ],
+          "description": "Present when the line was relayed from a child process stream."
+        },
+        "logging_args": {
+          "description": "Best-effort sanitized representation of invalid positional logging args when stdlib formatting failed."
+        }
+      },
+      "additionalProperties": true
+    },
+    "trace_id": {
+      "description": "Optional distributed tracing correlation identifier.",
+      "oneOf": [
+        {
+          "type": "string",
+          "minLength": 1
+        },
+        {
+          "type": "integer"
+        }
+      ]
+    },
+    "request_id": {
+      "description": "Optional request correlation identifier.",
+      "oneOf": [
+        {
+          "type": "string",
+          "minLength": 1
+        },
+        {
+          "type": "integer"
+        }
+      ]
+    },
+    "job_id": {
+      "description": "Optional scheduler or background job correlation identifier.",
+      "oneOf": [
+        {
+          "type": "string",
+          "minLength": 1
+        },
+        {
+          "type": "integer"
+        }
+      ]
+    },
+    "update_id": {
+      "description": "Optional platform or message-bus update correlation identifier.",
+      "oneOf": [
+        {
+          "type": "string",
+          "minLength": 1
+        },
+        {
+          "type": "integer"
+        }
+      ]
+    },
+    "error": {
+      "type": "object",
+      "description": "Structured exception payload for error logs.",
+      "required": [
+        "message"
+      ],
+      "properties": {
+        "type": {
+          "type": "string",
+          "description": "Exception type name when available."
+        },
+        "message": {
+          "type": "string",
+          "description": "Exception message."
+        },
+        "stack": {
+          "type": "string",
+          "description": "Rendered traceback."
+        },
+        "where": {
+          "type": "string",
+          "description": "Best-effort code location in pathname:line in function form."
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "examples": [
+    {
+      "ts": "2026-03-25T18:22:41.123456+00:00",
+      "level": "INFO",
+      "service": "notification_service",
+      "env": "dev",
+      "logger": "notifications.sender",
+      "event": "message_delivery_succeeded",
+      "msg": "Outbound message delivered.",
+      "ctx": {
+        "destination_id": 365469,
+        "channel": "primary"
+      },
+      "update_id": 123456789
+    },
+    {
+      "ts": "2026-03-25T18:23:01.001122+00:00",
+      "level": "INFO",
+      "service": "notification_service",
+      "env": "dev",
+      "logger": "thirdparty.runtime",
+      "event": "auto_log",
+      "msg": "Runtime started",
+      "ctx": {
+        "event_source": "library"
+      }
+    },
+    {
+      "ts": "2026-03-25T18:23:15.991122+00:00",
+      "level": "ERROR",
+      "service": "sync_service",
+      "env": "dev",
+      "logger": "sync.http_client",
+      "event": "upstream_request_failed",
+      "msg": "HTTP request to upstream service failed.",
+      "ctx": {
+        "endpoint": "/resource"
+      },
+      "error": {
+        "type": "ConnectionError",
+        "message": "upstream connection failed",
+        "stack": "Traceback...",
+        "where": "/srv/app/http_client.py:88 in request_json"
+      }
+    }
+  ]
+}

@@ -1,0 +1,267 @@
+# Конфигурация (.env)
+
+Все параметры задаются через файл `.env` в корне проекта.
+Все команды ниже предполагают запуск `docker compose` из корня репозитория.
+
+## Обязательные
+
+- `POSTGRES_DB` — имя базы данных.
+- `POSTGRES_USER` — пользователь Postgres.
+- `POSTGRES_PASSWORD` — пароль пользователя Postgres.
+- `TELEGRAM_BOT_TOKEN` — токен Telegram-бота.
+- `TINVEST_API_TOKEN` — токен Invest API.
+- `ALLOWED_USER_IDS` — список Telegram user_id, которым разрешена работа с ботом (через запятую).
+
+## Миграции БД
+
+- `migrate` использует те же `POSTGRES_DB`, `POSTGRES_USER` и
+  `POSTGRES_PASSWORD`, что остальные сервисы.
+- `MIGRATIONS_DIR` внутри контейнера фиксирован как `/app/migrations`.
+- При обычном deploy все forward-миграции применяются автоматически до запуска
+  прикладных сервисов.
+- Применённые файлы отслеживаются в `schema_migrations`; изменение их содержимого
+  после применения блокирует deploy.
+- `migrate --check` выполняет только чтение catalog и `schema_migrations`: на
+  пустой, отстающей или расходящейся с
+  `src/financetracker/database/schema_manifest.py` схеме он возвращает
+  ненулевой код и не создаёт объекты. Проверяются колонки, типы и
+  precision/scale, nullability/defaults, ключи и именованные индексы.
+- Runtime не подменяет отсутствующие таблицы или колонки упрощёнными SQL
+  запросами: перед запуском прикладных сервисов обязательна успешная проверка
+  `migrate --check`.
+- Write-режим `migrate` перед каждой forward-миграцией задаёт session-local
+  PostgreSQL `TimeZone` из проверенного `TIMEZONE` (fallback: `SCHED_TZ`, затем
+  `Europe/Moscow`). `--check` не меняет session settings.
+
+## Backup перед deploy
+
+- GitHub environment обязан задать `FINANCETRACKER_BACKUP_DIR`: существующий
+  каталог вне checkout и Docker volumes с правами только deploy-пользователя.
+- Deploy прекращается до migrations и startup, если custom dump, SHA-256 либо
+  restore drill во временную PostgreSQL database не прошли.
+- Retention: не менее 30 дней и 10 последних успешных deploy backup. Удаление
+  выполняется отдельной проверяемой процедурой, не deploy script.
+
+## GitHub security controls
+
+Repository включает CodeQL для Python и weekly Dependabot updates для Python
+dependencies и GitHub Actions. До включения автоматического deploy владелец
+repository обязан включить GitHub secret scanning и Dependabot alerts, а также
+ruleset для `main`: запрет force-push/delete и обязательные успешные `CI` и
+`CodeQL` checks. Эти настройки принадлежат GitHub, не versioned checkout.
+
+## Расписание
+
+- `TIMEZONE` — таймзона для отображения дат, локальных отчётных периодов и расписания JobQueue (например, `Europe/Moscow`). Границы локального полуинтервала `[начало, конец)` переводятся в timezone-aware UTC перед запросом к `TIMESTAMPTZ`; дневная и месячная группировка выполняется обратно в этой таймзоне.
+- `DAILY_SUMMARY_HOUR` — час ежедневного запуска JobQueue в таймзоне `TIMEZONE` (по умолчанию `18`).
+- `DAILY_SUMMARY_MINUTE` — минута ежедневного запуска JobQueue в таймзоне `TIMEZONE` (по умолчанию `0`).
+- `YESTERDAY_PEAK_ALERT_HOUR` — час утренней проверки максимума за вчера в таймзоне `TIMEZONE` (по умолчанию `8`).
+- `YESTERDAY_PEAK_ALERT_MINUTE` — минута утренней проверки максимума за вчера в таймзоне `TIMEZONE` (по умолчанию `0`).
+- `PAYOUT_WEEKLY_TIMEZONE` — таймзона понедельничной сводки выплат (по умолчанию `Europe/Moscow`).
+- `PAYOUT_WEEKLY_HOUR` — час понедельничной сводки выплат (по умолчанию `10`).
+- `PAYOUT_WEEKLY_MINUTE` — минута понедельничной сводки выплат (по умолчанию `0`).
+
+Основная рассылка JobQueue запускается по таймзоне `TIMEZONE`; по умолчанию это `18:00`.
+Утренний trigger нового максимума запускается отдельно; по умолчанию это `08:00`.
+- `JOBQUEUE_SMOKE_TEST_ON_START` — одноразовый тест отправки через JobQueue при старте бота (`true/false`).
+- `JOBQUEUE_SMOKE_TEST_DELAY_SECONDS` — задержка перед smoke-test после старта (секунды).
+
+Недельные отчёты отправляются по пятницам, месячные — в последний день месяца. Время отправки задаётся через `DAILY_SUMMARY_HOUR` / `DAILY_SUMMARY_MINUTE` в таймзоне `TIMEZONE`.
+Сводка ожидаемых купонов и дивидендов запускается отдельным JobQueue каждый понедельник. В `python-telegram-bot 21.x` понедельник задаётся как `days=(1,)`, потому что `0` соответствует воскресенью.
+
+## Параметры портфеля/плана
+
+- `ACCOUNT_FRIENDLY_NAME` — отображаемое имя счёта.
+- `PLAN_ANNUAL_CONTRIB_RUB` — целевой план пополнений за год.
+
+## Invest API
+
+- `TINVEST_BASE_URL` — базовый URL API.
+- `TINVEST_PORTFOLIO_CURRENCY` — валюта портфеля (обычно `RUB`).
+- `TINVEST_ACCOUNT_STATUS` — фильтр статуса счёта (`ACCOUNT_STATUS_ALL` и т.п.).
+- `TINKOFF_ACCOUNT_ID` — фиксированный `account_id`, для которого требуется точное совпадение. При пустом значении или `auto` выбирается только единственный открытый счёт; при нуле или нескольких открытых счетах tracker останавливается без записи.
+- `OPERATIONS_MAX_PAGES` — жёсткий лимит страниц для одного синка операций (по умолчанию `10000`). Если API сообщает о следующей странице после достижения лимита, синк завершается ошибкой и частичная транзакция откатывается.
+- `PAYOUT_CALENDAR_HORIZON_DAYS` — горизонт сохранённого календаря выплат (по умолчанию `90` дней).
+- `PAYOUT_CALENDAR_TAX_RATE_PCT` — расчётная ставка налога для сумм и доходности в `/calendar` и еженедельной сводке (по умолчанию `13`; допустимо от `0` до `100`). Это оценка: фактическая ставка зависит от налогового статуса и вида дохода.
+- `PAYOUT_CALENDAR_SYNC_HOUR` / `PAYOUT_CALENDAR_SYNC_MINUTE` — ежедневное время обновления календаря tracker по таймзоне `SCHED_TZ` (по умолчанию `09:00`).
+- `PAYOUT_DIVIDEND_RECORD_LOOKBACK_DAYS` — глубина запроса дивидендов по дате реестра (по умолчанию `365` дней). Lookback нужен, потому что `GetDividends` фильтрует запрос по `record_date`, хотя `/calendar` отбирает события по `payment_date`.
+- `TINVEST_HTTP_TIMEOUT_SECONDS` — таймаут одного HTTP-запроса к T-Invest (по умолчанию `20` секунд).
+- `TINVEST_HTTP_RETRY_TOTAL` — число повторов после первой попытки для transport-ошибок, `408`, `429` и `5xx` (по умолчанию `3`). Повторы применяются только к используемым проектом read-only методам `Get*`.
+- `TINVEST_HTTP_BACKOFF_SECONDS` — начальная задержка экспоненциального backoff (по умолчанию `1` секунда).
+- `TINVEST_HTTP_MAX_BACKOFF_SECONDS` — верхняя граница задержки, в том числе для `Retry-After` и `x-ratelimit-reset` (по умолчанию `60` секунд).
+- `TINVEST_HTTP_POOL_CONNECTIONS` — число пулов в общей HTTP-сессии tracker (по умолчанию `8`).
+- `TINVEST_HTTP_POOL_MAXSIZE` — максимальное число keep-alive соединений, сохраняемых в одном пуле (по умолчанию `8`).
+- `TINVEST_INSTRUMENT_CACHE_TTL_SECONDS` — TTL положительного in-memory кеша метаданных `GetInstrumentBy` (по умолчанию `86400` секунд).
+- `TINVEST_INSTRUMENT_CACHE_MAX_ENTRIES` — максимальный размер LRU-кеша метаданных инструментов (по умолчанию `1024`; `0` отключает кеш).
+
+## Сеть
+
+- `VERIFY_SSL` — проверка SSL сертификата при запросах к API (`true/false`). Рекомендуемое значение: `true`.
+- `tracker` повторно использует одну HTTP-сессию с keep-alive. Актуальные ответы `GetPortfolio` и `GetOperationsByCursor` не кешируются; кеш ограничен стабильными метаданными инструмента.
+- Postgres не публикует host port и доступен только сервисам внутри compose-сети по `db:5432`. Для администрирования используйте `docker compose exec db psql ...` или SSH tunnel до Docker-хоста.
+- `REPORTER_PORT` — внутренний HTTP-порт сервиса `reporter` для `/healthz` и `POST /reports/monthly/pdf` (по умолчанию `8088`).
+- `REPORTER_MAX_BODY_BYTES` — максимальный размер тела запроса для `POST /reports/monthly/pdf` (по умолчанию `65536`).
+- `REPORTER_INTERNAL_URL` — внутренний compose-URL для вызовов `bot -> reporter`. Рекомендуемое значение: `http://reporter:8088`.
+- `REPORTER_REQUEST_TIMEOUT_SECONDS` — таймаут внутреннего запроса `bot -> reporter` при сборке `/monthpdf` и month-end auto-send. Это только timeout на reporter-call, а не на upload документа в Telegram.
+- `REPORTER_SERVICE_KEY` — обязательный случайный внутренний ключ длиной не менее 16 символов. Он передаётся Compose только `bot` и `reporter`, сравнивается до чтения request body и никогда не вводится пользователем.
+- `REPORTER_MAX_CONCURRENT_REQUESTS` — лимит одновременно читаемых/собираемых reporter-запросов; перегрузка возвращает `503`.
+- `REPORTER_SOCKET_TIMEOUT_SECONDS` и `REPORTER_REQUEST_TIMEOUT_SECONDS` ограничивают медленное тело запроса и полный reporter build соответственно.
+- `BOT_COMMAND_MAX_CONCURRENCY` и `BOT_COMMAND_TIMEOUT_SECONDS` ограничивают вынесенные из asyncio loop операции БД, dataset и charts.
+- `OLLAMA_ENABLED` — включает narrative-layer через локальную `Ollama` (`true/false`). По умолчанию `false`; отсутствие ключа в legacy `.env` также трактуется как `false`.
+- `OLLAMA_BASE_URL` — базовый URL `Ollama` для контейнера `reporter`. На `homeserver` корректный путь: `http://ollama:11434`.
+- `OLLAMA_MODEL` — имя модели, которое будет использоваться для narrative generation.
+- `OLLAMA_TIMEOUT_SECONDS` — таймаут обращения к `Ollama`.
+- `OLLAMA_KEEP_ALIVE` — желаемое время удержания модели в памяти.
+- `OLLAMA_NUM_CTX` — желаемый размер context window для prompt.
+- `OLLAMA_MAX_INPUT_CHARS` — жёсткий лимит на размер `monthly_ai_input` перед обрезкой. Рекомендуемое стартовое значение: `12000`.
+- `REPORT_PDF_ENGINE` — backend генерации PDF. Для текущего monthly PDF используется `weasyprint`.
+- `REPORT_DEBUG_SAVE_HTML` и `REPORT_DEBUG_SAVE_PAYLOAD` — сохранять чувствительные промежуточные artifacts (`true/false`). По умолчанию persistent debug-файлы не создаются.
+- При включении debug обязателен отдельный `REPORT_DEBUG_DIR`: каталог приводится к `0700`, файлы — к `0600`; `REPORT_DEBUG_MAX_FILES` и `REPORT_DEBUG_MAX_AGE_SECONDS` задают bounded retention. Эти файлы содержат финансовые данные и не должны попадать в backup, shared volume или логи.
+- `BOT_PROXY_ENABLED` — включает outbound proxy только для контейнера `bot` (`true/false`).
+- `BOT_VLESS_URL` — основной VLESS share link для `xray-client`. Рекомендуется хранить значение в кавычках, чтобы `#label` в конце ссылки не отрезался парсером `.env`.
+- `BOT_VLESS_FALLBACK_URL` — дополнительный VLESS share link. Если основной `BOT_VLESS_URL` не проходит render/startup smoke или активный маршрут позже деградирует, `xray-client` автоматически пробует следующий кандидат.
+- `BOT_STARTUP_RETRY_DELAY_SECONDS` — пауза между supervised-перезапусками процесса `bot.py`, если Telegram API временно недоступен через proxy или прямой транспорт (по умолчанию `15` секунд).
+
+Доверенные сертификаты из `docker/certs/` встраиваются в образ `tracker` на
+этапе сборки. Поэтому после их изменения нужен deploy с `--build`; runtime
+процессы запускаются от непривилегированного пользователя и не изменяют trust
+store при старте.
+
+### Proxy только для `bot`
+
+- При `BOT_PROXY_ENABLED=false` контейнер `bot` запускается без `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY` и работает по старой схеме.
+- Сервис `xray-client` поднимается вместе со стеком. При `BOT_PROXY_ENABLED=false` он остаётся в idle-режиме с `healthy` status, пишет `xray_proxy_disabled`, но не запускает процесс `xray` и не открывает proxy route.
+- При `BOT_PROXY_ENABLED=true` `bot` направляет Telegram-трафик через локальный SOCKS endpoint `socks5h://xray-client:1080`.
+- `xray-client` принимает до двух кандидатных ссылок: основную `BOT_VLESS_URL` и fallback `BOT_VLESS_FALLBACK_URL`. Кандидаты проверяются по очереди, активной остаётся первая ссылка, которая успешно прошла startup smoke; дальше сервис продолжает runtime-проверки и при повторяющихся сбоях переключается на следующий кандидат.
+- Основной и fallback URL могут использовать разные transport/security-настройки. Текущий парсер поддерживает Reality/TCP и VLESS с `security=none`, включая `type=kcp`.
+- Внутренние адреса (`localhost`, `127.0.0.1`, `db`, `tracker`, `reporter`, `xray-client`) добавляются в `NO_PROXY`, поэтому внутренние обращения не уходят в proxy.
+- Long polling (`getUpdates`) и обычные Bot API запросы используют один и тот же явный proxy endpoint из `BOT_PROXY_ENDPOINT`; это снижает риск зависшего polling при переезде между хостами.
+- Если `bot.py` не может инициализироваться из-за транспортного `TimedOut` / `NetworkError`, `entrypoint.py` не завершает весь контейнер сразу, а перезапускает сам процесс бота с паузой `BOT_STARTUP_RETRY_DELAY_SECONDS`.
+- Если watchdog два раза подряд видит backlog Telegram updates при превышении порога стагнации, `bot` завершает процесс и рассчитывает на автоматический рестарт контейнера через `restart: unless-stopped`.
+- `xray-client` тоже использует `restart: unless-stopped`, поэтому после ребута хоста или Docker daemon он поднимается снова; idle-режим при `BOT_PROXY_ENABLED=false` предотвращает restart-loop.
+- `xray-client` проверяет не только локальный порт, но и outbound-маршрут через `XRAY_HEALTHCHECK_URL`; в compose по умолчанию используется `https://api.ipify.org`.
+- Readiness/status-файлы по умолчанию создаются в platform temporary directory контейнера. Для нестандартного writable mount доступны `TRACKER_READY_FILE`, `BOT_READY_FILE`, `XRAY_STATUS_FILE` и `XRAY_CONFIG_FILE`; значения должны быть доступны процессу и healthcheck соответствующего сервиса.
+- `tracker` и `db` не получают proxy env и продолжают работать напрямую.
+
+## Reporter runtime
+
+Базовый Compose не подключает `reporter` к Ollama-сети. При
+`OLLAMA_ENABLED=true` запускайте stack с явным override:
+
+```bash
+export APP_ENV_FILE=.env
+docker compose --env-file "$APP_ENV_FILE" -f compose.yml -f compose.ollama.yml up -d
+```
+
+Без override запрос к Ollama не выполняется при `OLLAMA_ENABLED=false`, а PDF
+использует детерминированный narrative fallback.
+
+- `reporter` — отдельный внутренний сервис для monthly PDF pipeline.
+- В текущей реализации `reporter` собирает monthly PDF с AI-narrative поверх детерминированных данных и уходит в жёсткий fallback, если `Ollama` недоступна или ответ невалиден.
+- Сервис слушает только внутри Docker-сети и не публикует host ports.
+- При `OLLAMA_ENABLED=true` reporter подключается к внешней сети
+  `localllm_localllm` только через `compose.ollama.yml`.
+- Reporter использует отдельный package `financetracker.reporting`; его runtime
+  не импортирует Telegram SDK.
+
+### Подключение `reporter` к `Ollama`
+
+На `homeserver` `Ollama` поднята отдельным compose-проектом в сети `localllm_localllm`.
+Поэтому для `reporter` нельзя использовать `localhost`.
+
+Правильная схема:
+
+- `reporter` подключается к внешней Docker-сети `localllm_localllm` только при
+  явном `compose.ollama.yml`;
+- `bot` и `xray-client` дополнительно соединены выделенной internal-сетью `bot_proxy_internal`; `xray-client` отсутствует в default-сети и не публикует SOCKS port на host;
+- `bot` и `reporter` используют отдельную internal-сеть `bot_reporter_internal`, а служебный ключ остаётся обязательным вторым рубежом;
+- `OLLAMA_BASE_URL=http://ollama:11434`.
+
+Отсутствие внешней сети не влияет на базовый stack. Она требуется только при
+`OLLAMA_ENABLED=true` и явном подключении `compose.ollama.yml`; в этом режиме
+сначала создайте сеть или поднимите compose-проект `LocalLLM`.
+
+Быстрая проверка:
+
+```bash
+docker compose ps
+docker compose logs --tail=100 xray-client
+docker compose exec bot python proxy_smoke.py
+```
+
+Ожидаемо:
+- при `BOT_PROXY_ENABLED=true` `xray-client` в `healthy`;
+- при `BOT_PROXY_ENABLED=false` `xray-client` тоже в `healthy`, но работает в idle-режиме без процесса `xray`;
+- все runtime-процессы проекта пишут JSON Lines в `stdout`, включая `xray-client`, startup smoke, healthcheck и maintenance scripts;
+- в логах `xray-client` есть события `xray_proxy_ready`, `xray_proxy_smoke_completed`, `xray_runtime_smoke_failed`, `xray_runtime_failover_scheduled` и `xray_process_output`;
+- при наличии fallback-ссылки в логах и status file появляется `active_link_role` со значением `primary` или `fallback`;
+- `proxy_smoke.py` подтверждает доступность Telegram API и прямой TCP-доступ к `db` через событие `bot_startup_smoke_completed` или `bot_startup_smoke_failed`.
+
+## Structured logging
+
+- `APP_SERVICE` определяет поле `service` в JSON-логах; для `xray-client` оно фиксируется как `xray_client` в compose-конфиге.
+- `APP_ENV` определяет поле `env`; по умолчанию используется `dev`, если переменная не задана.
+- First-party код должен писать явные события в формате `snake_case` через общий logger из `financetracker.common.logging_setup`.
+- Fallback `event="auto_log"` допустим только для записей без явного события, обычно от сторонних библиотек.
+- В таких fallback-записях formatter добавляет `ctx.event_source`: `library` для сторонних библиотек и `auto` для auto-tagging first-party записи, если код не задал `event` явно.
+- Для дочерних процессов строки stdout/stderr оборачиваются в JSON и получают `ctx.stream`.
+- `financetracker.xray.render_config` остаётся исключением: он печатает конфиг в stdout как полезный data output, а не как лог.
+
+## Снапшоты
+
+- `SNAPSHOT_INTERVAL_MINUTES` — интервал сохранения снапшотов (в минутах).
+- `SNAPSHOT_HOUR`, `SNAPSHOT_MINUTE` — совместимость со старыми настройками (может не использоваться).
+
+### Исторический compatibility-слой `deposits`
+
+- View `deposits` относится только к исторической SQL-миграции со старой схемы.
+- Активный runtime-код и текущие проверки должны читать данные операций из `operations`.
+
+### Поля инструмента в `operations`
+
+- Для операций поддерживаются поля `instrument_uid` и `figi`.
+- Если поля добавлены миграцией `migrations/20260225_operations_add_instrument_columns.sql`, tracker
+  при синхронизации обновляет не только новые операции, но и делает backfill существующих строк,
+  где эти поля ещё пустые.
+
+### Ручная категория денежного потока в `operations`
+
+- Миграция `migrations/20260805_operations_cashflow_category.sql` добавляет nullable-поле `cashflow_category`.
+- Значение `iis_tax_deduction` разрешено только для вручную помеченного исполненного пополнения и означает доход от налогового вычета ИИС.
+- Upsert из Invest API не меняет это поле; поставить или снять категорию можно кнопкой в Telegram-уведомлении о пополнении.
+
+### Надёжность уведомлений и плановых рассылок
+
+- Миграция `migrations/20260814_bot_notification_delivery_leases.sql` добавляет owner token, timestamps lease/heartbeat к `bot_daily_job_runs` и таблицу `bot_notification_deliveries`.
+- Свежий lease блокирует конкурентный запуск, просроченный lease разрешает fenced takeover, а `completed` остаётся терминальным. Старый owner не может завершить или освободить lease после takeover.
+- Результат доставки хранится отдельно для каждого `(notification_kind, notification_key, chat_id, message_type)`. После частичного сбоя повторяются только недоставленные сообщения; scheduled run завершается только после всех intended recipients.
+- Plain-text fallback выполняется ровно один раз только для Telegram `BadRequest`, однозначно указывающего на ошибку Markdown/форматирования. Timeout и network errors не запускают fallback-отправку; для event-уведомления и плановой рассылки такая неоднозначная попытка сохраняется как `uncertain` и автоматически не повторяется, чтобы не дублировать уже принятую Telegram доставку.
+- Кнопка `Вычет` существует только у уведомления об исполненном пополнении. Разметка ручная, обратимая и идемпотентная; уведомления о купонах/дивидендах эту кнопку не получают.
+
+
+### Поля `OperationItem` в `operations`
+
+- Миграция `migrations/20260304_operations_operation_item_fields.sql` добавляет поля из `OperationItem`
+  (кроме массива `trades_info.trades`).
+- Tracker использует `GetOperationsByCursor` с `withoutTrades=true`, постранично обходит `nextCursor`
+  и делает upsert по `operation_id`.
+- Если после миграции у исторических строк новые поля ещё пустые (`state IS NULL`), tracker
+  автоматически делает backfill от даты открытия счёта, затем возвращается к инкрементальной синхронизации.
+
+### Историческая миграция со схемы `deposits` (кратко)
+
+```bash
+# 1) Остановить сервисы, пишущие/читающие БД
+docker compose stop tracker bot
+
+# 2) Применить миграцию
+docker compose exec -T db psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" < migrations/20260221_operations_from_deposits.sql
+
+# 3) Запустить сервисы обратно
+docker compose up -d tracker bot
+
+# 4) Проверить, что операции читаются из operations
+docker compose exec -T db psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "SELECT operation_type, COUNT(*) FROM operations GROUP BY operation_type ORDER BY operation_type;"
+```
+
+Ожидаемый результат: в `operations` есть записи по типам пополнений; `deposits` при наличии остаётся только историческим compatibility-view.

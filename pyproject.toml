@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "financetracker"
+version = "1.0.0"
+description = "Personal investment portfolio tracker"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+
+[project.scripts]
+financetracker-tracker = "financetracker.tracker.cli:main"
+financetracker-bot = "financetracker.bot.cli:main"
+financetracker-reporter = "financetracker.reporting.cli:main"
+financetracker-migrate = "financetracker.tracker.migrate:main"
+financetracker-tracker-healthcheck = "financetracker.tracker.tracker_healthcheck:main"
+financetracker-bot-healthcheck = "financetracker.bot.bot_healthcheck:main"
+financetracker-reporter-healthcheck = "financetracker.reporting.report_entrypoint:main"
+financetracker-xray = "financetracker.xray.cli:main"
+financetracker-xray-healthcheck = "financetracker.xray.healthcheck:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["financetracker*"]
+
+[tool.coverage.run]
+source = ["financetracker"]
+
+[tool.coverage.report]
+fail_under = 64
+precision = 0
+
+[tool.mypy]
+python_version = "3.12"
+files = [
+    "src/financetracker/config",
+    "src/financetracker/domain/performance.py",
+    "src/financetracker/domain/payouts.py",
+    "src/financetracker/tracker/http_policy.py",
+]
+disallow_untyped_defs = true
+no_implicit_optional = true
+warn_return_any = true
+warn_unused_ignores = true

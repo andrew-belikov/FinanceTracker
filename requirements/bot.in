@@ -1,0 +1,6 @@
+python-telegram-bot[job-queue,socks]==21.6
+SQLAlchemy
+greenlet
+psycopg2-binary
+matplotlib
+tzdata

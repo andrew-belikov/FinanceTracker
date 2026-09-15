@@ -1,0 +1,7 @@
+BEGIN;
+
+ALTER TABLE public.operations
+    ADD COLUMN IF NOT EXISTS instrument_uid TEXT,
+    ADD COLUMN IF NOT EXISTS figi TEXT;
+
+COMMIT;
