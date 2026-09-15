@@ -107,7 +107,7 @@ ruleset для `main`: запрет force-push/delete и обязательны�
 - `REPORTER_MAX_CONCURRENT_REQUESTS` — лимит одновременно читаемых/собираемых reporter-запросов; перегрузка возвращает `503`.
 - `REPORTER_SOCKET_TIMEOUT_SECONDS` и `REPORTER_REQUEST_TIMEOUT_SECONDS` ограничивают медленное тело запроса и полный reporter build соответственно.
 - `BOT_COMMAND_MAX_CONCURRENCY` и `BOT_COMMAND_TIMEOUT_SECONDS` ограничивают вынесенные из asyncio loop операции БД, dataset и charts.
-- `OLLAMA_ENABLED` — включает narrative-layer через локальную `Ollama` (`true/false`). В первом PR может оставаться `false`.
+- `OLLAMA_ENABLED` — включает narrative-layer через локальную `Ollama` (`true/false`). По умолчанию `false`; отсутствие ключа в legacy `.env` также трактуется как `false`.
 - `OLLAMA_BASE_URL` — базовый URL `Ollama` для контейнера `reporter`. На `homeserver` корректный путь: `http://ollama:11434`.
 - `OLLAMA_MODEL` — имя модели, которое будет использоваться для narrative generation.
 - `OLLAMA_TIMEOUT_SECONDS` — таймаут обращения к `Ollama`.

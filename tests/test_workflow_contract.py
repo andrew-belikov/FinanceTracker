@@ -84,6 +84,7 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("COMPOSE_FILE=", DEPLOY_TEXT)
         self.assertIn("compose.ollama.yml", DEPLOY_TEXT)
         self.assertIn('if test "$OLLAMA_ENABLED" = "true"', DEPLOY_TEXT)
+        self.assertIn('OLLAMA_ENABLED="${OLLAMA_ENABLED:-false}"', DEPLOY_TEXT)
 
     def test_dirty_canonical_checkout_is_rejected_before_disposable_checkout(self):
         clean_check = 'git -C "$PROJECT_DIR" status --porcelain --untracked-files=all'

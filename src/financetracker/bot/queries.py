@@ -144,7 +144,7 @@ def get_latest_deposit_date(
     return session.execute(
         operations_dedup_statement(
             """
-            SELECT MAX(timezone(:timezone, date AT TIME ZONE 'UTC')::date)
+            SELECT MAX((date AT TIME ZONE :timezone)::date)
             FROM operations_dedup
             WHERE account_id = :account_id
               AND operation_type IN :operation_types
@@ -1250,7 +1250,7 @@ def get_deposits_by_date(
         session.execute(
             operations_dedup_statement(
                 """
-        SELECT timezone(:timezone, date AT TIME ZONE 'UTC')::date AS d, SUM(amount) AS s
+        SELECT (date AT TIME ZONE :timezone)::date AS d, SUM(amount) AS s
         FROM operations_dedup
         WHERE account_id = :account_id
           AND operation_type IN :operation_types
@@ -1263,7 +1263,7 @@ def get_deposits_by_date(
               ORDER BY ps.snapshot_date DESC, ps.snapshot_at DESC, ps.id DESC
               LIMIT 1
           )
-        GROUP BY timezone(:timezone, date AT TIME ZONE 'UTC')::date
+        GROUP BY (date AT TIME ZONE :timezone)::date
         ORDER BY d ASC
         """
             ).bindparams(bindparam("operation_types", expanding=True)),
@@ -1286,7 +1286,7 @@ def get_iis_tax_deductions_by_date(session, account_id: str):
         session.execute(
             operations_dedup_statement(
                 """
-                SELECT timezone(:timezone, date AT TIME ZONE 'UTC')::date AS d, SUM(ABS(amount)) AS s
+                SELECT (date AT TIME ZONE :timezone)::date AS d, SUM(ABS(amount)) AS s
                 FROM operations_dedup
                 WHERE account_id = :account_id
                   AND operation_type IN :operation_types
@@ -1299,7 +1299,7 @@ def get_iis_tax_deductions_by_date(session, account_id: str):
                       ORDER BY ps.snapshot_date DESC, ps.snapshot_at DESC, ps.id DESC
                       LIMIT 1
                   )
-                GROUP BY timezone(:timezone, date AT TIME ZONE 'UTC')::date
+                GROUP BY (date AT TIME ZONE :timezone)::date
                 ORDER BY d ASC
                 """
             ).bindparams(bindparam("operation_types", expanding=True)),
@@ -1570,7 +1570,7 @@ def get_year_deposits_by_date(
         session.execute(
             operations_dedup_statement(
                 """
-                SELECT timezone(:timezone, date AT TIME ZONE 'UTC')::date AS d, SUM(amount) AS s
+                SELECT (date AT TIME ZONE :timezone)::date AS d, SUM(amount) AS s
                 FROM operations_dedup
                 WHERE account_id = :account_id
                   AND date >= :start_dt
@@ -1585,7 +1585,7 @@ def get_year_deposits_by_date(
                       ORDER BY ps.snapshot_date DESC, ps.snapshot_at DESC, ps.id DESC
                       LIMIT 1
                   )
-                GROUP BY timezone(:timezone, date AT TIME ZONE 'UTC')::date
+                GROUP BY (date AT TIME ZONE :timezone)::date
                 ORDER BY d ASC
                 """
             ).bindparams(bindparam("operation_types", expanding=True)),
@@ -1652,7 +1652,7 @@ def get_monthly_deposits(session, account_id: str, from_dt: datetime, to_dt: dat
             operations_dedup_statement(
                 """
                 SELECT
-                    date_trunc('month', timezone(:timezone, date AT TIME ZONE 'UTC'))::date AS month_start,
+                    date_trunc('month', date AT TIME ZONE :timezone)::date AS month_start,
                     SUM(amount) AS amount
                 FROM operations_dedup
                 WHERE account_id = :account_id
@@ -1698,7 +1698,7 @@ def get_monthly_net_external_flows(
             operations_dedup_statement(
                 """
                 SELECT
-                    date_trunc('month', timezone(:timezone, date AT TIME ZONE 'UTC'))::date AS month_start,
+                    date_trunc('month', date AT TIME ZONE :timezone)::date AS month_start,
                     SUM(
                         CASE
                             WHEN operation_type IN :deposit_types
@@ -1757,7 +1757,7 @@ def get_monthly_iis_tax_deductions(
             operations_dedup_statement(
                 """
                 SELECT
-                    date_trunc('month', timezone(:timezone, date AT TIME ZONE 'UTC'))::date AS month_start,
+                    date_trunc('month', date AT TIME ZONE :timezone)::date AS month_start,
                     SUM(ABS(amount)) AS amount
                 FROM operations_dedup
                 WHERE account_id = :account_id

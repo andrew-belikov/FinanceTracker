@@ -102,6 +102,13 @@ class TrackerMigrationTests(unittest.TestCase):
         self.assertIn("ALTER TABLE public.operations", sql)
         self.assertIn("ALTER TABLE public.bot_notification_deliveries", sql)
 
+    def test_operation_local_date_queries_convert_timestamptz_directly(self):
+        query_source = (
+            PROJECT_ROOT / "src" / "financetracker" / "bot" / "queries.py"
+        ).read_text(encoding="utf-8")
+        self.assertNotIn("timezone(:timezone, date AT TIME ZONE 'UTC')", query_source)
+        self.assertIn("date AT TIME ZONE :timezone", query_source)
+
     def test_schema_contract_alignment_migrates_legacy_orm_column_types(self):
         sql = (
             PROJECT_ROOT / "migrations" / "20260915_schema_contract_alignment.sql"

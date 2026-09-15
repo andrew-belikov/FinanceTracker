@@ -120,6 +120,21 @@ class PostgreSQLIntegrationTests(unittest.TestCase):
             self.assertIsNotNone(restored.snapshot_at.tzinfo)
             self.assertEqual(restored.snapshot_at.utcoffset(), timezone.utc.utcoffset(None))
 
+    def test_timestamptz_bucketing_uses_requested_local_date(self):
+        from sqlalchemy import text
+
+        from financetracker.tracker import app as tracker_app
+
+        with tracker_app.SessionLocal() as session:
+            local_date = session.execute(
+                text(
+                    "SELECT ('2026-09-15 22:30:00+00'::timestamptz "
+                    "AT TIME ZONE 'Europe/Moscow')::date"
+                )
+            ).scalar_one()
+
+        self.assertEqual(str(local_date), "2026-09-16")
+
 
 if __name__ == "__main__":
     unittest.main()

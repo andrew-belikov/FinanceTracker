@@ -33,6 +33,7 @@ cleanup_restore() { ${compose[@]} exec -T db dropdb -U "$database_user" --if-exi
 trap 'cleanup_restore; rm -rf -- "$bundle"' ERR INT TERM
 ${compose[@]} exec -T db createdb -U "$database_user" "$restore_database"
 ${compose[@]} exec -T db pg_restore -U "$database_user" -d "$restore_database" < "$dump_path"
+POSTGRES_DB="$restore_database" ${compose[@]} run --rm --no-deps migrate
 POSTGRES_DB="$restore_database" ${compose[@]} run --rm --no-deps migrate --check
 cleanup_restore
 trap - ERR INT TERM
