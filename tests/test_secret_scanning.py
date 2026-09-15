@@ -23,6 +23,18 @@ class SecretScanningTests(unittest.TestCase):
         findings = scanner.scan_current_tree(PROJECT_ROOT)
         self.assertEqual(findings, [])
 
+    def test_current_tree_scan_tolerates_unstaged_deletion(self):
+        scanner = load_scanner()
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+            fixture = repo / "deleted.txt"
+            fixture.write_text("safe fixture\n", encoding="utf-8")
+            subprocess.run(["git", "add", "deleted.txt"], cwd=repo, check=True)
+            fixture.unlink()
+
+            self.assertEqual(scanner.scan_current_tree(repo), [])
+
     def test_history_scan_detects_deleted_secret_without_printing_value(self):
         scanner = load_scanner()
         secret = "vless:" + "//11111111-2222-4333-8444-555555555555@8.8.8.8:443"

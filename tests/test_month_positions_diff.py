@@ -4,7 +4,7 @@ from pathlib import Path
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-SERVICES_FILE = PROJECT_ROOT / "src" / "bot" / "services.py"
+SERVICES_FILE = PROJECT_ROOT / "src" / "financetracker" / "bot" / "services.py"
 
 
 def load_compute_positions_diff_lines():

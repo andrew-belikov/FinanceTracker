@@ -1,5 +1,4 @@
 import asyncio
-import sys
 import unittest
 from contextlib import contextmanager
 from datetime import date, datetime
@@ -9,11 +8,11 @@ from unittest.mock import ANY, AsyncMock, patch
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(PROJECT_ROOT / "src"))
-sys.path.insert(0, str(PROJECT_ROOT / "src" / "bot"))
 
-import jobs  # noqa: E402
-import services  # noqa: E402
+
+
+from financetracker.bot import jobs  # noqa: E402
+from financetracker.bot import services  # noqa: E402
 
 
 @contextmanager

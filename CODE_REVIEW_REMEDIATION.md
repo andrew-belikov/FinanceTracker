@@ -1,5 +1,8 @@
 # Устранение замечаний CODE_REVIEW.md
 
+> Исторический журнал устранения findings из `CODE_REVIEW.md`. Актуальные
+> contracts и runbook перечислены в [`docs/README.md`](docs/README.md).
+
 Дата начала: 2026-08-13
 Базовый commit аудита после очистки history: `53a5f0409484a0712cc3fa388ab79ccb35d80b8d`
 Источник доказательств: `CODE_REVIEW.md`

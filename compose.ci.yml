@@ -1,0 +1,11 @@
+# Ephemeral CI-only overrides. Production external resources remain defined in
+# compose.yml; this file is never used by deployment or operator commands.
+services:
+  db:
+    volumes:
+      - fintracker-db:/var/lib/postgresql/data
+
+volumes:
+  fintracker-db:
+    external: false
+    name: financetracker-ci-db

@@ -8,8 +8,8 @@ LOCKS = sorted((PROJECT_ROOT / "requirements").glob("*.txt"))
 
 
 class DependencyLockContractTests(unittest.TestCase):
-    def test_every_runtime_lock_is_exact_and_hash_verified(self):
-        self.assertEqual([path.name for path in LOCKS], ["bot.txt", "reporter.txt", "tracker.txt"])
+    def test_every_lock_is_exact_and_hash_verified(self):
+        self.assertEqual([path.name for path in LOCKS], ["bot.txt", "dev.txt", "reporter.txt", "tracker.txt"])
         for path in LOCKS:
             text = path.read_text(encoding="utf-8")
             starts = list(

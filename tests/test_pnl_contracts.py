@@ -6,11 +6,18 @@ from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 
+from financetracker.domain.cashflows import (
+    build_operation_cashflows_for_snapshot_interval,
+    normalize_operation_currency,
+    sum_decimal_values_for_snapshot_interval,
+)
+from financetracker.domain.performance import compute_cost_basis_pnl_pct
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-SERVICES_FILE = PROJECT_ROOT / "src" / "bot" / "services.py"
-REPORT_PAYLOAD_FILE = PROJECT_ROOT / "src" / "bot" / "report_payload.py"
-QUERIES_FILE = PROJECT_ROOT / "src" / "bot" / "queries.py"
+SERVICES_FILE = PROJECT_ROOT / "src" / "financetracker" / "bot" / "services.py"
+REPORT_PAYLOAD_FILE = PROJECT_ROOT / "src" / "financetracker" / "reporting" / "report_payload.py"
+QUERIES_FILE = PROJECT_ROOT / "src" / "financetracker" / "bot" / "queries.py"
 
 
 def load_function(file_path: Path, name: str, namespace: dict):
@@ -39,21 +46,9 @@ class DailyPortfolioResultTests(unittest.TestCase):
             "normalize_decimal": normalize_decimal,
             "to_iso_datetime": lambda value: value.isoformat() if value is not None else None,
         }
-        namespace["sum_decimal_values_for_snapshot_interval"] = load_function(
-            SERVICES_FILE,
-            "sum_decimal_values_for_snapshot_interval",
-            namespace,
-        )
-        namespace["normalize_operation_currency"] = load_function(
-            SERVICES_FILE,
-            "normalize_operation_currency",
-            namespace,
-        )
-        namespace["build_operation_cashflows_for_snapshot_interval"] = load_function(
-            SERVICES_FILE,
-            "build_operation_cashflows_for_snapshot_interval",
-            namespace,
-        )
+        namespace["sum_decimal_values_for_snapshot_interval"] = sum_decimal_values_for_snapshot_interval
+        namespace["normalize_operation_currency"] = normalize_operation_currency
+        namespace["build_operation_cashflows_for_snapshot_interval"] = build_operation_cashflows_for_snapshot_interval
         cls.build_rows = staticmethod(load_function(REPORT_PAYLOAD_FILE, "_build_timeseries_daily", namespace))
         cls.compute_period_pnl = staticmethod(load_function(REPORT_PAYLOAD_FILE, "_compute_period_pnl", namespace))
 
@@ -328,7 +323,7 @@ class TodaySummaryContractTests(unittest.TestCase):
             "append_tax_refund_line": lambda text_value, _refunds: text_value,
             "append_income_currency_breakdown": lambda text_value, _rows: text_value,
             "REPORTING_ACCOUNT_UNAVAILABLE_TEXT": "unavailable",
-            "local_reporting_bounds_utc_naive": lambda start, end: (
+            "local_reporting_bounds_utc": lambda start, end: (
                 datetime.combine(start, time.min),
                 datetime.combine(end, time.min),
             ),
@@ -381,16 +376,12 @@ class StructurePnlDenominatorTests(unittest.TestCase):
                 "total_value": sum(float(row["position_value"]) for row in positions),
             },
             "get_positions_for_snapshot": lambda _session, _snapshot_id: positions,
-            "_instrument_type_to_group": lambda _value: "Акции",
+            "instrument_type_to_group": lambda _value: "Акции",
             "fmt_rub": lambda value, precision=2: f"{float(value):.{precision}f}",
             "ACCOUNT_FRIENDLY_NAME": "Test",
             "REPORTING_ACCOUNT_UNAVAILABLE_TEXT": "unavailable",
         }
-        namespace["compute_cost_basis_pnl_pct"] = load_function(
-            SERVICES_FILE,
-            "compute_cost_basis_pnl_pct",
-            namespace,
-        )
+        namespace["compute_cost_basis_pnl_pct"] = compute_cost_basis_pnl_pct
         build_structure = load_function(SERVICES_FILE, "build_structure_text", namespace)
         return build_structure()
 
@@ -464,12 +455,12 @@ class TaxSignContractTests(unittest.TestCase):
         namespace = {
             "Decimal": Decimal,
             "text": FakeSql,
+            "operations_dedup_statement": FakeSql,
             "bindparam": lambda *_args, **_kwargs: object(),
-            "OPERATIONS_DEDUP_CTE": "",
             "TAX_OPERATION_TYPES": ("OPERATION_TYPE_TAX",),
             "EXECUTED_OPERATION_STATE": "OPERATION_STATE_EXECUTED",
             "_is_undefined_table_error": lambda *_args: False,
-            "_optional_relation_savepoint": lambda db: db.begin_nested(),
+            "_required_relation_savepoint": lambda db: db.begin_nested(),
         }
         return load_function(QUERIES_FILE, name, namespace)
 

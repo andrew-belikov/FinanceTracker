@@ -1,14 +1,13 @@
-import sys
 import unittest
 from pathlib import Path
 from unittest import mock
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(PROJECT_ROOT / "src"))
-sys.path.insert(0, str(PROJECT_ROOT / "src" / "bot"))
 
-import report_pipeline  # noqa: E402
+
+
+from financetracker.reporting import report_pipeline  # noqa: E402
 from tests.test_report_payload import MonthlyReportPayloadBuilderTests  # noqa: E402
 
 

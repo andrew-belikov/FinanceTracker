@@ -1,4 +1,3 @@
-import sys
 import unittest
 from contextlib import nullcontext
 from datetime import date
@@ -11,10 +10,10 @@ from matplotlib.collections import PathCollection
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(PROJECT_ROOT / "src"))
-sys.path.insert(0, str(PROJECT_ROOT / "src" / "bot"))
 
-import charts  # noqa: E402
+
+
+from financetracker.bot import charts  # noqa: E402
 
 
 class HistoryChartTests(unittest.TestCase):

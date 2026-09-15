@@ -6,11 +6,12 @@ import unittest
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 CI_TEXT = (PROJECT_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
 DEPLOY_TEXT = (PROJECT_ROOT / ".github" / "workflows" / "deploy.yml").read_text(encoding="utf-8")
+CODEQL_TEXT = (PROJECT_ROOT / ".github" / "workflows" / "codeql.yml").read_text(encoding="utf-8")
 
 
 class WorkflowContractTests(unittest.TestCase):
     def test_all_actions_are_pinned_to_immutable_commit_sha(self):
-        uses = re.findall(r"^\s*uses:\s*([^\s#]+)", CI_TEXT + "\n" + DEPLOY_TEXT, re.MULTILINE)
+        uses = re.findall(r"^\s*uses:\s*([^\s#]+)", CI_TEXT + "\n" + DEPLOY_TEXT + "\n" + CODEQL_TEXT, re.MULTILINE)
         self.assertTrue(uses)
         for action in uses:
             with self.subTest(action=action):
@@ -20,6 +21,10 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("--require-hashes", CI_TEXT)
         self.assertIn("Run workflow contract checks", CI_TEXT)
         self.assertIn("Run secret scan", CI_TEXT)
+        self.assertIn("python -m coverage run -m unittest", CI_TEXT)
+        self.assertIn("python -m coverage report", CI_TEXT)
+        self.assertIn("python -m bandit -r src -ll -q", CI_TEXT)
+        self.assertIn("python -m mypy", CI_TEXT)
         self.assertIn("python scripts/scan_secrets.py --history", CI_TEXT)
         self.assertNotIn("scripts/secret_scan.py", CI_TEXT)
         self.assertFalse(
@@ -74,6 +79,12 @@ class WorkflowContractTests(unittest.TestCase):
                 self.assertIn(required, DEPLOY_TEXT)
         self.assertNotIn("git pull", DEPLOY_TEXT)
 
+    def test_deploy_enables_ollama_override_only_when_requested(self):
+        self.assertIn("OLLAMA_ENABLED", DEPLOY_TEXT)
+        self.assertIn("COMPOSE_FILE=", DEPLOY_TEXT)
+        self.assertIn("compose.ollama.yml", DEPLOY_TEXT)
+        self.assertIn('if test "$OLLAMA_ENABLED" = "true"', DEPLOY_TEXT)
+
     def test_dirty_canonical_checkout_is_rejected_before_disposable_checkout(self):
         clean_check = 'git -C "$PROJECT_DIR" status --porcelain --untracked-files=all'
         self.assertIn(clean_check, DEPLOY_TEXT)
@@ -94,6 +105,22 @@ class WorkflowContractTests(unittest.TestCase):
             DEPLOY_TEXT.index("docker compose --env-file \"$APP_ENV_FILE\" up"),
             DEPLOY_TEXT.index('verify_container_image "bot"'),
         )
+
+    def test_deploy_requires_verified_predeploy_backup_before_starting_services(self):
+        self.assertIn("FINANCETRACKER_BACKUP_DIR", DEPLOY_TEXT)
+        self.assertLess(
+            DEPLOY_TEXT.index("./scripts/predeploy_backup.sh"),
+            DEPLOY_TEXT.index("docker compose --env-file \"$APP_ENV_FILE\" up -d"),
+        )
+
+    def test_codeql_and_dependabot_cover_python_and_actions(self):
+        dependabot = (PROJECT_ROOT / ".github" / "dependabot.yml").read_text(encoding="utf-8")
+
+        self.assertIn("security-events: write", CODEQL_TEXT)
+        self.assertIn("languages: python", CODEQL_TEXT)
+        self.assertIn("github/codeql-action/init@f52b05f4acaaa234e44466e66d29050e135ea9ef", CODEQL_TEXT)
+        self.assertIn("package-ecosystem: pip", dependabot)
+        self.assertIn("package-ecosystem: github-actions", dependabot)
 
 
 if __name__ == "__main__":

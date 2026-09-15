@@ -2,20 +2,18 @@ import io
 import json
 import logging
 import os
-import sys
 import unittest
 from contextlib import contextmanager
-from pathlib import Path
 from unittest import mock
 
-
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(PROJECT_ROOT / "src"))
-sys.path.insert(0, str(PROJECT_ROOT / "src" / "bot"))
-
-from common.logging_setup import StructuredLogger, _JsonLineFormatter, relay_text_stream
-import proxy_smoke
-import xray_client.healthcheck as xray_healthcheck
+from financetracker.bot import proxy_smoke
+from financetracker.common.logging_setup import (
+    StructuredLogger,
+    _JsonLineFormatter,
+    configure_logging,
+    relay_text_stream,
+)
+import financetracker.xray.healthcheck as xray_healthcheck
 
 
 @contextmanager
@@ -47,6 +45,28 @@ def read_payloads(stream: io.StringIO) -> list[dict]:
 
 
 class LoggingSetupTests(unittest.TestCase):
+    def test_configure_logging_suppresses_normal_apscheduler_records(self):
+        root = logging.getLogger()
+        scheduler_logger = logging.getLogger("apscheduler")
+        old_handlers = list(root.handlers)
+        old_level = root.level
+        old_configured = getattr(root, "_ft_json_logging_configured", None)
+        old_scheduler_level = scheduler_logger.level
+
+        try:
+            if hasattr(root, "_ft_json_logging_configured"):
+                delattr(root, "_ft_json_logging_configured")
+            configure_logging()
+            self.assertEqual(scheduler_logger.level, logging.WARNING)
+        finally:
+            root.handlers = old_handlers
+            root.setLevel(old_level)
+            scheduler_logger.setLevel(old_scheduler_level)
+            if old_configured is None:
+                root.__dict__.pop("_ft_json_logging_configured", None)
+            else:
+                root._ft_json_logging_configured = old_configured
+
     def test_structured_logger_renders_json_payload(self):
         with captured_logger("structured") as (logger, _raw_logger, stream):
             logger.info(
@@ -80,6 +100,26 @@ class LoggingSetupTests(unittest.TestCase):
         self.assertIn("***REDACTED***", payload["msg"])
         self.assertEqual(payload["ctx"]["token"], "***REDACTED***")
         self.assertIn("***REDACTED***", payload["ctx"]["url"])
+
+    def test_exception_keeps_safe_diagnostics_and_redacts_secrets(self):
+        with captured_logger("exception") as (logger, _raw_logger, stream):
+            try:
+                raise TimeoutError(
+                    "Bearer secret-token timed out while connecting to "
+                    f"postgresql+psycopg2://reader:{'db-secret'}@db:5432/ledger"
+                )
+            except TimeoutError:
+                logger.exception("network_failed", "Network request failed.")
+
+        error = read_payloads(stream)[0]["error"]
+        self.assertEqual(error["type"], "TimeoutError")
+        self.assertIn("timed out", error["message"])
+        self.assertIn("***REDACTED***", error["message"])
+        self.assertIn("TimeoutError", error["stack"])
+        self.assertIn("logging_setup.py", error["where"])
+        self.assertIn(" in log", error["where"])
+        self.assertNotIn("db-secret", error["message"])
+        self.assertNotIn("db-secret", error["stack"])
 
     def test_formatter_survives_malformed_stdlib_record(self):
         with captured_logger("malformed") as (_logger, raw_logger, stream):

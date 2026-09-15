@@ -1,7 +1,3 @@
-import importlib.util
-import os
-from pathlib import Path
-import sys
 import unittest
 from datetime import date, datetime
 from decimal import Decimal
@@ -11,26 +7,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-TRACKER_DIR = PROJECT_ROOT / "src" / "tracker"
-sys.path.insert(0, str(PROJECT_ROOT / "src"))
-sys.path.insert(0, str(TRACKER_DIR))
-
-APP_SPEC = importlib.util.spec_from_file_location(
-    "tracker_app_under_test",
-    TRACKER_DIR / "app.py",
-)
-tracker_app = importlib.util.module_from_spec(APP_SPEC)
-assert APP_SPEC.loader is not None
-with mock.patch.dict(
-    os.environ,
-    {
-        "DB_DSN": "sqlite://",
-        "VERIFY_SSL": "true",
-        "TINVEST_API_TOKEN": "test-token",
-    },
-):
-    APP_SPEC.loader.exec_module(tracker_app)
+from financetracker.tracker import app as tracker_app
 
 
 class FakeResponse:

@@ -22,14 +22,37 @@
 - Применённые файлы отслеживаются в `schema_migrations`; изменение их содержимого
   после применения блокирует deploy.
 - `migrate --check` выполняет только чтение catalog и `schema_migrations`: на
-  пустой или отстающей схеме он возвращает ненулевой код и не создаёт объекты.
+  пустой, отстающей или расходящейся с
+  `src/financetracker/database/schema_manifest.py` схеме он возвращает
+  ненулевой код и не создаёт объекты. Проверяются колонки, типы и
+  precision/scale, nullability/defaults, ключи и именованные индексы.
+- Runtime не подменяет отсутствующие таблицы или колонки упрощёнными SQL
+  запросами: перед запуском прикладных сервисов обязательна успешная проверка
+  `migrate --check`.
 - Write-режим `migrate` перед каждой forward-миграцией задаёт session-local
   PostgreSQL `TimeZone` из проверенного `TIMEZONE` (fallback: `SCHED_TZ`, затем
   `Europe/Moscow`). `--check` не меняет session settings.
 
+## Backup перед deploy
+
+- GitHub environment обязан задать `FINANCETRACKER_BACKUP_DIR`: существующий
+  каталог вне checkout и Docker volumes с правами только deploy-пользователя.
+- Deploy прекращается до migrations и startup, если custom dump, SHA-256 либо
+  restore drill во временную PostgreSQL database не прошли.
+- Retention: не менее 30 дней и 10 последних успешных deploy backup. Удаление
+  выполняется отдельной проверяемой процедурой, не deploy script.
+
+## GitHub security controls
+
+Repository включает CodeQL для Python и weekly Dependabot updates для Python
+dependencies и GitHub Actions. До включения автоматического deploy владелец
+repository обязан включить GitHub secret scanning и Dependabot alerts, а также
+ruleset для `main`: запрет force-push/delete и обязательные успешные `CI` и
+`CodeQL` checks. Эти настройки принадлежат GitHub, не versioned checkout.
+
 ## Расписание
 
-- `TIMEZONE` — таймзона для отображения дат, локальных отчётных периодов и расписания JobQueue (например, `Europe/Moscow`). Границы локального полуинтервала `[начало, конец)` переводятся в UTC перед запросом к UTC-naive timestamps; дневная и месячная группировка выполняется обратно в этой таймзоне.
+- `TIMEZONE` — таймзона для отображения дат, локальных отчётных периодов и расписания JobQueue (например, `Europe/Moscow`). Границы локального полуинтервала `[начало, конец)` переводятся в timezone-aware UTC перед запросом к `TIMESTAMPTZ`; дневная и месячная группировка выполняется обратно в этой таймзоне.
 - `DAILY_SUMMARY_HOUR` — час ежедневного запуска JobQueue в таймзоне `TIMEZONE` (по умолчанию `18`).
 - `DAILY_SUMMARY_MINUTE` — минута ежедневного запуска JobQueue в таймзоне `TIMEZONE` (по умолчанию `0`).
 - `YESTERDAY_PEAK_ALERT_HOUR` — час утренней проверки максимума за вчера в таймзоне `TIMEZONE` (по умолчанию `8`).
@@ -99,7 +122,10 @@
 - `BOT_VLESS_FALLBACK_URL` — дополнительный VLESS share link. Если основной `BOT_VLESS_URL` не проходит render/startup smoke или активный маршрут позже деградирует, `xray-client` автоматически пробует следующий кандидат.
 - `BOT_STARTUP_RETRY_DELAY_SECONDS` — пауза между supervised-перезапусками процесса `bot.py`, если Telegram API временно недоступен через proxy или прямой транспорт (по умолчанию `15` секунд).
 
-Для `tracker` при старте контейнера автоматически устанавливаются доверенные сертификаты из каталога `docker/certs/`, поэтому обычный deploy через `docker compose up -d --build --force-recreate --remove-orphans` пересоздаёт контейнер уже с актуальной trust store.
+Доверенные сертификаты из `docker/certs/` встраиваются в образ `tracker` на
+этапе сборки. Поэтому после их изменения нужен deploy с `--build`; runtime
+процессы запускаются от непривилегированного пользователя и не изменяют trust
+store при старте.
 
 ### Proxy только для `bot`
 
@@ -114,15 +140,29 @@
 - Если watchdog два раза подряд видит backlog Telegram updates при превышении порога стагнации, `bot` завершает процесс и рассчитывает на автоматический рестарт контейнера через `restart: unless-stopped`.
 - `xray-client` тоже использует `restart: unless-stopped`, поэтому после ребута хоста или Docker daemon он поднимается снова; idle-режим при `BOT_PROXY_ENABLED=false` предотвращает restart-loop.
 - `xray-client` проверяет не только локальный порт, но и outbound-маршрут через `XRAY_HEALTHCHECK_URL`; в compose по умолчанию используется `https://api.ipify.org`.
+- Readiness/status-файлы по умолчанию создаются в platform temporary directory контейнера. Для нестандартного writable mount доступны `TRACKER_READY_FILE`, `BOT_READY_FILE`, `XRAY_STATUS_FILE` и `XRAY_CONFIG_FILE`; значения должны быть доступны процессу и healthcheck соответствующего сервиса.
 - `tracker` и `db` не получают proxy env и продолжают работать напрямую.
 
 ## Reporter runtime
 
+Базовый Compose не подключает `reporter` к Ollama-сети. При
+`OLLAMA_ENABLED=true` запускайте stack с явным override:
+
+```bash
+export APP_ENV_FILE=.env
+docker compose --env-file "$APP_ENV_FILE" -f compose.yml -f compose.ollama.yml up -d
+```
+
+Без override запрос к Ollama не выполняется при `OLLAMA_ENABLED=false`, а PDF
+использует детерминированный narrative fallback.
+
 - `reporter` — отдельный внутренний сервис для monthly PDF pipeline.
 - В текущей реализации `reporter` собирает monthly PDF с AI-narrative поверх детерминированных данных и уходит в жёсткий fallback, если `Ollama` недоступна или ответ невалиден.
 - Сервис слушает только внутри Docker-сети и не публикует host ports.
-- На `homeserver` сервис дополнительно подключается к внешней сети `localllm_localllm`, чтобы позже ходить к локальной `Ollama` по имени `ollama`.
-- В PR1 `reporter` использует тот же Python image и тот же flat `src/bot` layout, что и `bot`, чтобы не раздувать инфраструктуру до появления реальной PDF-логики.
+- При `OLLAMA_ENABLED=true` reporter подключается к внешней сети
+  `localllm_localllm` только через `compose.ollama.yml`.
+- Reporter использует отдельный package `financetracker.reporting`; его runtime
+  не импортирует Telegram SDK.
 
 ### Подключение `reporter` к `Ollama`
 
@@ -131,12 +171,15 @@
 
 Правильная схема:
 
-- `reporter` подключён к внешней Docker-сети `localllm_localllm`;
+- `reporter` подключается к внешней Docker-сети `localllm_localllm` только при
+  явном `compose.ollama.yml`;
 - `bot` и `xray-client` дополнительно соединены выделенной internal-сетью `bot_proxy_internal`; `xray-client` отсутствует в default-сети и не публикует SOCKS port на host;
 - `bot` и `reporter` используют отдельную internal-сеть `bot_reporter_internal`, а служебный ключ остаётся обязательным вторым рубежом;
 - `OLLAMA_BASE_URL=http://ollama:11434`.
 
-Если внешняя сеть отсутствует, `docker compose up` с сервисом `reporter` не стартует, пока сеть не будет создана или пока не будет поднят compose-проект `LocalLLM`.
+Отсутствие внешней сети не влияет на базовый stack. Она требуется только при
+`OLLAMA_ENABLED=true` и явном подключении `compose.ollama.yml`; в этом режиме
+сначала создайте сеть или поднимите compose-проект `LocalLLM`.
 
 Быстрая проверка:
 
@@ -158,11 +201,11 @@ docker compose exec bot python proxy_smoke.py
 
 - `APP_SERVICE` определяет поле `service` в JSON-логах; для `xray-client` оно фиксируется как `xray_client` в compose-конфиге.
 - `APP_ENV` определяет поле `env`; по умолчанию используется `dev`, если переменная не задана.
-- First-party код должен писать явные события в формате `snake_case` через общий logger из `src/common/logging_setup.py`.
+- First-party код должен писать явные события в формате `snake_case` через общий logger из `financetracker.common.logging_setup`.
 - Fallback `event="auto_log"` допустим только для записей без явного события, обычно от сторонних библиотек.
 - В таких fallback-записях formatter добавляет `ctx.event_source`: `library` для сторонних библиотек и `auto` для auto-tagging first-party записи, если код не задал `event` явно.
 - Для дочерних процессов строки stdout/stderr оборачиваются в JSON и получают `ctx.stream`.
-- `src/xray_client/render_config.py` остаётся исключением: он печатает конфиг в stdout как полезный data output, а не как лог.
+- `financetracker.xray.render_config` остаётся исключением: он печатает конфиг в stdout как полезный data output, а не как лог.
 
 ## Снапшоты
 

@@ -9,8 +9,8 @@ from zoneinfo import ZoneInfo
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-RUNTIME_FILE = PROJECT_ROOT / "src" / "bot" / "runtime.py"
-SERVICES_FILE = PROJECT_ROOT / "src" / "bot" / "services.py"
+RUNTIME_FILE = PROJECT_ROOT / "src" / "financetracker" / "bot" / "runtime.py"
+SERVICES_FILE = PROJECT_ROOT / "src" / "financetracker" / "bot" / "services.py"
 
 
 def load_selected_symbols(file_path: Path, wanted_assignments: set[str], wanted_functions: set[str], namespace=None):

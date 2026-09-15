@@ -36,7 +36,7 @@ services:
     expose:
       - "1080"
     healthcheck:
-      test: ["CMD", "python", "-u", "-m", "xray_client.healthcheck"]
+      test: ["CMD", "financetracker-xray-healthcheck"]
       interval: 10s
       timeout: 15s
       retries: 6
@@ -44,11 +44,17 @@ services:
     networks:
       - bot_proxy_internal
       - xray_egress
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
     restart: unless-stopped
 
   migrate:
     image: ${TRACKER_IMAGE:-financetracker-tracker}
-    entrypoint: ["python", "-u", "migrate.py"]
+    entrypoint: ["financetracker-migrate"]
     depends_on:
       db:
         condition: service_healthy
@@ -63,6 +69,12 @@ services:
       DB_USER: ${POSTGRES_USER}
       DB_PASSWORD: ${POSTGRES_PASSWORD}
       MIGRATIONS_DIR: /app/migrations
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
     restart: "no"
 
   tracker:
@@ -88,14 +100,18 @@ services:
       DB_PASSWORD: ${POSTGRES_PASSWORD}
       TRACKER_READY_FILE: /tmp/financetracker-tracker.ready
       TRACKER_READY_MAX_AGE_SECONDS: ${TRACKER_READY_MAX_AGE_SECONDS:-}
-    volumes:
-      - ./docker/certs:/opt/finance/certs:ro
     healthcheck:
-      test: ["CMD", "python", "-u", "tracker_healthcheck.py"]
+      test: ["CMD", "financetracker-tracker-healthcheck"]
       interval: 15s
       timeout: 5s
       retries: 4
       start_period: 30s
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
     restart: unless-stopped
 
   bot:
@@ -132,7 +148,7 @@ services:
       BOT_READY_MAX_AGE_SECONDS: ${BOT_READY_MAX_AGE_SECONDS:-120}
       BOT_READY_HEARTBEAT_SECONDS: ${BOT_READY_HEARTBEAT_SECONDS:-30}
     healthcheck:
-      test: ["CMD", "python", "-u", "bot_healthcheck.py"]
+      test: ["CMD", "financetracker-bot-healthcheck"]
       interval: 15s
       timeout: 5s
       retries: 4
@@ -141,6 +157,12 @@ services:
       - default
       - bot_proxy_internal
       - bot_reporter_internal
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
     restart: unless-stopped
 
   reporter:
@@ -189,7 +211,7 @@ services:
     expose:
       - "${REPORTER_PORT:-8088}"
     healthcheck:
-      test: ["CMD", "python", "-u", "report_entrypoint.py", "--healthcheck"]
+      test: ["CMD", "financetracker-reporter-healthcheck", "--healthcheck"]
       interval: 10s
       timeout: 5s
       retries: 6
@@ -197,7 +219,12 @@ services:
     networks:
       - default
       - bot_reporter_internal
-      - localllm_localllm
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
     restart: unless-stopped
 
 volumes:
@@ -211,6 +238,3 @@ networks:
   bot_reporter_internal:
     internal: true
   xray_egress: {}
-  localllm_localllm:
-    external: true
-    name: localllm_localllm

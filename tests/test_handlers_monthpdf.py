@@ -1,5 +1,4 @@
 import asyncio
-import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -8,11 +7,11 @@ from unittest.mock import AsyncMock, patch
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(PROJECT_ROOT / "src"))
-sys.path.insert(0, str(PROJECT_ROOT / "src" / "bot"))
 
-import handlers  # noqa: E402
-from report_client import ReporterClientError  # noqa: E402
+
+
+from financetracker.bot import handlers  # noqa: E402
+from financetracker.bot.report_client import ReporterClientError  # noqa: E402
 
 
 class FakeStatusMessage:

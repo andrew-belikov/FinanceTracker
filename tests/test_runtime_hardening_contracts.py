@@ -3,7 +3,6 @@ import csv
 import io
 import os
 import stat
-import sys
 import tempfile
 import unittest
 import weakref
@@ -16,13 +15,13 @@ import zipfile
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(PROJECT_ROOT / "src"))
-sys.path.insert(0, str(PROJECT_ROOT / "src" / "bot"))
 
-import handlers  # noqa: E402
-import runtime  # noqa: E402
-import dataset  # noqa: E402
-import debug_artifacts  # noqa: E402
+
+
+from financetracker.bot import handlers  # noqa: E402
+from financetracker.bot import runtime  # noqa: E402
+from financetracker.bot import dataset  # noqa: E402
+from financetracker.reporting import debug_artifacts  # noqa: E402
 
 
 class CsvSafetyTests(unittest.TestCase):

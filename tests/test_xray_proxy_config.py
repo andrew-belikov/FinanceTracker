@@ -1,14 +1,9 @@
-import sys
+import logging
 import unittest
 from unittest import mock
-from pathlib import Path
 
-
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(PROJECT_ROOT / "src"))
-
-import xray_client.entrypoint as xray_entrypoint
-from xray_client.entrypoint import (
+import financetracker.xray.entrypoint as xray_entrypoint
+from financetracker.xray.entrypoint import (
     ActiveProxySession,
     ShutdownState,
     install_shutdown_handlers,
@@ -17,8 +12,8 @@ from xray_client.entrypoint import (
     monitor_active_candidate,
     wait_for_shutdown,
 )
-from xray_client.healthcheck import build_proxy_check_command
-from xray_client.render_config import build_config
+from financetracker.xray.healthcheck import build_proxy_check_command
+from financetracker.xray.render_config import build_config
 
 
 TEST_VLESS_URL = (
@@ -34,6 +29,11 @@ TEST_KCP_VLESS_URL = (
 
 
 class XrayProxyConfigTests(unittest.TestCase):
+    def test_xray_child_output_suppresses_normal_connections_but_keeps_failures(self):
+        self.assertEqual(xray_entrypoint.xray_output_level("accepted tcp:127.0.0.1:1080"), logging.DEBUG)
+        self.assertEqual(xray_entrypoint.xray_output_level("[Error] transport failed"), logging.ERROR)
+        self.assertEqual(xray_entrypoint.xray_output_level("[Warning] slow route"), logging.WARNING)
+
     def test_build_config_renders_socks_inbound_and_reality_transport_options(self):
         config, _link = build_config(TEST_VLESS_URL, listen_port=1080)
 
@@ -134,9 +134,9 @@ class XrayProxyConfigTests(unittest.TestCase):
         )
 
         with (
-            mock.patch("xray_client.entrypoint.run_smoke_through_proxy", side_effect=[(False, "timeout"), (False, "timeout")]),
-            mock.patch("xray_client.entrypoint.time.monotonic", return_value=0.0),
-            mock.patch("xray_client.entrypoint.time.sleep"),
+            mock.patch("financetracker.xray.entrypoint.run_smoke_through_proxy", side_effect=[(False, "timeout"), (False, "timeout")]),
+            mock.patch("financetracker.xray.entrypoint.time.monotonic", return_value=0.0),
+            mock.patch("financetracker.xray.entrypoint.time.sleep"),
         ):
             outcome, return_code = monitor_active_candidate(
                 session,
@@ -161,11 +161,11 @@ class XrayProxyConfigTests(unittest.TestCase):
 
         with (
             mock.patch(
-                "xray_client.entrypoint.run_smoke_through_proxy",
+                "financetracker.xray.entrypoint.run_smoke_through_proxy",
                 side_effect=[(False, "timeout"), (True, "ok"), (False, "timeout")],
             ) as smoke_mock,
-            mock.patch("xray_client.entrypoint.time.monotonic", return_value=0.0),
-            mock.patch("xray_client.entrypoint.time.sleep"),
+            mock.patch("financetracker.xray.entrypoint.time.monotonic", return_value=0.0),
+            mock.patch("financetracker.xray.entrypoint.time.sleep"),
         ):
             outcome, return_code = monitor_active_candidate(
                 session,
@@ -189,7 +189,7 @@ class XrayProxyConfigTests(unittest.TestCase):
             link_summary="masked://primary",
         )
 
-        with mock.patch("xray_client.entrypoint.run_smoke_through_proxy") as smoke_mock:
+        with mock.patch("financetracker.xray.entrypoint.run_smoke_through_proxy") as smoke_mock:
             outcome, return_code = monitor_active_candidate(
                 session,
                 listen_port=1080,
@@ -209,7 +209,7 @@ class XrayProxyConfigTests(unittest.TestCase):
         def capture_handler(signum, handler):
             handlers[signum] = handler
 
-        with mock.patch("xray_client.entrypoint.signal.signal", side_effect=capture_handler):
+        with mock.patch("financetracker.xray.entrypoint.signal.signal", side_effect=capture_handler):
             install_shutdown_handlers(shutdown_state, on_shutdown)
 
         handlers[xray_entrypoint.signal.SIGTERM](xray_entrypoint.signal.SIGTERM, None)
@@ -224,7 +224,7 @@ class XrayProxyConfigTests(unittest.TestCase):
         def request_shutdown(_seconds):
             shutdown_state.requested = True
 
-        with mock.patch("xray_client.entrypoint.time.sleep", side_effect=request_shutdown) as sleep_mock:
+        with mock.patch("financetracker.xray.entrypoint.time.sleep", side_effect=request_shutdown) as sleep_mock:
             wait_for_shutdown(shutdown_state, poll_interval_seconds=0.25)
 
         sleep_mock.assert_called_once_with(0.25)
@@ -232,9 +232,9 @@ class XrayProxyConfigTests(unittest.TestCase):
     def test_main_keeps_disabled_proxy_container_alive_until_shutdown(self):
         with (
             mock.patch.dict("os.environ", {"BOT_PROXY_ENABLED": "false", "XRAY_LOCAL_PROXY_PORT": "1080"}),
-            mock.patch("xray_client.entrypoint.write_status") as write_status_mock,
-            mock.patch("xray_client.entrypoint.install_shutdown_handlers") as install_handlers_mock,
-            mock.patch("xray_client.entrypoint.wait_for_shutdown") as wait_for_shutdown_mock,
+            mock.patch("financetracker.xray.entrypoint.write_status") as write_status_mock,
+            mock.patch("financetracker.xray.entrypoint.install_shutdown_handlers") as install_handlers_mock,
+            mock.patch("financetracker.xray.entrypoint.wait_for_shutdown") as wait_for_shutdown_mock,
         ):
             return_code = xray_entrypoint.main()
 

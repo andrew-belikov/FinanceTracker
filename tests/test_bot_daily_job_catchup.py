@@ -7,7 +7,7 @@ from zoneinfo import ZoneInfo
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-JOBS_FILE = PROJECT_ROOT / "src" / "bot" / "jobs.py"
+JOBS_FILE = PROJECT_ROOT / "src" / "financetracker" / "bot" / "jobs.py"
 
 
 def load_selected_symbols(file_path: Path, wanted_functions: set[str], namespace=None):

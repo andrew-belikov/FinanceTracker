@@ -29,7 +29,8 @@ docker volume create financetracker_fintracker-db
 docker compose up -d --build
 ```
 
-При создании контейнера `tracker` entrypoint автоматически устанавливает сертификаты из `docker/certs/` в системную trust store.
+Сертификаты из `docker/certs/` устанавливаются в trust store во время сборки
+образа `tracker`. Runtime-контейнеры работают без root и с read-only root filesystem; временные файлы создаются только в tmpfs `/tmp`.
 
 4. Проверьте статус:
 
@@ -54,27 +55,57 @@ docker compose logs --tail=200 tracker
 docker compose logs --tail=200 bot
 ```
 
-Если менялись только файлы в `docker/certs/`, достаточно пересоздать `tracker`:
+Если менялись только файлы в `docker/certs/`, пересоберите и пересоздайте `tracker`:
 
 ```bash
-docker compose up -d --force-recreate tracker
+docker compose up -d --build --force-recreate tracker
 ```
+
+## Проверка логирования после deploy
+
+После обновления проверьте JSON records за период обычной нагрузки. Штатные
+Xray connection records должны иметь уровень `DEBUG`, а APScheduler не должен
+выдавать минутные `auto_log` ниже `WARNING`:
+
+```bash
+docker compose logs --since=1h --no-log-prefix xray-client \
+  | grep '"event": "xray_process_output"' \
+  | grep -Ev '"level": "(DEBUG|WARNING|ERROR|CRITICAL)"' || true
+docker compose logs --since=1h --no-log-prefix bot tracker \
+  | grep '"logger": "apscheduler' \
+  | grep -Ev '"level": "(WARNING|ERROR|CRITICAL)"' || true
+```
+
+Пустой вывод означает отсутствие штатного INFO-flood. Не фильтруйте
+`WARNING`/`ERROR`: failover, recovery и ошибки child process должны оставаться
+видимыми. Для exception records formatter обязан сохранять объект `error` с
+`type`, `message`, `stack` и `where`; не отправляйте raw production logs в
+тикеты или чаты без отдельной sanitization-проверки.
 
 ## Backup И Restore
 
-### Backup
+### Backup перед deploy
+
+`deploy.yml` запускает `scripts/predeploy_backup.sh` до candidate containers.
+Скрипт создаёт no-clobber custom dump, migration ledger, manifest с source SHA и
+CI run, SHA-256, затем восстанавливает dump во временную database и выполняет
+на ней `migrate --check`. Любая ошибка блокирует deploy.
+
+Задайте GitHub environment variable `FINANCETRACKER_BACKUP_DIR` на существующий
+каталог вне checkout и Docker volumes. Храните копии не менее 30 дней и 10
+последних успешных deploy; не удаляйте backup до нового успешного restore drill.
+
+### Экстренный restore
 
 ```bash
-docker compose exec -T db pg_dump -U "$POSTGRES_USER" "$POSTGRES_DB" > backup.sql
+docker compose exec -T db pg_restore -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
+  --clean --if-exists < /secure/path/postgres.dump
 ```
 
-### Restore
-
-```bash
-cat backup.sql | docker compose exec -T db psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"
-```
-
-Перед крупным изменением схемы или redeploy делайте backup.
+Production restore требует break-glass решения: остановить writers,
+восстановить в новый volume/database, проверить `SHA256SUMS` и `migrate --check`,
+после чего переключить services. Application rollback допустим только на
+сохранённые previous image IDs и при подтверждённой schema compatibility.
 
 ## Когда Нужны SQL-Миграции
 
@@ -86,24 +117,24 @@ Forward-миграции применяются автоматически се�
 
 | Файл | Когда применять | Что меняет | Важные caveats |
 | --- | --- | --- | --- |
+| `migrations/20260220_portfolio_baseline.sql` | на чистой БД | создаёт начальные таблицы portfolio и instruments | это versioned baseline; ORM не создаёт schema автоматически |
 | `migrations/20260221_operations_from_deposits.sql` | при переходе со старой схемы `deposits` | создаёт `operations`, переименовывает старую `deposits` в `deposits_legacy`, создаёт исторический compatibility-view `deposits` | активный runtime-код читает пополнения из `operations`, а не из `deposits` |
 | `migrations/20260221_operations_from_deposits.rollback.sql` | только если нужен частичный rollback исторического compatibility-слоя | возвращает `deposits` как таблицу, если есть `deposits_legacy` | не удаляет `operations` |
 | `migrations/20260225_operations_add_instrument_columns.sql` | если существующая `operations` ещё без `instrument_uid` и `figi` | добавляет 2 колонки | после применения `tracker` дозаполняет пустые поля на последующих синках |
 | `migrations/20260226_income_events.sql` | если существующая схема ещё без `income_events` | создаёт таблицу событий дохода | без этой таблицы минутные income-notifications и часть отчётных сумм не работают |
 | `migrations/20260304_operations_operation_item_fields.sql` | если существующая `operations` ещё без расширенных полей `OperationItem` | добавляет колонки `state`, `commission`, `yield`, `instrument_type` и другие | также добавляет unique-констрейнт по `operation_id`; после миграции возможен backfill исторических строк |
 | `migrations/20260404_bot_daily_job_runs.sql` | если нужен startup catch-up для daily job без дублей | создаёт таблицу `bot_daily_job_runs` | без этой таблицы бот не сможет надёжно добирать пропущенный daily job после позднего рестарта |
-| `migrations/20260728_payout_calendar_events.sql` | при добавлении `/calendar` в существующую БД | создаёт таблицу ожидаемых купонов и объявленных дивидендов | tracker также создаёт таблицу через `create_all`, но явная миграция оставляет управляемый след изменения схемы |
+| `migrations/20260728_payout_calendar_events.sql` | при добавлении `/calendar` в существующую БД | создаёт таблицу ожидаемых купонов и объявленных дивидендов | таблица создаётся только этой миграцией; после применения tracker поддерживает её содержимое |
 | `migrations/20260805_operations_cashflow_category.sql` | при добавлении учёта вычета ИИС | добавляет nullable `operations.cashflow_category` и индекс | API-sync сохраняет ручную категорию; исторический backfill делать только по точному `operation_id` после миграции |
 
 ## Автоматический Порядок Миграции
 
 1. `db` проходит healthcheck.
-2. Одноразовый сервис `migrate` создаёт ORM-baseline для чистой БД.
-3. Под advisory lock последовательно применяются ещё не зарегистрированные
+2. Под advisory lock последовательно применяются ещё не зарегистрированные
    `migrations/*.sql`, кроме `*.rollback.sql`.
-4. В одной транзакции с каждой миграцией в `schema_migrations` сохраняется
+3. В одной транзакции с каждой миграцией в `schema_migrations` сохраняется
    имя файла и SHA-256.
-5. Только после успешного завершения `migrate` запускаются `tracker`, `bot`
+4. Только после успешного завершения `migrate` запускаются `tracker`, `bot`
    и `reporter`.
 
 Проверка без применения новых миграций:

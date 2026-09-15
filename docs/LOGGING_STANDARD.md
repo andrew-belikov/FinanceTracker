@@ -111,6 +111,10 @@
 - `stack`
 - `where`
 
+Значения `error.message` и `error.stack` проходят тот же sanitizer, что и
+остальные строки. Сам объект не редактируется целиком: безопасные `type` и
+`where` обязательны для различения transport, TLS, proxy и программных сбоев.
+
 Если форматтер сам сломался, допускается fallback-событие `logging_formatter_failed` с минимальным `error.message`.
 
 ## Типы событий
@@ -145,6 +149,13 @@
 ## Child-process bridge
 
 Если сервис запускает дочерний процесс, его stdout/stderr нельзя просто пробрасывать в контейнерный лог.
+
+Штатные строки child-process Xray (например, accepted connections) имеют
+уровень `DEBUG`; строки с warning/error/failure сохраняют соответствующий
+`WARNING`/`ERROR`. События failover и recovery остаются явными first-party
+событиями уровня `INFO` или выше. Автоматические сообщения APScheduler
+разрешены только от `WARNING`, чтобы минутные job executions не маскировали
+инциденты.
 
 Требование:
 - родительский процесс запускает child с `stdout=PIPE` и `stderr=PIPE`

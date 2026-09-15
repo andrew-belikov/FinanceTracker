@@ -5,10 +5,15 @@ from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 
+from financetracker.domain.cashflows import (
+    add_operation_cashflow_by_currency_day,
+    build_operation_cashflows_for_snapshot_interval,
+    normalize_operation_currency,
+    sum_decimal_values_for_snapshot_interval,
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-DATASET_FILE = PROJECT_ROOT / "src" / "bot" / "dataset.py"
-SERVICES_FILE = PROJECT_ROOT / "src" / "bot" / "services.py"
+DATASET_FILE = PROJECT_ROOT / "src" / "financetracker" / "bot" / "dataset.py"
 
 
 def load_build_dataset_export(namespace):
@@ -26,36 +31,9 @@ def load_build_dataset_export(namespace):
     return namespace["build_dataset_export"]
 
 
-def load_interval_sum(namespace):
-    module_ast = ast.parse(SERVICES_FILE.read_text(encoding="utf-8"), filename=str(SERVICES_FILE))
-    node = next(
-        node
-        for node in module_ast.body
-        if isinstance(node, ast.FunctionDef) and node.name == "sum_decimal_values_for_snapshot_interval"
-    )
-    copied = deepcopy(node)
-    copied.returns = None
-    for arg in (*copied.args.args, *copied.args.kwonlyargs):
-        arg.annotation = None
-    exec(compile(ast.Module(body=[copied], type_ignores=[]), str(SERVICES_FILE), "exec"), namespace)
-    return namespace["sum_decimal_values_for_snapshot_interval"]
-
-
-def load_service_function(name, namespace):
-    module_ast = ast.parse(SERVICES_FILE.read_text(encoding="utf-8"), filename=str(SERVICES_FILE))
-    node = next(node for node in module_ast.body if isinstance(node, ast.FunctionDef) and node.name == name)
-    copied = deepcopy(node)
-    copied.returns = None
-    for arg in (*copied.args.args, *copied.args.kwonlyargs):
-        arg.annotation = None
-    exec(compile(ast.Module(body=[copied], type_ignores=[]), str(SERVICES_FILE), "exec"), namespace)
-    return namespace[name]
-
-
 class DatasetSnapshotIntervalTests(unittest.TestCase):
     def _build_export(self, operation_specs, *, end_value="150"):
         first = date(2026, 4, 1)
-        flow_day = date(2026, 4, 2)
         second = date(2026, 4, 3)
         daily_rows = [
             {
@@ -130,21 +108,15 @@ class DatasetSnapshotIntervalTests(unittest.TestCase):
             "normalize_decimal": lambda value: Decimal(str(value or 0)),
             "to_local_market_date": lambda value: value.date(),
             "to_iso_datetime": lambda value: value.isoformat() if value is not None else None,
-            "local_reporting_bounds_utc_naive": lambda start, end: (
+            "local_reporting_bounds_utc": lambda start, end: (
                 datetime.combine(start, time.min),
                 datetime.combine(end, time.min),
             ),
         }
-        namespace["sum_decimal_values_for_snapshot_interval"] = load_interval_sum(namespace)
-        namespace["normalize_operation_currency"] = load_service_function(
-            "normalize_operation_currency", namespace
-        )
-        namespace["add_operation_cashflow_by_currency_day"] = load_service_function(
-            "add_operation_cashflow_by_currency_day", namespace
-        )
-        namespace["build_operation_cashflows_for_snapshot_interval"] = load_service_function(
-            "build_operation_cashflows_for_snapshot_interval", namespace
-        )
+        namespace["sum_decimal_values_for_snapshot_interval"] = sum_decimal_values_for_snapshot_interval
+        namespace["normalize_operation_currency"] = normalize_operation_currency
+        namespace["add_operation_cashflow_by_currency_day"] = add_operation_cashflow_by_currency_day
+        namespace["build_operation_cashflows_for_snapshot_interval"] = build_operation_cashflows_for_snapshot_interval
         build_export = load_build_dataset_export(namespace)
 
         return build_export(object())

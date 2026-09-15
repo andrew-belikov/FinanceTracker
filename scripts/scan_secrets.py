@@ -97,7 +97,13 @@ def scan_current_tree(repo: Path) -> list[Finding]:
     for relative in paths:
         if not relative:
             continue
-        data = (repo / relative).read_bytes()
+        path = repo / relative
+        # ``git ls-files`` lists an unstaged deletion until it is added to the
+        # index.  Scan the actual working tree rather than failing before the
+        # rest of the tracked files can be checked.
+        if not path.is_file():
+            continue
+        data = path.read_bytes()
         if b"\x00" in data:
             continue
         findings.extend(scan_text(data.decode("utf-8", errors="replace"), source=relative))

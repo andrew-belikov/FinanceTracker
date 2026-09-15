@@ -1,4 +1,4 @@
-FROM python:3.12-slim
+FROM python:3.12-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -31,7 +31,13 @@ WORKDIR /app
 COPY requirements/reporter.txt ./requirements.txt
 RUN pip install -r requirements.txt
 
-COPY src/common/ ./common/
-COPY src/bot/ ./
+COPY pyproject.toml README.md ./
+COPY src/ ./src/
+RUN pip install --no-deps .
 
-CMD ["python", "-u", "report_entrypoint.py"]
+RUN groupadd --system --gid 10001 financetracker \
+ && useradd --system --uid 10001 --gid financetracker --home-dir /nonexistent --shell /usr/sbin/nologin financetracker
+
+USER financetracker
+
+CMD ["financetracker-reporter"]

@@ -1,0 +1,11 @@
+# Optional Ollama connectivity. Use only when OLLAMA_ENABLED=true:
+# docker compose -f compose.yml -f compose.ollama.yml up -d
+services:
+  reporter:
+    networks:
+      - localllm_localllm
+
+networks:
+  localllm_localllm:
+    external: true
+    name: localllm_localllm

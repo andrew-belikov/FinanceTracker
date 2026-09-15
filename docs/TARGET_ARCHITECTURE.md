@@ -428,11 +428,14 @@ source SHA
 9. Удалить forwarding entrypoints и `sys.path` compatibility только после
    успешного переключения всех consumers.
 10. Закрыть runtime hardening и build-once/deploy-by-digest.
-11. Отдельными post-structure migrations перевести time storage на
-    timezone-aware contract и финансовый pipeline на end-to-end `Decimal`.
-    Каждый такой переход получает собственную schema/behavior version,
-    preflight, backfill/dual-read при необходимости и production-derived
-    acceptance; он не смешивается с механическим переносом модулей.
+11. Time storage переведён отдельной migration
+    `20260915_timezone_aware_utc.sql` на timezone-aware contract: legacy
+    `TIMESTAMP WITHOUT TIME ZONE` явно интерпретируется как UTC, compatibility
+    view `deposits` пересоздаётся в одной транзакции. Финансовый pipeline
+    переводится на end-to-end `Decimal` отдельным schema/behavior срезом с
+    собственным preflight, backfill/dual-read при необходимости и
+    production-derived acceptance; он не смешивается с механическим переносом
+    модулей.
 
 Каждый шаг является отдельным проходящим коммитом. Механический перенос,
 изменение финансового поведения и смена operational contract не объединяются.

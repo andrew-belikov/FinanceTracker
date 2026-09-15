@@ -1,13 +1,12 @@
 import ast
-import os
 import unittest
 from copy import deepcopy
 from pathlib import Path
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-RUNTIME_FILE = PROJECT_ROOT / "src" / "bot" / "runtime.py"
-TRACKER_FILE = PROJECT_ROOT / "src" / "tracker" / "app.py"
+RUNTIME_FILE = PROJECT_ROOT / "src" / "financetracker" / "bot" / "runtime.py"
+TRACKER_FILE = PROJECT_ROOT / "src" / "financetracker" / "tracker" / "app.py"
 
 
 def load_symbols(path: Path, names: set[str], namespace=None):
@@ -31,7 +30,7 @@ def load_symbols(path: Path, names: set[str], namespace=None):
 class RuntimeConfigurationTests(unittest.TestCase):
     def test_bot_main_validates_configuration_before_application_build(self):
         tree = ast.parse(
-            (PROJECT_ROOT / "src" / "bot" / "bot.py").read_text(encoding="utf-8")
+            (PROJECT_ROOT / "src" / "financetracker" / "bot" / "bot.py").read_text(encoding="utf-8")
         )
         main = next(node for node in tree.body if getattr(node, "name", None) == "main")
         calls = [

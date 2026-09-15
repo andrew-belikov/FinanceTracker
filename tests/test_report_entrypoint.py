@@ -15,17 +15,16 @@ class ReporterEntrypointTests(unittest.TestCase):
         env["PYTHONPATH"] = os.pathsep.join(
             [
                 str(PROJECT_ROOT / "src"),
-                str(PROJECT_ROOT / "src" / "bot"),
                 env.get("PYTHONPATH", ""),
             ]
         )
         code = textwrap.dedent(
             """
             import sys
-            import report_entrypoint
+            import financetracker.reporting.report_entrypoint
 
-            assert "report_server" not in sys.modules
-            assert "report_render" not in sys.modules
+            assert "financetracker.reporting.report_server" not in sys.modules
+            assert "financetracker.reporting.report_render" not in sys.modules
             """
         )
 

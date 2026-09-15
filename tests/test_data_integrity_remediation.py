@@ -1,36 +1,18 @@
 import importlib.util
-import os
 from pathlib import Path
-import sys
 import unittest
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from decimal import Decimal
 from unittest import mock
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
+from financetracker.tracker import app as tracker_app
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-TRACKER_DIR = PROJECT_ROOT / "src" / "tracker"
-sys.path.insert(0, str(PROJECT_ROOT / "src"))
-sys.path.insert(0, str(TRACKER_DIR))
-
-APP_SPEC = importlib.util.spec_from_file_location(
-    "tracker_app_data_remediation_under_test",
-    TRACKER_DIR / "app.py",
-)
-tracker_app = importlib.util.module_from_spec(APP_SPEC)
-assert APP_SPEC.loader is not None
-with mock.patch.dict(
-    os.environ,
-    {
-        "DB_DSN": "sqlite://",
-        "VERIFY_SSL": "true",
-        "TINVEST_API_TOKEN": "test-token",
-    },
-):
-    APP_SPEC.loader.exec_module(tracker_app)
+TRACKER_DIR = PROJECT_ROOT / "src" / "financetracker" / "tracker"
 
 
 class DataIntegrityRemediationTests(unittest.TestCase):
@@ -43,7 +25,7 @@ class DataIntegrityRemediationTests(unittest.TestCase):
         self.engine.dispose()
 
     def test_p1_03_local_civil_bounds_and_utc_grouping_cover_dst(self):
-        from common.time_utils import local_civil_bounds_to_utc_naive, utc_naive_to_local_date
+        from financetracker.common.time_utils import local_civil_bounds_to_utc, utc_to_local_date
 
         cases = (
             (
@@ -89,9 +71,12 @@ class DataIntegrityRemediationTests(unittest.TestCase):
         )
         for label, local_start, local_end, zone, expected_start, expected_end in cases:
             with self.subTest(label):
-                start, end = local_civil_bounds_to_utc_naive(local_start, local_end, zone)
-                self.assertEqual((start, end), (expected_start, expected_end))
-                self.assertEqual(utc_naive_to_local_date(start, zone), local_start)
+                start, end = local_civil_bounds_to_utc(local_start, local_end, zone)
+                self.assertEqual(
+                    (start, end),
+                    (expected_start.replace(tzinfo=timezone.utc), expected_end.replace(tzinfo=timezone.utc)),
+                )
+                self.assertEqual(utc_to_local_date(start, zone), local_start)
 
     def test_p1_09_income_event_identity_includes_currency(self):
         event = tracker_app.IncomeEvent(
@@ -491,7 +476,9 @@ class MigrationReadOnlyContractTests(unittest.TestCase):
         self.assertLess(check_branch.index("if check_only"), check_branch.index("SCHEMA_MIGRATIONS_DDL"))
 
     def test_p2_09_optional_income_queries_use_savepoint(self):
-        source = (PROJECT_ROOT / "src" / "bot" / "queries.py").read_text(encoding="utf-8")
+        source = (
+            PROJECT_ROOT / "src" / "financetracker" / "bot" / "queries.py"
+        ).read_text(encoding="utf-8")
         self.assertIn("begin_nested()", source)
 
 
