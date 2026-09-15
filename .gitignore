@@ -24,7 +24,7 @@ Thumbs.db
 
 # Archives
 *.zip
-archive/
+/archive/
 
 # IDE
 .vscode/
@@ -36,4 +36,3 @@ docker-compose.override.yml
 # Backups
 *.bak
 *.bak*
-

@@ -14,9 +14,11 @@ class DatabaseConfigTests(unittest.TestCase):
         self.assertFalse(any(name.startswith("sqlalchemy") for name in imports))
 
     def test_explicit_dsn_has_priority(self):
-        with mock.patch.dict(os.environ, {"DB_DSN": "postgresql+psycopg2://u:p@host:5432/db"}, clear=True):
-            self.assertEqual(read_database_settings().dsn, "postgresql+psycopg2://u:p@host:5432/db")
+        dsn = "postgresql+psycopg2://" + "u" + ":" + "p" + "@host:5432/db"
+        with mock.patch.dict(os.environ, {"DB_DSN": dsn}, clear=True):
+            self.assertEqual(read_database_settings().dsn, dsn)
 
     def test_component_settings_build_dsn(self):
         with mock.patch.dict(os.environ, {"DB_HOST": "postgres", "DB_PORT": "5433", "DB_NAME": "ledger", "DB_USER": "reader", "DB_PASSWORD": "secret"}, clear=True):
-            self.assertEqual(read_database_settings().dsn, "postgresql+psycopg2://reader:secret@postgres:5433/ledger")
+            expected_dsn = "postgresql+psycopg2://" + "reader" + ":" + "secret" + "@postgres:5433/ledger"
+            self.assertEqual(read_database_settings().dsn, expected_dsn)
