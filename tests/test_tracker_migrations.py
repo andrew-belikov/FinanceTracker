@@ -1,29 +1,12 @@
-import importlib.util
 from pathlib import Path
 import tempfile
 import unittest
 from unittest import mock
 
+from financetracker.tracker import migrate
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 TRACKER_DIR = PROJECT_ROOT / "src" / "financetracker" / "tracker"
-
-
-
-SPEC = importlib.util.spec_from_file_location(
-    "tracker_migrate_under_test",
-    TRACKER_DIR / "migrate.py",
-)
-migrate = importlib.util.module_from_spec(SPEC)
-assert SPEC.loader is not None
-with mock.patch.dict(
-    "os.environ",
-    {
-        "DB_DSN": "sqlite://",
-        "TINVEST_API_TOKEN": "test-token",
-    },
-):
-    SPEC.loader.exec_module(migrate)
 
 
 class TrackerMigrationTests(unittest.TestCase):
