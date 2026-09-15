@@ -85,7 +85,9 @@ class SecretScanningTests(unittest.TestCase):
         self.assertIn("line=7", rendered)
 
     def test_history_scan_excludes_test_fixtures(self):
-        secret = "postgresql://" + "user" + ":" + "secret" + "@localhost:5432/fixture"
+        fixture_dsn = (
+            "postgresql://" + "user" + ":" + "fixture" + "@localhost:5432/fixture"
+        )
         with tempfile.TemporaryDirectory() as directory:
             repo = Path(directory)
             tests_dir = repo / "tests"
@@ -94,7 +96,7 @@ class SecretScanningTests(unittest.TestCase):
             subprocess.run(["git", "config", "user.email", "security@example.invalid"], cwd=repo, check=True)
             subprocess.run(["git", "config", "user.name", "Security Test"], cwd=repo, check=True)
             fixture = tests_dir / "fixture.py"
-            fixture.write_text(secret, encoding="utf-8")
+            fixture.write_text(fixture_dsn, encoding="utf-8")
             subprocess.run(["git", "add", "tests/fixture.py"], cwd=repo, check=True)
             subprocess.run(["git", "commit", "-qm", "add fixture"], cwd=repo, check=True)
 
