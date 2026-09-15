@@ -1,4 +1,4 @@
-python-telegram-bot[job-queue,socks]==21.6
+python-telegram-bot[job-queue,socks]==22.8
 SQLAlchemy
 greenlet
 psycopg2-binary
