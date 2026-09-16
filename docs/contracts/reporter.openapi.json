@@ -1,0 +1,372 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "FinanceTracker internal reporter API",
+    "version": "monthly_report_service.v1",
+    "description": "Internal-only bot-to-reporter contract. The reporter is not exposed on a host port."
+  },
+  "servers": [
+    {
+      "url": "http://reporter:8088",
+      "description": "Default Compose service address"
+    }
+  ],
+  "paths": {
+    "/healthz": {
+      "get": {
+        "operationId": "getReporterHealth",
+        "summary": "Return reporter process configuration and liveness",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Reporter process is serving requests",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/reports/monthly/pdf": {
+      "post": {
+        "operationId": "buildMonthlyPdf",
+        "summary": "Build a PDF for a monthly reporting period",
+        "security": [
+          {
+            "ReporterServiceKey": []
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MonthlyPdfRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Generated monthly PDF",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              },
+              "Content-Disposition": {
+                "required": true,
+                "schema": {
+                  "type": "string",
+                  "pattern": "^attachment; filename=\\\"[^\\\"]+\\\"$"
+                }
+              },
+              "X-Report-Period": {
+                "required": true,
+                "schema": {
+                  "type": "string",
+                  "pattern": "^[0-9]{4}-(0[1-9]|1[0-2])$"
+                }
+              }
+            },
+            "content": {
+              "application/pdf": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/AuthenticationRequired"
+          },
+          "403": {
+            "$ref": "#/components/responses/AuthenticationFailed"
+          },
+          "408": {
+            "$ref": "#/components/responses/RequestTimeout"
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerFailure"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "ReporterServiceKey": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-Reporter-Service-Key",
+        "description": "Shared internal service key. Runtime requires at least 16 characters."
+      }
+    },
+    "schemas": {
+      "MonthlyPdfRequest": {
+        "type": "object",
+        "properties": {
+          "year": {
+            "type": "integer",
+            "minimum": 1900,
+            "maximum": 2100
+          },
+          "month": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 12
+          }
+        },
+        "additionalProperties": true
+      },
+      "HealthResponse": {
+        "type": "object",
+        "required": [
+          "status",
+          "service",
+          "schema_version",
+          "pdf_engine",
+          "timezone",
+          "ollama_enabled",
+          "ollama_base_url",
+          "ollama_model",
+          "ollama_timeout_seconds",
+          "ollama_keep_alive",
+          "ollama_num_ctx",
+          "ollama_max_input_chars",
+          "debug_save_html",
+          "debug_save_payload"
+        ],
+        "properties": {
+          "status": {
+            "type": "string",
+            "const": "ok"
+          },
+          "service": {
+            "type": "string",
+            "const": "reporter"
+          },
+          "schema_version": {
+            "type": "string",
+            "const": "monthly_report_service.v1"
+          },
+          "pdf_engine": {
+            "type": "string"
+          },
+          "timezone": {
+            "type": "string"
+          },
+          "ollama_enabled": {
+            "type": "boolean"
+          },
+          "ollama_base_url": {
+            "type": "string"
+          },
+          "ollama_model": {
+            "type": "string"
+          },
+          "ollama_timeout_seconds": {
+            "type": "number"
+          },
+          "ollama_keep_alive": {
+            "type": "string"
+          },
+          "ollama_num_ctx": {
+            "type": "integer"
+          },
+          "ollama_max_input_chars": {
+            "type": "integer"
+          },
+          "debug_save_html": {
+            "type": "boolean"
+          },
+          "debug_save_payload": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": true
+      },
+      "ErrorResponse": {
+        "type": "object",
+        "required": [
+          "status",
+          "error"
+        ],
+        "properties": {
+          "status": {
+            "type": "string",
+            "const": "error"
+          },
+          "error": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": true
+      }
+    },
+    "responses": {
+      "BadRequest": {
+        "description": "Invalid request or report data unavailable",
+        "content": {
+          "application/json": {
+            "schema": {
+              "allOf": [
+                {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                {
+                  "properties": {
+                    "error": {
+                      "enum": [
+                        "invalid_request",
+                        "report_unavailable"
+                      ]
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        }
+      },
+      "AuthenticationRequired": {
+        "description": "Service key header is missing",
+        "content": {
+          "application/json": {
+            "schema": {
+              "allOf": [
+                {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                {
+                  "properties": {
+                    "error": {
+                      "const": "authentication_required"
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        }
+      },
+      "AuthenticationFailed": {
+        "description": "Service key does not match",
+        "content": {
+          "application/json": {
+            "schema": {
+              "allOf": [
+                {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                {
+                  "properties": {
+                    "error": {
+                      "const": "authentication_failed"
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        }
+      },
+      "RequestTimeout": {
+        "description": "Request body socket timeout",
+        "content": {
+          "application/json": {
+            "schema": {
+              "allOf": [
+                {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                {
+                  "properties": {
+                    "error": {
+                      "const": "request_timeout"
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        }
+      },
+      "ServerFailure": {
+        "description": "Rendering or pipeline failure",
+        "content": {
+          "application/json": {
+            "schema": {
+              "allOf": [
+                {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                {
+                  "properties": {
+                    "error": {
+                      "enum": [
+                        "report_render_failed",
+                        "report_failed"
+                      ]
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        }
+      },
+      "ServiceUnavailable": {
+        "description": "Reporter capacity or build deadline exhausted",
+        "content": {
+          "application/json": {
+            "schema": {
+              "allOf": [
+                {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                {
+                  "properties": {
+                    "error": {
+                      "enum": [
+                        "reporter_overloaded",
+                        "report_timeout"
+                      ]
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        }
+      }
+    }
+  }
+}

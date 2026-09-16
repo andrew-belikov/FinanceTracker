@@ -1,0 +1,1 @@
+"""FinanceTracker installable application package."""

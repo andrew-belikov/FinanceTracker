@@ -1,0 +1,44 @@
+FROM python:3.12-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea
+
+ARG XRAY_VERSION=26.2.6
+ARG XRAY_SHA256_AMD64=29ce535b56e207a406ffa1c2d4842dcc410be003eff8ec508bb732abc9f8e385
+ARG XRAY_SHA256_ARM64=b52d8263453fbd6f4747fd6a1ecf70cd43a664243615dc892ea4674c01b2b5ee
+ARG TARGETARCH
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    DEBIAN_FRONTEND=noninteractive \
+    XRAY_VERSION=${XRAY_VERSION}
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
+    unzip \
+  && rm -rf /var/lib/apt/lists/*
+
+RUN set -eux; \
+    arch="${TARGETARCH:-amd64}"; \
+    case "${arch}" in \
+      amd64) asset="Xray-linux-64.zip"; archive_sha256="${XRAY_SHA256_AMD64}" ;; \
+      arm64) asset="Xray-linux-arm64-v8a.zip"; archive_sha256="${XRAY_SHA256_ARM64}" ;; \
+      *) echo "Unsupported TARGETARCH: ${arch}" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL "https://github.com/XTLS/Xray-core/releases/download/v${XRAY_VERSION}/${asset}" -o /tmp/xray.zip; \
+    echo "${archive_sha256}  /tmp/xray.zip" | sha256sum -c -; \
+    mkdir -p /usr/local/share/xray; \
+    unzip /tmp/xray.zip xray geoip.dat geosite.dat -d /usr/local/share/xray; \
+    install -m 0755 /usr/local/share/xray/xray /usr/local/bin/xray; \
+    rm -f /usr/local/share/xray/xray /tmp/xray.zip
+
+WORKDIR /opt/finance
+
+COPY pyproject.toml README.md ./
+COPY src/ ./src/
+RUN pip install --no-deps .
+
+RUN groupadd --system --gid 10001 financetracker \
+ && useradd --system --uid 10001 --gid financetracker --home-dir /nonexistent --shell /usr/sbin/nologin financetracker
+
+USER financetracker
+
+CMD ["financetracker-xray"]

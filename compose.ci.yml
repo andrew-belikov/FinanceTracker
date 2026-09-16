@@ -1,0 +1,70 @@
+# Ephemeral CI-only overrides. Production external resources remain defined in
+# compose.yml; this file is never used by deployment or operator commands.
+services:
+  db:
+    container_name: financetracker-ci-db-1
+    volumes:
+      - fintracker-db:/var/lib/postgresql/data
+    environment:
+      POSTGRES_DB: financetracker_ci
+      POSTGRES_USER: financetracker_ci
+      POSTGRES_PASSWORD: financetracker_ci
+
+  tracker:
+    container_name: financetracker-ci-tracker-1
+    environment:
+      APP_ENV: ci
+      DB_NAME: financetracker_ci
+      DB_USER: financetracker_ci
+      DB_PASSWORD: financetracker_ci
+      TRACKER_STARTUP_MODE: container-smoke
+
+  reporter:
+    container_name: financetracker-ci-reporter-1
+    environment:
+      APP_ENV: ci
+      DB_NAME: financetracker_ci
+      DB_USER: financetracker_ci
+      DB_PASSWORD: financetracker_ci
+      REPORTER_SERVICE_KEY: ci_reporter_service_key
+      OLLAMA_ENABLED: "false"
+
+  xray-client:
+    container_name: financetracker-ci-xray-client-1
+    environment:
+      APP_ENV: ci
+      BOT_PROXY_ENABLED: "false"
+
+  migrate:
+    container_name: financetracker-ci-migrate-1
+    environment:
+      APP_ENV: ci
+      DB_NAME: financetracker_ci
+      DB_USER: financetracker_ci
+      DB_PASSWORD: financetracker_ci
+
+  bot:
+    container_name: financetracker-ci-bot-1
+    depends_on:
+      reporter:
+        condition: service_healthy
+    environment:
+      APP_ENV: ci
+      DB_NAME: financetracker_ci
+      DB_USER: financetracker_ci
+      DB_PASSWORD: financetracker_ci
+      BOT_STARTUP_MODE: container-smoke
+      BOT_PROXY_ENABLED: "false"
+      REPORTER_SERVICE_KEY: ci_reporter_service_key
+      REPORTER_INTERNAL_URL: http://reporter:8088
+
+volumes:
+  fintracker-db:
+    external: false
+    name: financetracker-ci-db
+
+networks:
+  default:
+    internal: true
+  xray_egress:
+    internal: true

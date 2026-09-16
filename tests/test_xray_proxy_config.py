@@ -1,0 +1,248 @@
+import logging
+import unittest
+from unittest import mock
+
+import financetracker.xray.entrypoint as xray_entrypoint
+from financetracker.xray.entrypoint import (
+    ActiveProxySession,
+    ShutdownState,
+    install_shutdown_handlers,
+    iter_candidate_indexes,
+    iter_vless_candidates,
+    monitor_active_candidate,
+    wait_for_shutdown,
+)
+from financetracker.xray.healthcheck import build_proxy_check_command
+from financetracker.xray.render_config import build_config
+
+
+TEST_VLESS_URL = (
+    "vless://00000000-0000-4000-8000-000000000001@192.0.2.10:443"
+    "?encryption=none&flow=xtls-rprx-vision&security=reality&sni=example.invalid"
+    "&fp=chrome&pbk=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    "&sid=0000000000000001&type=tcp#synthetic-primary"
+)
+TEST_KCP_VLESS_URL = (
+    "vless://00000000-0000-4000-8000-000000000002@198.51.100.20:8443"
+    "?encryption=synthetic-test-value&security=none&type=kcp#synthetic-fallback"
+)
+
+
+class XrayProxyConfigTests(unittest.TestCase):
+    def test_xray_child_output_suppresses_normal_connections_but_keeps_failures(self):
+        self.assertEqual(xray_entrypoint.xray_output_level("accepted tcp:127.0.0.1:1080"), logging.DEBUG)
+        self.assertEqual(xray_entrypoint.xray_output_level("[Error] transport failed"), logging.ERROR)
+        self.assertEqual(xray_entrypoint.xray_output_level("[Warning] slow route"), logging.WARNING)
+
+    def test_build_config_renders_socks_inbound_and_reality_transport_options(self):
+        config, _link = build_config(TEST_VLESS_URL, listen_port=1080)
+
+        inbound = config["inbounds"][0]
+        self.assertEqual(inbound["tag"], "bot-socks")
+        self.assertEqual(inbound["port"], 1080)
+        self.assertEqual(inbound["protocol"], "socks")
+        self.assertEqual(
+            inbound["settings"],
+            {
+                "auth": "noauth",
+                "udp": False,
+            },
+        )
+
+        proxy_outbound = next(item for item in config["outbounds"] if item["tag"] == "proxy")
+        self.assertEqual(proxy_outbound["streamSettings"]["network"], "tcp")
+        self.assertEqual(proxy_outbound["streamSettings"]["sockopt"]["domainStrategy"], "UseIP")
+        self.assertEqual(proxy_outbound["streamSettings"]["tcpSettings"]["header"]["type"], "none")
+        self.assertEqual(config["routing"]["domainStrategy"], "IPIfNonMatch")
+        self.assertEqual(config["routing"]["rules"], [])
+
+    def test_healthcheck_command_uses_socks5_hostname_mode(self):
+        command = build_proxy_check_command(
+            1080,
+            "https://api.ipify.org",
+            proxy_scheme="socks5h",
+        )
+
+        self.assertEqual(
+            command,
+            [
+                "curl",
+                "--max-time",
+                "10",
+                "--socks5-hostname",
+                "127.0.0.1:1080",
+                "--fail",
+                "--silent",
+                "--show-error",
+                "--output",
+                "/dev/null",
+                "https://api.ipify.org",
+            ],
+        )
+
+    def test_healthcheck_command_rejects_unsupported_proxy_scheme(self):
+        with self.assertRaises(ValueError):
+            build_proxy_check_command(1080, "https://api.ipify.org", proxy_scheme="http")
+
+    def test_build_config_supports_vless_kcp_fallback_links(self):
+        config, _link = build_config(TEST_KCP_VLESS_URL, listen_port=1080)
+
+        proxy_outbound = next(item for item in config["outbounds"] if item["tag"] == "proxy")
+        user = proxy_outbound["settings"]["vnext"][0]["users"][0]
+        stream_settings = proxy_outbound["streamSettings"]
+
+        self.assertEqual(
+            user["encryption"],
+            "synthetic-test-value",
+        )
+        self.assertEqual(stream_settings["network"], "kcp")
+        self.assertEqual(stream_settings["security"], "none")
+        self.assertIn("kcpSettings", stream_settings)
+        self.assertNotIn("realitySettings", stream_settings)
+        self.assertNotIn("tcpSettings", stream_settings)
+
+    def test_iter_vless_candidates_prefers_primary_then_fallback(self):
+        self.assertEqual(
+            iter_vless_candidates("vless://primary", "vless://fallback"),
+            [("primary", "vless://primary"), ("fallback", "vless://fallback")],
+        )
+
+    def test_iter_vless_candidates_uses_fallback_when_primary_missing(self):
+        self.assertEqual(
+            iter_vless_candidates("", "vless://fallback"),
+            [("fallback", "vless://fallback")],
+        )
+
+    def test_iter_vless_candidates_deduplicates_identical_urls(self):
+        self.assertEqual(
+            iter_vless_candidates("vless://shared", "vless://shared"),
+            [("primary", "vless://shared")],
+        )
+
+    def test_iter_candidate_indexes_wraps_from_requested_start(self):
+        self.assertEqual(iter_candidate_indexes(1, 3), [1, 2, 0])
+
+    def test_monitor_active_candidate_requests_failover_after_threshold(self):
+        proc = mock.Mock()
+        proc.poll.side_effect = [None, None]
+        session = ActiveProxySession(
+            proc=proc,
+            relay_threads=[],
+            candidate_index=0,
+            candidate_role="primary",
+            link_summary="masked://primary",
+        )
+
+        with (
+            mock.patch("financetracker.xray.entrypoint.run_smoke_through_proxy", side_effect=[(False, "timeout"), (False, "timeout")]),
+            mock.patch("financetracker.xray.entrypoint.time.monotonic", return_value=0.0),
+            mock.patch("financetracker.xray.entrypoint.time.sleep"),
+        ):
+            outcome, return_code = monitor_active_candidate(
+                session,
+                listen_port=1080,
+                healthcheck_url="https://api.ipify.org",
+                check_interval_seconds=0.0,
+                failure_threshold=2,
+            )
+
+        self.assertEqual((outcome, return_code), ("failover", None))
+
+    def test_monitor_active_candidate_resets_failures_after_recovery(self):
+        proc = mock.Mock()
+        proc.poll.side_effect = [None, None, None, 23]
+        session = ActiveProxySession(
+            proc=proc,
+            relay_threads=[],
+            candidate_index=0,
+            candidate_role="primary",
+            link_summary="masked://primary",
+        )
+
+        with (
+            mock.patch(
+                "financetracker.xray.entrypoint.run_smoke_through_proxy",
+                side_effect=[(False, "timeout"), (True, "ok"), (False, "timeout")],
+            ) as smoke_mock,
+            mock.patch("financetracker.xray.entrypoint.time.monotonic", return_value=0.0),
+            mock.patch("financetracker.xray.entrypoint.time.sleep"),
+        ):
+            outcome, return_code = monitor_active_candidate(
+                session,
+                listen_port=1080,
+                healthcheck_url="https://api.ipify.org",
+                check_interval_seconds=0.0,
+                failure_threshold=2,
+            )
+
+        self.assertEqual((outcome, return_code), ("process_exit", 23))
+        self.assertEqual(smoke_mock.call_count, 3)
+
+    def test_monitor_active_candidate_returns_process_exit_without_smoke(self):
+        proc = mock.Mock()
+        proc.poll.return_value = 17
+        session = ActiveProxySession(
+            proc=proc,
+            relay_threads=[],
+            candidate_index=0,
+            candidate_role="primary",
+            link_summary="masked://primary",
+        )
+
+        with mock.patch("financetracker.xray.entrypoint.run_smoke_through_proxy") as smoke_mock:
+            outcome, return_code = monitor_active_candidate(
+                session,
+                listen_port=1080,
+                healthcheck_url="https://api.ipify.org",
+                check_interval_seconds=0.0,
+                failure_threshold=2,
+            )
+
+        self.assertEqual((outcome, return_code), ("process_exit", 17))
+        smoke_mock.assert_not_called()
+
+    def test_shutdown_handler_marks_state_and_runs_callback(self):
+        shutdown_state = ShutdownState()
+        on_shutdown = mock.Mock()
+        handlers = {}
+
+        def capture_handler(signum, handler):
+            handlers[signum] = handler
+
+        with mock.patch("financetracker.xray.entrypoint.signal.signal", side_effect=capture_handler):
+            install_shutdown_handlers(shutdown_state, on_shutdown)
+
+        handlers[xray_entrypoint.signal.SIGTERM](xray_entrypoint.signal.SIGTERM, None)
+
+        self.assertTrue(shutdown_state.requested)
+        on_shutdown.assert_called_once_with()
+        self.assertIn(xray_entrypoint.signal.SIGINT, handlers)
+
+    def test_wait_for_shutdown_returns_after_state_is_requested(self):
+        shutdown_state = ShutdownState()
+
+        def request_shutdown(_seconds):
+            shutdown_state.requested = True
+
+        with mock.patch("financetracker.xray.entrypoint.time.sleep", side_effect=request_shutdown) as sleep_mock:
+            wait_for_shutdown(shutdown_state, poll_interval_seconds=0.25)
+
+        sleep_mock.assert_called_once_with(0.25)
+
+    def test_main_keeps_disabled_proxy_container_alive_until_shutdown(self):
+        with (
+            mock.patch.dict("os.environ", {"BOT_PROXY_ENABLED": "false", "XRAY_LOCAL_PROXY_PORT": "1080"}),
+            mock.patch("financetracker.xray.entrypoint.write_status") as write_status_mock,
+            mock.patch("financetracker.xray.entrypoint.install_shutdown_handlers") as install_handlers_mock,
+            mock.patch("financetracker.xray.entrypoint.wait_for_shutdown") as wait_for_shutdown_mock,
+        ):
+            return_code = xray_entrypoint.main()
+
+        self.assertEqual(return_code, 0)
+        write_status_mock.assert_called_once_with({"mode": "disabled"})
+        install_handlers_mock.assert_called_once()
+        wait_for_shutdown_mock.assert_called_once()
+
+
+if __name__ == "__main__":
+    unittest.main()

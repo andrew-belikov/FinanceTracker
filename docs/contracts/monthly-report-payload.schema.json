@@ -1,0 +1,755 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:financetracker:contracts:monthly-report-payload:v1",
+  "title": "FinanceTracker monthly report payload v1",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "meta",
+    "summary_metrics",
+    "timeseries_daily",
+    "positions_current",
+    "positions_month_start",
+    "positions_month_end",
+    "position_flow_groups",
+    "instrument_eod_timeseries",
+    "instrument_movers",
+    "realized_by_asset",
+    "income_by_asset",
+    "open_pl_end",
+    "operations_top",
+    "income_events",
+    "income_by_currency",
+    "operation_cashflows_by_currency",
+    "reconciliation_by_asset_type",
+    "data_quality",
+    "rebalance_snapshot"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "monthly_report_payload.v1"
+    },
+    "meta": {
+      "$ref": "#/$defs/meta"
+    },
+    "summary_metrics": {
+      "$ref": "#/$defs/summaryMetrics"
+    },
+    "timeseries_daily": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/dailyPoint"
+      }
+    },
+    "positions_current": {
+      "$ref": "#/$defs/positions"
+    },
+    "positions_month_start": {
+      "$ref": "#/$defs/positions"
+    },
+    "positions_month_end": {
+      "$ref": "#/$defs/positions"
+    },
+    "position_flow_groups": {
+      "$ref": "#/$defs/positionFlowGroups"
+    },
+    "instrument_eod_timeseries": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/instrumentSeries"
+      }
+    },
+    "instrument_movers": {
+      "$ref": "#/$defs/instrumentMovers"
+    },
+    "realized_by_asset": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/assetAmount"
+      }
+    },
+    "income_by_asset": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/incomeByAsset"
+      }
+    },
+    "open_pl_end": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/openPl"
+      }
+    },
+    "operations_top": {
+      "type": "array",
+      "maxItems": 15,
+      "items": {
+        "$ref": "#/$defs/operation"
+      }
+    },
+    "income_events": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/incomeEvent"
+      }
+    },
+    "income_by_currency": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/incomeCurrency"
+      }
+    },
+    "operation_cashflows_by_currency": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/operationCashflow"
+      }
+    },
+    "reconciliation_by_asset_type": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/reconciliation"
+      }
+    },
+    "data_quality": {
+      "$ref": "#/$defs/dataQuality"
+    },
+    "rebalance_snapshot": {
+      "$ref": "#/$defs/rebalanceSnapshot"
+    }
+  },
+  "additionalProperties": true,
+  "$defs": {
+    "decimal": {
+      "type": "string",
+      "pattern": "^-?(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?$"
+    },
+    "nullableDecimal": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/decimal"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "date": {
+      "type": "string",
+      "format": "date"
+    },
+    "nullableDate": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "date"
+    },
+    "dateTime": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "nullableDateTime": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "date-time"
+    },
+    "nullableString": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "nullableInteger": {
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "currency": {
+      "type": "string",
+      "minLength": 1
+    },
+    "meta": {
+      "type": "object",
+      "required": [
+        "report_kind",
+        "account_id",
+        "account_friendly_name",
+        "timezone",
+        "currency",
+        "period_year",
+        "period_month",
+        "period_label_ru",
+        "period_start",
+        "period_end",
+        "generated_at_utc",
+        "has_ai_narrative",
+        "data_schema_version",
+        "source_snapshot_start_id",
+        "source_snapshot_end_id",
+        "source_snapshot_count"
+      ],
+      "properties": {
+        "report_kind": {
+          "const": "monthly_review"
+        },
+        "account_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "account_friendly_name": {
+          "type": "string"
+        },
+        "timezone": {
+          "type": "string",
+          "minLength": 1
+        },
+        "currency": {
+          "$ref": "#/$defs/currency"
+        },
+        "period_year": {
+          "type": "integer",
+          "minimum": 1900,
+          "maximum": 2100
+        },
+        "period_month": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 12
+        },
+        "period_label_ru": {
+          "type": "string",
+          "minLength": 1
+        },
+        "period_start": {
+          "$ref": "#/$defs/date"
+        },
+        "period_end": {
+          "$ref": "#/$defs/date"
+        },
+        "generated_at_utc": {
+          "$ref": "#/$defs/dateTime"
+        },
+        "has_ai_narrative": {
+          "type": "boolean"
+        },
+        "data_schema_version": {
+          "type": "integer",
+          "const": 1
+        },
+        "source_snapshot_start_id": {
+          "$ref": "#/$defs/nullableInteger"
+        },
+        "source_snapshot_end_id": {
+          "type": "integer"
+        },
+        "source_snapshot_count": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "additionalProperties": true
+    },
+    "summaryMetrics": {
+      "type": "object",
+      "required": [
+        "start_value",
+        "end_value",
+        "current_value",
+        "period_pnl_abs",
+        "period_pnl_pct",
+        "period_twr_pct",
+        "net_external_flow",
+        "deposits",
+        "withdrawals",
+        "income_net",
+        "iis_tax_deduction_income",
+        "total_income_net",
+        "coupon_net",
+        "dividend_net",
+        "commissions",
+        "taxes",
+        "tax_refunds",
+        "deposits_ytd",
+        "plan_annual_contrib",
+        "plan_progress_pct",
+        "target_to_date",
+        "reconciliation_gap_abs",
+        "positions_value_sum",
+        "top_holding_name",
+        "top_holding_value",
+        "top_holding_weight_pct",
+        "best_day_date",
+        "best_day_pnl",
+        "worst_day_date",
+        "worst_day_pnl",
+        "income_events_count",
+        "open_pl_end_total"
+      ],
+      "properties": {
+        "start_value": { "$ref": "#/$defs/nullableDecimal" },
+        "end_value": { "$ref": "#/$defs/nullableDecimal" },
+        "current_value": { "$ref": "#/$defs/nullableDecimal" },
+        "period_pnl_abs": { "$ref": "#/$defs/nullableDecimal" },
+        "period_pnl_pct": { "$ref": "#/$defs/nullableDecimal" },
+        "period_twr_pct": { "$ref": "#/$defs/nullableDecimal" },
+        "net_external_flow": { "$ref": "#/$defs/decimal" },
+        "deposits": { "$ref": "#/$defs/decimal" },
+        "withdrawals": { "$ref": "#/$defs/decimal" },
+        "income_net": { "$ref": "#/$defs/decimal" },
+        "iis_tax_deduction_income": { "$ref": "#/$defs/decimal" },
+        "total_income_net": { "$ref": "#/$defs/decimal" },
+        "coupon_net": { "$ref": "#/$defs/decimal" },
+        "dividend_net": { "$ref": "#/$defs/decimal" },
+        "commissions": { "$ref": "#/$defs/decimal" },
+        "taxes": { "$ref": "#/$defs/decimal" },
+        "tax_refunds": { "$ref": "#/$defs/decimal" },
+        "deposits_ytd": { "$ref": "#/$defs/decimal" },
+        "plan_annual_contrib": { "$ref": "#/$defs/decimal" },
+        "plan_progress_pct": { "$ref": "#/$defs/decimal" },
+        "target_to_date": { "$ref": "#/$defs/decimal" },
+        "reconciliation_gap_abs": { "$ref": "#/$defs/decimal" },
+        "positions_value_sum": { "$ref": "#/$defs/decimal" },
+        "top_holding_name": { "$ref": "#/$defs/nullableString" },
+        "top_holding_value": { "$ref": "#/$defs/nullableDecimal" },
+        "top_holding_weight_pct": { "$ref": "#/$defs/nullableDecimal" },
+        "best_day_date": { "$ref": "#/$defs/nullableDate" },
+        "best_day_pnl": { "$ref": "#/$defs/nullableDecimal" },
+        "worst_day_date": { "$ref": "#/$defs/nullableDate" },
+        "worst_day_pnl": { "$ref": "#/$defs/nullableDecimal" },
+        "income_events_count": { "type": "integer", "minimum": 0 },
+        "open_pl_end_total": { "$ref": "#/$defs/decimal" }
+      },
+      "additionalProperties": true
+    },
+    "operationCashflow": {
+      "type": "object",
+      "required": [
+        "currency",
+        "deposits",
+        "withdrawals",
+        "iis_tax_deduction_income",
+        "commissions",
+        "operation_taxes",
+        "operation_tax_refunds",
+        "net_external_flow"
+      ],
+      "properties": {
+        "currency": { "$ref": "#/$defs/currency" },
+        "deposits": { "$ref": "#/$defs/decimal" },
+        "withdrawals": { "$ref": "#/$defs/decimal" },
+        "iis_tax_deduction_income": { "$ref": "#/$defs/decimal" },
+        "commissions": { "$ref": "#/$defs/decimal" },
+        "operation_taxes": { "$ref": "#/$defs/decimal" },
+        "operation_tax_refunds": { "$ref": "#/$defs/decimal" },
+        "net_external_flow": { "$ref": "#/$defs/decimal" }
+      },
+      "additionalProperties": true
+    },
+    "dailyPoint": {
+      "type": "object",
+      "required": [
+        "date", "snapshot_id", "snapshot_at_utc", "portfolio_value",
+        "expected_yield", "expected_yield_pct", "deposits", "withdrawals",
+        "income_net", "iis_tax_deduction_income", "total_income_net",
+        "commissions", "operation_taxes", "income_taxes",
+        "operation_tax_refunds", "income_tax_refunds", "tax_refunds",
+        "net_external_flow", "net_cashflow", "day_pnl", "twr_pct",
+        "operation_cashflows_by_currency", "unsupported_operation_currencies"
+      ],
+      "properties": {
+        "date": { "$ref": "#/$defs/date" },
+        "snapshot_id": { "$ref": "#/$defs/nullableInteger" },
+        "snapshot_at_utc": { "$ref": "#/$defs/nullableDateTime" },
+        "portfolio_value": { "$ref": "#/$defs/decimal" },
+        "expected_yield": { "$ref": "#/$defs/decimal" },
+        "expected_yield_pct": { "$ref": "#/$defs/decimal" },
+        "deposits": { "$ref": "#/$defs/decimal" },
+        "withdrawals": { "$ref": "#/$defs/decimal" },
+        "income_net": { "$ref": "#/$defs/decimal" },
+        "iis_tax_deduction_income": { "$ref": "#/$defs/decimal" },
+        "total_income_net": { "$ref": "#/$defs/decimal" },
+        "commissions": { "$ref": "#/$defs/decimal" },
+        "operation_taxes": { "$ref": "#/$defs/decimal" },
+        "income_taxes": { "$ref": "#/$defs/decimal" },
+        "operation_tax_refunds": { "$ref": "#/$defs/decimal" },
+        "income_tax_refunds": { "$ref": "#/$defs/decimal" },
+        "tax_refunds": { "$ref": "#/$defs/decimal" },
+        "net_external_flow": { "$ref": "#/$defs/decimal" },
+        "net_cashflow": { "$ref": "#/$defs/decimal" },
+        "day_pnl": { "$ref": "#/$defs/decimal" },
+        "twr_pct": { "$ref": "#/$defs/nullableDecimal" },
+        "operation_cashflows_by_currency": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/operationCashflow" }
+        },
+        "unsupported_operation_currencies": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/currency" },
+          "uniqueItems": true
+        }
+      },
+      "additionalProperties": true
+    },
+    "position": {
+      "type": "object",
+      "required": [
+        "logical_asset_id", "asset_uid", "instrument_uid", "figi", "ticker",
+        "name", "instrument_type", "quantity", "currency", "position_value",
+        "expected_yield", "expected_yield_pct", "weight_pct"
+      ],
+      "properties": {
+        "logical_asset_id": { "type": "string", "minLength": 1 },
+        "asset_uid": { "$ref": "#/$defs/nullableString" },
+        "instrument_uid": { "$ref": "#/$defs/nullableString" },
+        "figi": { "$ref": "#/$defs/nullableString" },
+        "ticker": { "type": "string" },
+        "name": { "type": "string" },
+        "instrument_type": { "$ref": "#/$defs/nullableString" },
+        "quantity": { "$ref": "#/$defs/decimal" },
+        "currency": { "$ref": "#/$defs/nullableString" },
+        "position_value": { "$ref": "#/$defs/decimal" },
+        "expected_yield": { "$ref": "#/$defs/decimal" },
+        "expected_yield_pct": { "$ref": "#/$defs/decimal" },
+        "weight_pct": { "$ref": "#/$defs/decimal" }
+      },
+      "additionalProperties": true
+    },
+    "positions": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/position" }
+    },
+    "positionFlow": {
+      "type": "object",
+      "required": [
+        "logical_asset_id", "ticker", "name", "instrument_type", "start_qty",
+        "end_qty", "delta_qty", "start_value", "end_value", "delta_value"
+      ],
+      "properties": {
+        "logical_asset_id": { "type": "string", "minLength": 1 },
+        "ticker": { "type": "string" },
+        "name": { "type": "string" },
+        "instrument_type": { "$ref": "#/$defs/nullableString" },
+        "start_qty": { "$ref": "#/$defs/decimal" },
+        "end_qty": { "$ref": "#/$defs/decimal" },
+        "delta_qty": { "$ref": "#/$defs/decimal" },
+        "start_value": { "$ref": "#/$defs/decimal" },
+        "end_value": { "$ref": "#/$defs/decimal" },
+        "delta_value": { "$ref": "#/$defs/decimal" }
+      },
+      "additionalProperties": true
+    },
+    "positionFlowGroups": {
+      "type": "object",
+      "required": ["new", "closed", "increased", "decreased"],
+      "properties": {
+        "new": { "type": "array", "items": { "$ref": "#/$defs/positionFlow" } },
+        "closed": { "type": "array", "items": { "$ref": "#/$defs/positionFlow" } },
+        "increased": { "type": "array", "items": { "$ref": "#/$defs/positionFlow" } },
+        "decreased": { "type": "array", "items": { "$ref": "#/$defs/positionFlow" } }
+      },
+      "additionalProperties": true
+    },
+    "instrumentPoint": {
+      "type": "object",
+      "required": [
+        "date", "snapshot_id", "snapshot_at_utc", "quantity", "position_value",
+        "expected_yield", "expected_yield_pct", "weight_pct"
+      ],
+      "properties": {
+        "date": { "$ref": "#/$defs/date" },
+        "snapshot_id": { "$ref": "#/$defs/nullableInteger" },
+        "snapshot_at_utc": { "$ref": "#/$defs/nullableDateTime" },
+        "quantity": { "$ref": "#/$defs/decimal" },
+        "position_value": { "$ref": "#/$defs/decimal" },
+        "expected_yield": { "$ref": "#/$defs/decimal" },
+        "expected_yield_pct": { "$ref": "#/$defs/decimal" },
+        "weight_pct": { "$ref": "#/$defs/decimal" }
+      },
+      "additionalProperties": true
+    },
+    "instrumentStats": {
+      "type": "object",
+      "required": [
+        "eod_min_position_value", "eod_min_position_value_date",
+        "eod_max_position_value", "eod_max_position_value_date",
+        "eod_end_position_value", "eod_min_expected_yield",
+        "eod_min_expected_yield_date", "eod_max_expected_yield",
+        "eod_max_expected_yield_date", "eod_end_expected_yield",
+        "eod_end_expected_yield_pct", "max_rise_abs", "max_rise_start_date",
+        "max_rise_end_date", "max_drawdown_abs", "max_drawdown_start_date",
+        "max_drawdown_end_date"
+      ],
+      "properties": {
+        "eod_min_position_value": { "$ref": "#/$defs/decimal" },
+        "eod_min_position_value_date": { "$ref": "#/$defs/date" },
+        "eod_max_position_value": { "$ref": "#/$defs/decimal" },
+        "eod_max_position_value_date": { "$ref": "#/$defs/date" },
+        "eod_end_position_value": { "$ref": "#/$defs/decimal" },
+        "eod_min_expected_yield": { "$ref": "#/$defs/decimal" },
+        "eod_min_expected_yield_date": { "$ref": "#/$defs/date" },
+        "eod_max_expected_yield": { "$ref": "#/$defs/decimal" },
+        "eod_max_expected_yield_date": { "$ref": "#/$defs/date" },
+        "eod_end_expected_yield": { "$ref": "#/$defs/decimal" },
+        "eod_end_expected_yield_pct": { "$ref": "#/$defs/decimal" },
+        "max_rise_abs": { "$ref": "#/$defs/decimal" },
+        "max_rise_start_date": { "$ref": "#/$defs/date" },
+        "max_rise_end_date": { "$ref": "#/$defs/date" },
+        "max_drawdown_abs": { "$ref": "#/$defs/decimal" },
+        "max_drawdown_start_date": { "$ref": "#/$defs/date" },
+        "max_drawdown_end_date": { "$ref": "#/$defs/date" }
+      },
+      "additionalProperties": true
+    },
+    "instrumentSeries": {
+      "type": "object",
+      "required": [
+        "logical_asset_id", "asset_uid", "instrument_uid", "figi", "ticker",
+        "name", "instrument_type", "series", "stats"
+      ],
+      "properties": {
+        "logical_asset_id": { "type": "string", "minLength": 1 },
+        "asset_uid": { "$ref": "#/$defs/nullableString" },
+        "instrument_uid": { "$ref": "#/$defs/nullableString" },
+        "figi": { "$ref": "#/$defs/nullableString" },
+        "ticker": { "type": "string" },
+        "name": { "type": "string" },
+        "instrument_type": { "$ref": "#/$defs/nullableString" },
+        "series": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/instrumentPoint" } },
+        "stats": { "$ref": "#/$defs/instrumentStats" }
+      },
+      "additionalProperties": true
+    },
+    "growthMover": {
+      "type": "object",
+      "required": [
+        "logical_asset_id", "ticker", "name", "metric_kind", "rise_abs",
+        "start_date", "end_date", "end_expected_yield", "end_expected_yield_pct"
+      ],
+      "properties": {
+        "logical_asset_id": { "type": "string" },
+        "ticker": { "type": "string" },
+        "name": { "type": "string" },
+        "metric_kind": { "const": "expected_yield_rise" },
+        "rise_abs": { "$ref": "#/$defs/decimal" },
+        "start_date": { "$ref": "#/$defs/date" },
+        "end_date": { "$ref": "#/$defs/date" },
+        "end_expected_yield": { "$ref": "#/$defs/decimal" },
+        "end_expected_yield_pct": { "$ref": "#/$defs/decimal" }
+      },
+      "additionalProperties": true
+    },
+    "drawdownMover": {
+      "type": "object",
+      "required": [
+        "logical_asset_id", "ticker", "name", "metric_kind", "drawdown_abs",
+        "start_date", "end_date", "end_expected_yield", "end_expected_yield_pct"
+      ],
+      "properties": {
+        "logical_asset_id": { "type": "string" },
+        "ticker": { "type": "string" },
+        "name": { "type": "string" },
+        "metric_kind": { "const": "expected_yield_drawdown" },
+        "drawdown_abs": { "$ref": "#/$defs/decimal" },
+        "start_date": { "$ref": "#/$defs/date" },
+        "end_date": { "$ref": "#/$defs/date" },
+        "end_expected_yield": { "$ref": "#/$defs/decimal" },
+        "end_expected_yield_pct": { "$ref": "#/$defs/decimal" }
+      },
+      "additionalProperties": true
+    },
+    "instrumentMovers": {
+      "type": "object",
+      "required": ["top_growth", "top_drawdown"],
+      "properties": {
+        "top_growth": { "type": "array", "maxItems": 5, "items": { "$ref": "#/$defs/growthMover" } },
+        "top_drawdown": { "type": "array", "maxItems": 5, "items": { "$ref": "#/$defs/drawdownMover" } }
+      },
+      "additionalProperties": true
+    },
+    "assetAmount": {
+      "type": "object",
+      "required": ["logical_asset_id", "figi", "ticker", "name", "amount"],
+      "properties": {
+        "logical_asset_id": { "type": "string" },
+        "figi": { "$ref": "#/$defs/nullableString" },
+        "ticker": { "type": "string" },
+        "name": { "type": "string" },
+        "amount": { "$ref": "#/$defs/decimal" }
+      },
+      "additionalProperties": true
+    },
+    "incomeByAsset": {
+      "allOf": [
+        { "$ref": "#/$defs/assetAmount" },
+        {
+          "type": "object",
+          "required": ["income_kind"],
+          "properties": { "income_kind": { "type": "string" } }
+        }
+      ]
+    },
+    "openPl": {
+      "type": "object",
+      "required": ["logical_asset_id", "ticker", "name", "amount", "amount_pct"],
+      "properties": {
+        "logical_asset_id": { "type": "string" },
+        "ticker": { "type": "string" },
+        "name": { "type": "string" },
+        "amount": { "$ref": "#/$defs/decimal" },
+        "amount_pct": { "$ref": "#/$defs/decimal" }
+      },
+      "additionalProperties": true
+    },
+    "operation": {
+      "type": "object",
+      "required": [
+        "operation_id", "date_utc", "local_date", "operation_type",
+        "operation_group", "cashflow_category", "logical_asset_id", "asset_uid",
+        "instrument_uid", "figi", "ticker", "name", "amount", "currency",
+        "price", "quantity", "commission", "yield_amount", "description",
+        "description_has_mojibake", "source"
+      ],
+      "properties": {
+        "operation_id": { "$ref": "#/$defs/nullableString" },
+        "date_utc": { "$ref": "#/$defs/nullableDateTime" },
+        "local_date": { "$ref": "#/$defs/nullableDate" },
+        "operation_type": { "$ref": "#/$defs/nullableString" },
+        "operation_group": { "type": "string" },
+        "cashflow_category": { "$ref": "#/$defs/nullableString" },
+        "logical_asset_id": { "type": "string" },
+        "asset_uid": { "$ref": "#/$defs/nullableString" },
+        "instrument_uid": { "$ref": "#/$defs/nullableString" },
+        "figi": { "$ref": "#/$defs/nullableString" },
+        "ticker": { "type": "string" },
+        "name": { "type": "string" },
+        "amount": { "$ref": "#/$defs/decimal" },
+        "currency": { "$ref": "#/$defs/nullableString" },
+        "price": { "$ref": "#/$defs/decimal" },
+        "quantity": { "$ref": "#/$defs/decimal" },
+        "commission": { "$ref": "#/$defs/decimal" },
+        "yield_amount": { "$ref": "#/$defs/decimal" },
+        "description": { "$ref": "#/$defs/nullableString" },
+        "description_has_mojibake": { "type": "boolean" },
+        "source": { "$ref": "#/$defs/nullableString" }
+      },
+      "additionalProperties": true
+    },
+    "incomeEvent": {
+      "type": "object",
+      "required": [
+        "event_date", "event_type", "currency", "logical_asset_id", "asset_uid",
+        "figi", "ticker", "instrument_name", "gross_amount", "tax_amount",
+        "net_amount", "net_yield_pct", "notified"
+      ],
+      "properties": {
+        "event_date": { "$ref": "#/$defs/date" },
+        "event_type": { "$ref": "#/$defs/nullableString" },
+        "currency": { "$ref": "#/$defs/currency" },
+        "logical_asset_id": { "type": "string" },
+        "asset_uid": { "$ref": "#/$defs/nullableString" },
+        "figi": { "$ref": "#/$defs/nullableString" },
+        "ticker": { "type": "string" },
+        "instrument_name": { "type": "string" },
+        "gross_amount": { "$ref": "#/$defs/decimal" },
+        "tax_amount": { "$ref": "#/$defs/decimal" },
+        "net_amount": { "$ref": "#/$defs/decimal" },
+        "net_yield_pct": { "$ref": "#/$defs/decimal" },
+        "notified": { "type": ["boolean", "null"] }
+      },
+      "additionalProperties": true
+    },
+    "incomeCurrency": {
+      "type": "object",
+      "required": ["currency", "coupons", "dividends", "taxes", "tax_refunds"],
+      "properties": {
+        "currency": { "$ref": "#/$defs/currency" },
+        "coupons": { "$ref": "#/$defs/decimal" },
+        "dividends": { "$ref": "#/$defs/decimal" },
+        "taxes": { "$ref": "#/$defs/decimal" },
+        "tax_refunds": { "$ref": "#/$defs/decimal" }
+      },
+      "additionalProperties": true
+    },
+    "reconciliation": {
+      "type": "object",
+      "required": ["instrument_type", "positions_value_sum", "snapshot_total", "delta_abs"],
+      "properties": {
+        "instrument_type": { "$ref": "#/$defs/nullableString" },
+        "positions_value_sum": { "$ref": "#/$defs/decimal" },
+        "snapshot_total": { "$ref": "#/$defs/decimal" },
+        "delta_abs": { "$ref": "#/$defs/decimal" }
+      },
+      "additionalProperties": true
+    },
+    "dataQuality": {
+      "type": "object",
+      "required": [
+        "unknown_operation_group_count", "mojibake_detected_count",
+        "positions_missing_label_count", "has_full_history_from_zero",
+        "income_events_available", "asset_alias_rows_count",
+        "has_rebalance_targets", "unknown_income_currency_warning",
+        "unsupported_operation_currencies"
+      ],
+      "properties": {
+        "unknown_operation_group_count": { "type": "integer", "minimum": 0 },
+        "mojibake_detected_count": { "type": "integer", "minimum": 0 },
+        "positions_missing_label_count": { "type": "integer", "minimum": 0 },
+        "has_full_history_from_zero": { "type": "boolean" },
+        "income_events_available": { "type": "boolean" },
+        "asset_alias_rows_count": { "type": "integer", "minimum": 0 },
+        "has_rebalance_targets": { "type": "boolean" },
+        "unknown_income_currency_warning": { "type": "boolean" },
+        "unsupported_operation_currencies": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/currency" },
+          "uniqueItems": true
+        }
+      },
+      "additionalProperties": true
+    },
+    "rebalanceRow": {
+      "type": "object",
+      "required": [
+        "asset_class", "label", "current_value", "current_pct", "target_pct",
+        "delta_pct", "target_value", "delta_value", "status"
+      ],
+      "properties": {
+        "asset_class": { "type": "string" },
+        "label": { "type": "string" },
+        "current_value": { "$ref": "#/$defs/decimal" },
+        "current_pct": { "$ref": "#/$defs/decimal" },
+        "target_pct": { "$ref": "#/$defs/decimal" },
+        "delta_pct": { "$ref": "#/$defs/decimal" },
+        "target_value": { "$ref": "#/$defs/decimal" },
+        "delta_value": { "$ref": "#/$defs/decimal" },
+        "status": { "type": "string" }
+      },
+      "additionalProperties": true
+    },
+    "otherRebalanceGroup": {
+      "type": "object",
+      "required": ["label", "value"],
+      "properties": {
+        "label": { "type": "string" },
+        "value": { "$ref": "#/$defs/decimal" }
+      },
+      "additionalProperties": true
+    },
+    "rebalanceSnapshot": {
+      "type": "object",
+      "required": ["snapshot_date", "rebalanceable_base", "rows", "other_groups"],
+      "properties": {
+        "snapshot_date": { "$ref": "#/$defs/nullableDate" },
+        "rebalanceable_base": { "$ref": "#/$defs/decimal" },
+        "rows": { "type": "array", "items": { "$ref": "#/$defs/rebalanceRow" } },
+        "other_groups": { "type": "array", "items": { "$ref": "#/$defs/otherRebalanceGroup" } }
+      },
+      "additionalProperties": true
+    }
+  }
+}
