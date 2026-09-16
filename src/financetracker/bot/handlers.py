@@ -321,7 +321,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Sending reply_text response.",
         {"chat_id": getattr(update.effective_chat, "id", None), "command": "/start"},
     )
-    await update.message.reply_text(text)
+    await update.effective_message.reply_text(text)
     logger.info(
         "bot_reply_text_succeeded",
         "reply_text response sent.",
@@ -335,7 +335,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     text = build_help_text()
-    await update.message.reply_text(text)
+    await update.effective_message.reply_text(text)
 
 
 async def cmd_today(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -367,7 +367,7 @@ async def cmd_calendar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await require_authorized_private_chat(update):
         return
     if context.args:
-        await update.message.reply_text("Формат: /calendar")
+        await update.effective_message.reply_text("Формат: /calendar")
         return
 
     start_date = datetime.now(TZ).date()
@@ -378,7 +378,7 @@ async def cmd_calendar(update: Update, context: ContextTypes.DEFAULT_TYPE):
         end_date=end_date,
     )
     if text is None:
-        await update.message.reply_text(REPORTING_ACCOUNT_UNAVAILABLE_TEXT)
+        await update.effective_message.reply_text(REPORTING_ACCOUNT_UNAVAILABLE_TEXT)
         return
     await safe_send_message(context.bot, update.effective_chat.id, text, parse_mode=None)
 
@@ -413,7 +413,7 @@ async def cmd_monthpdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         year, month = _parse_monthpdf_args(context.args or [])
     except ValueError as exc:
-        await update.message.reply_text(str(exc))
+        await update.effective_message.reply_text(str(exc))
         return
 
     logger.info(
@@ -425,7 +425,7 @@ async def cmd_monthpdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "month": month,
         },
     )
-    status_message = await update.message.reply_text("Собираю PDF-отчёт. Это может занять до пары минут.")
+    status_message = await update.effective_message.reply_text("Собираю PDF-отчёт. Это может занять до пары минут.")
     document_path = None
     try:
         document_path, filename = await run_blocking_command(
@@ -458,7 +458,7 @@ async def cmd_monthpdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "error_type": type(exc).__name__,
             },
         )
-        await update.message.reply_text(str(exc))
+        await update.effective_message.reply_text(str(exc))
     except Exception:
         logger.exception(
             "bot_monthpdf_send_failed",
@@ -467,7 +467,7 @@ async def cmd_monthpdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "chat_id": getattr(update.effective_chat, "id", None),
             },
         )
-        await update.message.reply_text("Не удалось отправить PDF-отчёт в Telegram.")
+        await update.effective_message.reply_text("Не удалось отправить PDF-отчёт в Telegram.")
     finally:
         if document_path and os.path.exists(document_path):
             os.remove(document_path)
@@ -490,7 +490,7 @@ async def cmd_year(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     args = context.args or []
     if len(args) > 1:
-        await update.message.reply_text("Формат: /year или /year YYYY")
+        await update.effective_message.reply_text("Формат: /year или /year YYYY")
         return
 
     year: int | None = None
@@ -501,13 +501,13 @@ async def cmd_year(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 raise ValueError
             year = parsed_year
         except ValueError:
-            await update.message.reply_text("Формат: /year или /year YYYY")
+            await update.effective_message.reply_text("Формат: /year или /year YYYY")
             return
 
     try:
         summary_text, diff_text, label = await run_blocking_command(build_year_summary, year)
     except ValueError as exc:
-        await update.message.reply_text(str(exc))
+        await update.effective_message.reply_text(str(exc))
         return
     await safe_send_message(context.bot, update.effective_chat.id, summary_text, parse_mode="Markdown")
 
@@ -525,17 +525,17 @@ async def cmd_year(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except ValueError as exc:
         if os.path.exists(chart_path):
             os.remove(chart_path)
-        await update.message.reply_text(str(exc))
+        await update.effective_message.reply_text(str(exc))
         return
     if chart:
         try:
             with open(chart, "rb") as f:
-                await update.message.reply_photo(photo=InputFile(f))
+                await update.effective_message.reply_photo(photo=InputFile(f))
         finally:
             if os.path.exists(chart):
                 os.remove(chart)
     else:
-        await update.message.reply_text(f"Недостаточно данных для графика за {label}.")
+        await update.effective_message.reply_text(f"Недостаточно данных для графика за {label}.")
 
     delta_chart_path = _new_private_temp_path(prefix=f"year_delta_{chart_year}_", suffix=".png")
     try:
@@ -549,12 +549,12 @@ async def cmd_year(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except ValueError as exc:
         if os.path.exists(delta_chart_path):
             os.remove(delta_chart_path)
-        await update.message.reply_text(str(exc))
+        await update.effective_message.reply_text(str(exc))
         return
     if delta_chart:
         try:
             with open(delta_chart, "rb") as f:
-                await update.message.reply_photo(photo=InputFile(f))
+                await update.effective_message.reply_photo(photo=InputFile(f))
         finally:
             if os.path.exists(delta_chart):
                 os.remove(delta_chart)
@@ -568,7 +568,7 @@ async def cmd_dataset(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if context.args:
-        await update.message.reply_text("Формат: /dataset")
+        await update.effective_message.reply_text("Формат: /dataset")
         return
 
     try:
@@ -577,12 +577,12 @@ async def cmd_dataset(update: Update, context: ContextTypes.DEFAULT_TYPE):
             timeout_cleanup=_cleanup_returned_path,
         )
     except ValueError as exc:
-        await update.message.reply_text(str(exc))
+        await update.effective_message.reply_text(str(exc))
         return
 
     try:
         with open(archive_path, "rb") as f:
-            await update.message.reply_document(
+            await update.effective_message.reply_document(
                 document=InputFile(f, filename=archive_name),
                 caption="Архив для AI-анализа: JSON, CSV и README с контекстом.",
             )
@@ -614,13 +614,13 @@ async def cmd_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 timeout_cleanup=_cleanup_path_when_done(path),
             )
         except ValueError as exc:
-            await update.message.reply_text(str(exc))
+            await update.effective_message.reply_text(str(exc))
             return
         if not p:
-            await update.message.reply_text("Недостаточно данных для построения графика.")
+            await update.effective_message.reply_text("Недостаточно данных для построения графика.")
             return
         with open(p, "rb") as f:
-            await update.message.reply_photo(photo=InputFile(f))
+            await update.effective_message.reply_photo(photo=InputFile(f))
     finally:
         for candidate in {path, p or ""}:
             if candidate and os.path.exists(candidate):
@@ -640,10 +640,10 @@ async def cmd_twr(update: Update, context: ContextTypes.DEFAULT_TYPE):
             timeout_cleanup=_cleanup_path_when_done(path),
         )
         if status == "account_unavailable":
-            await update.message.reply_text(REPORTING_ACCOUNT_UNAVAILABLE_TEXT)
+            await update.effective_message.reply_text(REPORTING_ACCOUNT_UNAVAILABLE_TEXT)
             return
         if status == "insufficient":
-            await update.message.reply_text("Недостаточно данных")
+            await update.effective_message.reply_text("Недостаточно данных")
             return
         await safe_send_message(
             context.bot,
@@ -652,7 +652,7 @@ async def cmd_twr(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown",
         )
         with open(path, "rb") as f:
-            await update.message.reply_photo(photo=InputFile(f))
+            await update.effective_message.reply_photo(photo=InputFile(f))
     finally:
         if os.path.exists(path):
             os.remove(path)
@@ -667,27 +667,27 @@ async def cmd_targets(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not args:
         text = await run_blocking_command(_build_targets_text)
         if text is None:
-            await update.message.reply_text(REPORTING_ACCOUNT_UNAVAILABLE_TEXT)
+            await update.effective_message.reply_text(REPORTING_ACCOUNT_UNAVAILABLE_TEXT)
             return
         await safe_send_message(context.bot, update.effective_chat.id, text, parse_mode="Markdown")
         return
 
     if args[0].lower() != "set":
-        await update.message.reply_text(TARGETS_USAGE_TEXT)
+        await update.effective_message.reply_text(TARGETS_USAGE_TEXT)
         return
 
     try:
         targets = parse_rebalance_targets_args(args[1:])
     except ValueError as exc:
-        await update.message.reply_text(str(exc))
+        await update.effective_message.reply_text(str(exc))
         return
 
     status, text = await run_blocking_command(_replace_targets_and_build_text, targets)
     if status == "account_unavailable":
-        await update.message.reply_text(REPORTING_ACCOUNT_UNAVAILABLE_TEXT)
+        await update.effective_message.reply_text(REPORTING_ACCOUNT_UNAVAILABLE_TEXT)
         return
     if status == "unavailable":
-        await update.message.reply_text(REBALANCE_FEATURE_UNAVAILABLE_TEXT)
+        await update.effective_message.reply_text(REBALANCE_FEATURE_UNAVAILABLE_TEXT)
         return
     await safe_send_message(context.bot, update.effective_chat.id, text, parse_mode="Markdown")
 
@@ -697,12 +697,12 @@ async def cmd_rebalance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await require_authorized_private_chat(update):
         return
     if context.args:
-        await update.message.reply_text("Формат: /rebalance")
+        await update.effective_message.reply_text("Формат: /rebalance")
         return
 
     text = await run_blocking_command(_build_rebalance_text)
     if text is None:
-        await update.message.reply_text(REPORTING_ACCOUNT_UNAVAILABLE_TEXT)
+        await update.effective_message.reply_text(REPORTING_ACCOUNT_UNAVAILABLE_TEXT)
         return
     await safe_send_message(context.bot, update.effective_chat.id, text, parse_mode="Markdown")
 
@@ -714,7 +714,7 @@ async def cmd_invest(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     args = context.args or []
     if len(args) != 1:
-        await update.message.reply_text(INVEST_USAGE_TEXT)
+        await update.effective_message.reply_text(INVEST_USAGE_TEXT)
         return
 
     try:
@@ -722,12 +722,12 @@ async def cmd_invest(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if quantize_ruble_amount(amount) <= 0:
             raise ValueError("Сумма должна быть положительной и не меньше 1 ₽.")
     except ValueError as exc:
-        await update.message.reply_text(str(exc))
+        await update.effective_message.reply_text(str(exc))
         return
 
     rounded_amount = quantize_ruble_amount(amount)
     text = await run_blocking_command(_build_invest_text, rounded_amount)
     if text is None:
-        await update.message.reply_text(REPORTING_ACCOUNT_UNAVAILABLE_TEXT)
+        await update.effective_message.reply_text(REPORTING_ACCOUNT_UNAVAILABLE_TEXT)
         return
     await safe_send_message(context.bot, update.effective_chat.id, text, parse_mode="Markdown")
