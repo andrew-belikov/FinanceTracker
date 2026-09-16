@@ -42,7 +42,7 @@ from telegram.ext import (
     filters,
 )
 from telegram.request import HTTPXRequest
-
+from financetracker.bot.menu import cmd_menu, on_menu_button
 from financetracker.bot.handlers import (
     cmd_calendar,
     cmd_dataset,
@@ -121,6 +121,7 @@ from financetracker.bot.runtime import (
 COMMAND_SPECS = (
     ("start", "Приветствие и быстрый старт", cmd_start),
     ("help", "Список всех команд", cmd_help),
+    ("menu", "Открыть кнопочное меню", cmd_menu),
     ("today", "Сводка по портфелю на сегодня", cmd_today),
     ("week", "Сводка по текущей неделе", cmd_week),
     ("month", "Отчёт по текущему месяцу", cmd_month),
@@ -149,6 +150,7 @@ def register_handlers(app: Application) -> None:
             pattern=rf"^{CALLBACK_PREFIX}:(?:set|unset):",
         )
     )
+    app.add_handler(CallbackQueryHandler(on_menu_button, pattern=r"^menu:"))
     for command_name, handler in COMMAND_HANDLERS:
         app.add_handler(CommandHandler(command_name, handler))
 
