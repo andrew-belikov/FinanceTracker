@@ -1,8 +1,8 @@
-FROM python:3.12-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea
+FROM python:3.12-slim-trixie@sha256:aa943ce411423c7582288f18707ff66eddcbaeb510502d747a72aeb34f30d159
 
-ARG XRAY_VERSION=26.2.6
-ARG XRAY_SHA256_AMD64=29ce535b56e207a406ffa1c2d4842dcc410be003eff8ec508bb732abc9f8e385
-ARG XRAY_SHA256_ARM64=b52d8263453fbd6f4747fd6a1ecf70cd43a664243615dc892ea4674c01b2b5ee
+ARG XRAY_VERSION=26.10.21
+ARG XRAY_SHA256_AMD64=0eec3ed4163c273d8c8bf821f7d219e257921cf584aa3fb970715e458e631978
+ARG XRAY_SHA256_ARM64=d1304946c486d98e6b886e9b931eaaaebb23835b30e217638037b7f2721d4e9c
 ARG TARGETARCH
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -10,7 +10,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     DEBIAN_FRONTEND=noninteractive \
     XRAY_VERSION=${XRAY_VERSION}
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN apt-get update && apt-get upgrade -y --no-install-recommends && apt-get install -y --no-install-recommends \
     ca-certificates \
     curl \
     unzip \

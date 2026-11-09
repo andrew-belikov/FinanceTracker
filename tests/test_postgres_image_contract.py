@@ -7,7 +7,7 @@ ROOT = Path(__file__).resolve().parents[1]
 COMPOSE = (ROOT / "compose.yml").read_text(encoding="utf-8")
 CI = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
 DEPLOY = (ROOT / ".github" / "workflows" / "deploy.yml").read_text(encoding="utf-8")
-POSTGRES_REF = re.compile(r"postgres:16@sha256:[0-9a-f]{64}")
+POSTGRES_REF = re.compile(r"postgres:16\.15-trixie@sha256:[0-9a-f]{64}")
 
 
 class PostgresImageContractTests(unittest.TestCase):
@@ -21,4 +21,6 @@ class PostgresImageContractTests(unittest.TestCase):
         self.assertIn("ACTUAL_DB_IMAGE_REF", DEPLOY)
         self.assertIn("ACTUAL_DB_IMAGE_ID", DEPLOY)
         self.assertIn("Database image", DEPLOY)
-        self.assertIn("^postgres:16@sha256:[0-9a-f]{64}$", DEPLOY)
+        rollout = (ROOT / "scripts" / "deploy_services.sh").read_text(encoding="utf-8")
+        self.assertIn('config --images db', rollout)
+        self.assertIn('verify_image_tag "$db_image_ref" "$db_image_id"', rollout)

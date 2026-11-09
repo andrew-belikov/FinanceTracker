@@ -68,6 +68,15 @@ class WidgetDeliveryTests(unittest.IsolatedAsyncioTestCase):
             "chat_id": 1, "message_id": 6, "chat_data": "newer",
         })
 
+    async def test_keeps_flat_state_compatible_with_previous_image(self):
+        original = {"1": [5, today_widget._digest("old")]}
+        self.state_path.write_text(json.dumps(original))
+        self.assertEqual(await today_widget._load_state(self.bot), original)
+        self.bot.do_api_request.assert_not_awaited()
+        self.bot.do_api_request.return_value = {"message_id": 6}
+        await today_widget.send_today_widget(self.context, 1)
+        self.assertEqual(json.loads(self.state_path.read_text()), {"1": [6, today_widget._digest("new")]})
+
     async def test_failed_send_keeps_the_previous_widget(self):
         original = {"1": [5, today_widget._digest("old")]}
         today_widget._save_state(self.bot, original)

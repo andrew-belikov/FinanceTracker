@@ -50,7 +50,9 @@ build. Ручной и независимый от CI deploy отключён.
 Образы получают tag `git-<полный SHA>`. Перед запуском deploy фиксирует их Docker
 image IDs, передаёт Compose именно эти неизменяемые IDs и после `up` сверяет с
 ними поле `.Image` каждого контейнера, включая одноразовую миграцию. Image IDs
-вместе с CI run ID и source SHA сохраняются в summary deploy-run.
+вместе с CI run ID и source SHA сохраняются в summary deploy-run. На homeserver
+workflow берёт из операторской копии только защищённый `.env` и сохраняет
+работающий контейнер PostgreSQL.
 Секретный `.env` остаётся в каноническом серверном каталоге и передаётся Compose
 через `APP_ENV_FILE` и явный `--env-file`. Он исключён из Docker build context
 allowlist-правил `.dockerignore` и не выводится в логи.

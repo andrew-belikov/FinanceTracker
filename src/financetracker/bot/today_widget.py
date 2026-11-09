@@ -37,21 +37,34 @@ def _digest(data):
     return hashlib.sha256(data.encode()).hexdigest()
 
 
+def _read_state():
+    try:
+        return json.loads(STATE_PATH.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+
+
 def _save_state(bot, state):
+    stored = _read_state()
+    # Keep existing flat files readable by the previous homeserver image.
+    payload = state if stored is not None and "bot_id" not in stored else {
+        "bot_id": bot.id,
+        "messages": state,
+    }
     temp_path = STATE_PATH.with_name(f".{STATE_PATH.name}.tmp")
     descriptor = os.open(temp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
-        json.dump({"bot_id": bot.id, "messages": state}, stream)
+        json.dump(payload, stream)
     temp_path.replace(STATE_PATH)
 
 
 async def _load_state(bot):
-    try:
-        stored = json.loads(STATE_PATH.read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        stored = {}
-    if stored.get("bot_id") == bot.id:
-        return stored["messages"]
+    stored = _read_state()
+    if stored is not None:
+        if "bot_id" not in stored:
+            return stored
+        if stored["bot_id"] == bot.id:
+            return stored["messages"]
 
     # The previous version used Telegram pins to remember active messages.
     state = {}

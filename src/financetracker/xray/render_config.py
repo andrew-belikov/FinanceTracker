@@ -8,6 +8,8 @@ from urllib.parse import parse_qs, unquote, urlparse
 # The SOCKS listener is reachable only on the Docker-internal bot_proxy_internal
 # network; compose deliberately has `expose`, never host `ports`.
 INTERNAL_PROXY_LISTEN_HOST = "0.0.0.0"  # nosec B104
+# Keep UDP packets below restrictive path MTUs encountered by the proxy.
+KCP_MTU = 1000
 
 
 @dataclass(frozen=True)
@@ -134,7 +136,7 @@ def build_config(
             }
         }
     if normalized_network == "kcp":
-        stream_settings["kcpSettings"] = {}
+        stream_settings["kcpSettings"] = {"mtu": KCP_MTU}
     if link.security == "reality":
         stream_settings["realitySettings"] = {
             "show": False,

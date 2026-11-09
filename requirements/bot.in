@@ -4,3 +4,5 @@ greenlet
 psycopg2-binary
 matplotlib
 tzdata
+certifi==2026.10.23
+pillow==13.0.0

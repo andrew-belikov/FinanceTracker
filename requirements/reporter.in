@@ -7,3 +7,8 @@ WeasyPrint>=70.0
 requests
 jsonschema
 tzdata
+certifi==2026.10.23
+pillow==13.0.0
+urllib3==2.8.0
+
+brotli==1.2.1

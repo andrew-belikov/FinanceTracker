@@ -12,7 +12,7 @@ class ContainerSecurityContractTests(unittest.TestCase):
             dockerfile = (ROOT / "docker" / f"Dockerfile.{name}").read_text(encoding="utf-8")
             self.assertRegex(
                 dockerfile,
-                re.compile(r"^FROM python:3\.12-slim@sha256:[0-9a-f]{64}$", re.MULTILINE),
+                re.compile(r"^FROM python:3\.12-slim-trixie@sha256:[0-9a-f]{64}$", re.MULTILINE),
                 msg=dockerfile,
             )
             self.assertIn("USER financetracker", dockerfile)

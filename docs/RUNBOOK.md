@@ -48,21 +48,27 @@ docker compose logs --tail=200 bot
 Production deploy запускается автоматически после успешного workflow `CI` для
 `push` в `main`. Workflow `Deploy FinanceTracker`:
 
-1. создаёт временный чистый checkout точного SHA, прошедшего CI;
-2. проверяет Compose-конфигурацию и выполняет pre-deploy backup с restore drill;
-3. собирает образы с tag `git-<SHA>` и запускает Compose по зафиксированным image
-   IDs;
-4. ждёт healthchecks, запускает `migrate --check` и публикует source SHA и image
-   IDs в GitHub Actions summary.
+1. загружает с GitHub точный SHA, прошедший CI, во временный чистый checkout.
+   Из операторской копии берёт защищённый `.env`;
+2. собирает образы с тегами `git-<SHA>`, сверяет образ и готовность действующего
+   PostgreSQL, выполняет резервное копирование с пробным восстановлением;
+3. проверяет, что SHA всё ещё является вершиной `main`, проверяет миграции и
+   переключает прикладные сервисы по очереди по зафиксированным image IDs;
+4. ждёт готовности, сверяет образы и прежний контейнер БД, повторно проверяет
+   миграции и публикует итог в GitHub Actions. При сбое переключения возвращает
+   предыдущие образы уже затронутых сервисов. Схема БД автоматически не откатывается.
 
-Не обновляйте production через `git pull` и ручной `docker compose build`: такой
-запуск обходит связь между CI, source SHA и образами. После workflow проверьте
-его summary, затем состояние и логи сервисов:
+Серверные настройки сборки и версии зависимостей хранятся в Git. Локальные
+изменения операторской копии и исторический `compose.security.yml` в сборку
+не входят. PostgreSQL 16.15 на Debian Trixie закреплён одним digest в Compose
+и CI. Обновление образа PostgreSQL выполняется как отдельное обслуживание,
+поскольку автоматическая выкладка сохраняет действующий контейнер и том.
+
+Для проверки после workflow используйте его summary и состояние контейнеров:
 
 ```bash
-export APP_ENV_FILE=.env
-docker compose --env-file "$APP_ENV_FILE" ps --all
-docker compose --env-file "$APP_ENV_FILE" logs --tail=200 tracker bot reporter
+docker ps --filter label=com.docker.compose.project=financetracker
+docker logs --tail=200 financetracker-bot-1
 ```
 
 Изменение `docker/certs/` также доставляется обычным exact-SHA deploy: сертификаты

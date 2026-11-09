@@ -97,7 +97,7 @@ class XrayProxyConfigTests(unittest.TestCase):
         )
         self.assertEqual(stream_settings["network"], "kcp")
         self.assertEqual(stream_settings["security"], "none")
-        self.assertIn("kcpSettings", stream_settings)
+        self.assertEqual(stream_settings["kcpSettings"], {"mtu": 1000})
         self.assertNotIn("realitySettings", stream_settings)
         self.assertNotIn("tcpSettings", stream_settings)
 

@@ -5,6 +5,7 @@ import unittest
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 CI_TEXT = (PROJECT_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+ROLLOUT = (PROJECT_ROOT / "scripts" / "deploy_services.sh").read_text(encoding="utf-8")
 DEPLOY_TEXT = (PROJECT_ROOT / ".github" / "workflows" / "deploy.yml").read_text(encoding="utf-8")
 CODEQL_TEXT = (PROJECT_ROOT / ".github" / "workflows" / "codeql.yml").read_text(encoding="utf-8")
 
@@ -86,33 +87,32 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn('if test "$OLLAMA_ENABLED" = "true"', DEPLOY_TEXT)
         self.assertIn('OLLAMA_ENABLED="${OLLAMA_ENABLED:-false}"', DEPLOY_TEXT)
 
-    def test_dirty_canonical_checkout_is_rejected_before_disposable_checkout(self):
-        clean_check = 'git -C "$PROJECT_DIR" status --porcelain --untracked-files=all'
-        self.assertIn(clean_check, DEPLOY_TEXT)
-        self.assertLess(DEPLOY_TEXT.index(clean_check), DEPLOY_TEXT.index("mktemp -d"))
+    def test_deploy_checkout_is_independent_of_operator_checkout(self):
+        self.assertNotIn('git -C "$PROJECT_DIR"', DEPLOY_TEXT)
+        self.assertIn('git -C "$deploy_dir" status --porcelain', DEPLOY_TEXT)
+        self.assertIn('head_repository.full_name == github.repository', DEPLOY_TEXT)
+        self.assertIn('bash scripts/deploy_services.sh', DEPLOY_TEXT)
 
-    def test_deploy_compares_running_container_images_with_captured_build_ids(self):
-        for service in ("bot", "tracker", "reporter", "xray-client", "migrate"):
-            with self.subTest(service=service):
-                self.assertIn(f'verify_container_image "{service}"', DEPLOY_TEXT)
-        self.assertIn("EXPECTED_BOT_IMAGE_ID", DEPLOY_TEXT)
-        self.assertIn("EXPECTED_TRACKER_IMAGE_ID", DEPLOY_TEXT)
-        self.assertIn("EXPECTED_REPORTER_IMAGE_ID", DEPLOY_TEXT)
-        self.assertIn("EXPECTED_XRAY_CLIENT_IMAGE_ID", DEPLOY_TEXT)
-        self.assertIn("docker inspect --format '{{.Image}}'", DEPLOY_TEXT)
-        self.assertIn('export BOT_IMAGE="$EXPECTED_BOT_IMAGE_ID"', DEPLOY_TEXT)
-        self.assertIn('export TRACKER_IMAGE="$EXPECTED_TRACKER_IMAGE_ID"', DEPLOY_TEXT)
-        self.assertLess(
-            DEPLOY_TEXT.index("docker compose --env-file \"$APP_ENV_FILE\" up"),
-            DEPLOY_TEXT.index('verify_container_image "bot"'),
-        )
+    def test_deploy_checks_current_main_and_preserves_database_container(self):
+        self.assertIn('git ls-remote --exit-code origin refs/heads/main', ROLLOUT)
+        self.assertIn('verify_image_tag "$db_image_ref" "$db_image_id"', ROLLOUT)
+        self.assertIn('test "$(running_container db)" = "$db_container_id"', ROLLOUT)
+        self.assertIn('services=(reporter tracker xray-client bot)', ROLLOUT)
+        self.assertIn('up -d --no-deps --no-build --pull never --wait', ROLLOUT)
+        self.assertNotIn('--remove-orphans', ROLLOUT)
+
+    def test_deploy_verifies_candidate_ids_and_restores_images_on_failure(self):
+        for service in ("BOT", "TRACKER", "REPORTER", "XRAY_CLIENT"):
+            self.assertIn(f"EXPECTED_{service}_IMAGE_ID", ROLLOUT)
+            self.assertIn(f"ACTUAL_{service}_IMAGE_ID", ROLLOUT)
+        self.assertIn('test "$check_image_id" = "$TRACKER_IMAGE"', ROLLOUT)
+        self.assertIn('trap rollback_on_failure EXIT', ROLLOUT)
+        self.assertIn(".State.Health.Status", ROLLOUT)
 
     def test_deploy_requires_verified_predeploy_backup_before_starting_services(self):
         self.assertIn("FINANCETRACKER_BACKUP_DIR", DEPLOY_TEXT)
-        self.assertLess(
-            DEPLOY_TEXT.index("./scripts/predeploy_backup.sh"),
-            DEPLOY_TEXT.index("docker compose --env-file \"$APP_ENV_FILE\" up -d"),
-        )
+        self.assertLess(ROLLOUT.index("./scripts/predeploy_backup.sh"), ROLLOUT.index('up -d --no-deps'))
+        self.assertLess(ROLLOUT.index('migrate --check'), ROLLOUT.index('up -d --no-deps'))
 
     def test_codeql_and_dependabot_cover_python_and_actions(self):
         dependabot = (PROJECT_ROOT / ".github" / "dependabot.yml").read_text(encoding="utf-8")
