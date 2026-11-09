@@ -190,6 +190,20 @@ docker compose exec -T db psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "SELECT 
 docker compose exec -T db psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "SELECT snapshot_date, snapshot_at, total_value FROM portfolio_snapshots ORDER BY snapshot_date DESC, snapshot_at DESC LIMIT 10;"
 ```
 
+Проверить накопление временных intraday-точек в будний торговый день:
+
+```bash
+docker compose exec -T db psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "SELECT snapshot_date, COUNT(*) AS observations, MIN(snapshot_at) AS first_at, MAX(snapshot_at) AS last_at FROM intraday_portfolio_snapshots GROUP BY snapshot_date ORDER BY snapshot_date DESC LIMIT 5;"
+```
+
+После успешного push raw строки за дату должны отсутствовать, а компактная
+сводка и delivery ledger — оставаться для аудита и дедупликации:
+
+```bash
+docker compose exec -T db psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "SELECT summary_date, account_id, observation_count, first_value, min_value, max_value, last_value, delivered_at FROM intraday_daily_summaries ORDER BY summary_date DESC LIMIT 10;"
+docker compose exec -T db psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "SELECT notification_key, chat_id, message_type, status FROM bot_notification_deliveries WHERE notification_kind='scheduled_job' AND notification_key LIKE 'intraday_daily_push:%' ORDER BY created_at DESC LIMIT 20;"
+```
+
 Проверить события дохода:
 
 ```bash
@@ -253,6 +267,47 @@ docker compose logs --tail=200 bot
 Для `tracker` дополнительно проверьте `TIMEZONE` и `SCHED_TZ`: локальная дата и
 sync календаря выплат используют `TIMEZONE`, а cron-снапшот — `SCHED_TZ`. В
 production задавайте им одинаковое значение.
+
+### Нет будничного внутридневного итога
+
+Проверьте, что время уже прошло по `TIMEZONE`, а локальная дата — понедельник–пятница:
+
+```bash
+docker compose logs --tail=300 bot | grep intraday_daily_push
+docker compose exec -T db psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "SELECT snapshot_date, COUNT(*) FROM intraday_portfolio_snapshots GROUP BY snapshot_date ORDER BY snapshot_date DESC LIMIT 5;"
+docker compose exec -T db psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "SELECT notification_key, chat_id, message_type, status FROM bot_notification_deliveries WHERE notification_key LIKE 'intraday_daily_push:%' ORDER BY created_at DESC LIMIT 20;"
+```
+
+Для отправки требуются как минимум две точки. Метрики отражают сохранённые
+наблюдения; отдельная оценка пропусков или торгового календаря не определена.
+Если хотя бы одна из двух частей не доставлена во все target chats, raw
+intraday rows не очищаются и retry использует их после следующего
+запуска/catch-up.
+
+### Повторная проверка внутридневной рассылки
+
+После доставки минутные данные сохраняются до первого успешного intraday-сбора
+нового локального дня этого счёта. В выходные и после cutoff они не очищаются;
+недоставленные дни сохраняются для повторных попыток. Для проверки нужны
+как минимум две сохранённые точки со стоимостью портфеля.
+
+Проверка формирования текста и PNG без отправки:
+
+```bash
+docker compose exec -T bot python -m financetracker.bot.intraday_daily_push_replay --date 2026-09-28
+```
+
+Повторная отправка текста и графика всем настроенным `TARGET_CHAT_IDS`:
+
+```bash
+docker compose exec -T bot python -m financetracker.bot.intraday_daily_push_replay --date 2026-09-28 --send
+```
+
+Подставьте нужную дату. Команда не запускает второй polling, не сбрасывает
+идемпотентность плановой рассылки, не меняет сводки и не удаляет сырьё.
+Каждый запуск с `--send` создаёт новые сообщения; при частичной ошибке
+повторный запуск может продублировать уже отправленную часть. Если данные уже
+очищены, команда завершается с ошибкой, не создавая приблизительный график.
 
 ### Нет уведомлений о купонах или дивидендах
 

@@ -2,7 +2,7 @@ import ast
 import unittest
 from contextlib import contextmanager
 from copy import deepcopy
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
 
@@ -274,91 +274,6 @@ class DailyPortfolioResultTests(unittest.TestCase):
         self.assertEqual(result["net_external_flow"], Decimal("0"))
         self.assertEqual(result["day_pnl"], Decimal("50"))
         self.assertEqual(result["unsupported_operation_currencies"], ["USD"])
-
-
-class TodaySummaryContractTests(unittest.TestCase):
-    def _build(self, snapshots, *, expected_interval_flow, deposits=100, net_contributions=50):
-        calls = []
-
-        @contextmanager
-        def fake_db_session():
-            yield object()
-
-        def net_flow(_session, _account_id, start_dt, end_dt):
-            calls.append((start_dt, end_dt))
-            previous_date = snapshots[1]["snapshot_date"]
-            latest_date = snapshots[0]["snapshot_date"]
-            if start_dt.date() == previous_date + timedelta(days=1) and end_dt.date() == latest_date + timedelta(days=1):
-                return expected_interval_flow
-            return 0
-
-        namespace = {
-            "datetime": datetime,
-            "time": time,
-            "timedelta": timedelta,
-            "timezone": timezone,
-            "TZ": timezone.utc,
-            "db_session": fake_db_session,
-            "resolve_reporting_account_id": lambda _session: "acc",
-            "get_latest_snapshots": lambda _session, _account_id, limit=2: snapshots,
-            "get_net_external_flow_for_period": net_flow,
-            "get_total_deposits": lambda _session, _account_id: deposits,
-            "get_net_external_contributions": lambda _session, _account_id: net_contributions,
-            "get_income_for_period": lambda *_args: (Decimal("0"), Decimal("0")),
-            "get_income_currency_breakdown_for_period": lambda *_args: [],
-            "get_iis_tax_deductions_for_period": lambda *_args: Decimal("0"),
-            "get_commissions_for_period": lambda *_args: Decimal("0"),
-            "get_taxes_for_period": lambda *_args: Decimal("0"),
-            "get_tax_refunds_for_period": lambda *_args: Decimal("0"),
-            "compute_period_delta_excluding_external_flow": lambda start, end, flow: (
-                (None, None)
-                if start in (None, 0) or end is None
-                else (end - start - flow, (end - start - flow) / start * 100)
-            ),
-            "TodayContext": lambda **kwargs: kwargs,
-            "render_today_text": lambda context: context,
-            "fmt_rub": lambda value: value,
-            "fmt_pct": lambda value: value,
-            "fmt_decimal_rub": lambda value: value,
-            "append_tax_refund_line": lambda text_value, _refunds: text_value,
-            "append_income_currency_breakdown": lambda text_value, _rows: text_value,
-            "REPORTING_ACCOUNT_UNAVAILABLE_TEXT": "unavailable",
-            "local_reporting_bounds_utc": lambda start, end: (
-                datetime.combine(start, time.min),
-                datetime.combine(end, time.min),
-            ),
-        }
-        build_today = load_function(SUMMARY_SERVICE_FILE, "build_today_summary", namespace)
-        return build_today(), calls
-
-    def test_today_uses_full_interval_between_latest_snapshots(self):
-        latest_date = datetime.now(timezone.utc).date()
-        summary, calls = self._build(
-            [
-                {"snapshot_date": latest_date, "snapshot_at": None, "total_value": 150},
-                {"snapshot_date": latest_date - timedelta(days=2), "snapshot_at": None, "total_value": 100},
-            ],
-            expected_interval_flow=50,
-            net_contributions=150,
-        )
-
-        self.assertEqual(summary["delta_abs"], 0)
-        self.assertEqual(len(calls), 1)
-
-    def test_lifetime_round_trip_does_not_turn_withdrawal_into_loss(self):
-        latest_date = datetime.now(timezone.utc).date()
-        summary, _calls = self._build(
-            [
-                {"snapshot_date": latest_date, "snapshot_at": None, "total_value": 50},
-                {"snapshot_date": latest_date - timedelta(days=1), "snapshot_at": None, "total_value": 50},
-            ],
-            expected_interval_flow=0,
-            deposits=100,
-            net_contributions=50,
-        )
-
-        self.assertEqual(summary["pnl_abs"], 0)
-        self.assertEqual(summary["pnl_pct"], 0)
 
 
 class StructurePnlDenominatorTests(unittest.TestCase):

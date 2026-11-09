@@ -16,7 +16,7 @@ def get_max_age_seconds() -> int:
         return max(1, int(configured))
     if os.getenv("SNAPSHOT_MODE", "interval").strip().lower() == "cron":
         return 90_000
-    interval_minutes = max(1, int(os.getenv("SNAPSHOT_INTERVAL_MINUTES", "5")))
+    interval_minutes = max(1, int(os.getenv("SNAPSHOT_INTERVAL_MINUTES", "1")))
     return max(300, interval_minutes * 60 * 3)
 
 

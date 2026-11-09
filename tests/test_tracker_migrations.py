@@ -132,6 +132,9 @@ class TrackerMigrationTests(unittest.TestCase):
 
         self.assertGreater(schema_manifest.SCHEMA_MANIFEST_VERSION, 0)
         self.assertIn("operations", schema_manifest.TABLES)
+        self.assertIn("intraday_portfolio_snapshots", schema_manifest.TABLES)
+        self.assertIn("intraday_portfolio_positions", schema_manifest.TABLES)
+        self.assertIn("intraday_daily_summaries", schema_manifest.TABLES)
         self.assertIn("income_events", schema_manifest.TABLES)
         self.assertIn("payout_calendar_events", schema_manifest.TABLES)
         self.assertIn("deposits", schema_manifest.VIEWS)
@@ -139,6 +142,18 @@ class TrackerMigrationTests(unittest.TestCase):
             "uq_operations_account_operation",
             schema_manifest.TABLES["operations"].unique_constraints,
         )
+
+    def test_intraday_migration_retains_raw_rows_for_delivery_and_summary(self):
+        sql = (
+            PROJECT_ROOT / "migrations" / "20260916_intraday_portfolio_snapshots.sql"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("CREATE TABLE IF NOT EXISTS public.intraday_portfolio_snapshots", sql)
+        self.assertIn("CREATE TABLE IF NOT EXISTS public.intraday_portfolio_positions", sql)
+        self.assertIn("ON DELETE CASCADE", sql)
+        self.assertIn("CREATE TABLE IF NOT EXISTS public.intraday_daily_summaries", sql)
+        self.assertIn("uq_intraday_daily_summaries_account_date", sql)
+        self.assertIn("delivered_at TIMESTAMPTZ", sql)
 
     def test_schema_manifest_digest_includes_migration_order(self):
         from financetracker.database.schema_manifest import manifest_digest

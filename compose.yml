@@ -158,6 +158,8 @@ services:
       - default
       - bot_proxy_internal
       - bot_reporter_internal
+    volumes:
+      - bot-state:/var/lib/financetracker-bot
     read_only: true
     cap_drop: [ALL]
     security_opt:
@@ -229,6 +231,7 @@ services:
     restart: unless-stopped
 
 volumes:
+  bot-state:
   fintracker-db:
     external: true
     name: financetracker_fintracker-db

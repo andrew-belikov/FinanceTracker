@@ -83,7 +83,7 @@ fail-fast; тихий UTC fallback tracker не является production guar
 | `TINVEST_INSTRUMENT_CACHE_MAX_ENTRIES` | `1024` | min 0; 0 disables cache |
 | `VERIFY_SSL` | `true` | strict boolean; `false` допустим только при `APP_ENV=test` и `ALLOW_INSECURE_TLS_FOR_TESTS=true` |
 | `SNAPSHOT_MODE` | `interval` | `cron` selects daily schedule; other values use interval mode |
-| `SNAPSHOT_INTERVAL_MINUTES` | `5` | integer; healthcheck normalizes minimum to 1 |
+| `SNAPSHOT_INTERVAL_MINUTES` | `1` | integer; healthcheck normalizes minimum to 1. Внутридневное observation добавляется только по будням и строго до времени daily push; канонический EOD snapshot остаётся один на account/local date |
 | `SNAPSHOT_HOUR` / `SNAPSHOT_MINUTE` | `23` / `30` | используются только в cron mode |
 | `PAYOUT_CALENDAR_HORIZON_DAYS` | `90` | min 1 |
 | `PAYOUT_DIVIDEND_RECORD_LOOKBACK_DAYS` | `365` | min 1 |
@@ -99,12 +99,14 @@ fail-fast; тихий UTC fallback tracker не является production guar
 | Переменная | Default | Валидация / семантика |
 |---|---:|---|
 | `DAILY_SUMMARY_HOUR` / `_MINUTE` | `18` / `0` | `datetime.time` range, timezone `TIMEZONE` |
+| `INTRADAY_DAILY_PUSH_HOUR` / `_MINUTE` | `19` / `10` | `datetime.time` range, timezone `TIMEZONE`; job запускается только Monday–Friday |
 | `YESTERDAY_PEAK_ALERT_HOUR` / `_MINUTE` | `8` / `0` | `datetime.time` range |
 | `PAYOUT_WEEKLY_TIMEZONE` | `Europe/Moscow` | IANA zone |
 | `PAYOUT_WEEKLY_HOUR` / `_MINUTE` | `10` / `0` | Monday digest |
 | `PAYOUT_CALENDAR_TAX_RATE_PCT` | `13` | Decimal in `0..100` |
 | `JOBQUEUE_SMOKE_TEST_ON_START` | `false` | truthy: `1,true,yes,on` |
 | `JOBQUEUE_SMOKE_TEST_DELAY_SECONDS` | `20` | integer seconds |
+| `TODAY_WIDGET_STATE_FILE` | `/var/lib/financetracker-bot/today-widgets.json` | файл ID и хешей последних виджетов; родительский каталог доступен боту на запись, в Compose используется том `bot-state` |
 | `BOT_COMMAND_MAX_CONCURRENCY` | `2` | clamped to `1..8` |
 | `BOT_COMMAND_TIMEOUT_SECONDS` | `120` | min 1 second |
 | `BOT_STARTUP_RETRY_DELAY_SECONDS` | `15` | supervised restart delay |

@@ -9,11 +9,12 @@
 
 | Контракт | Версия | Статус | Владелец | Машиночитаемая спецификация |
 |---|---:|---|---|---|
-| [Схема PostgreSQL](database-schema.md) | `schema_manifest.v2` | active | `financetracker.database` | `src/financetracker/database/schema_manifest.py` |
+| [Схема PostgreSQL](database-schema.md) | `schema_manifest.v3` | active | `financetracker.database` | `src/financetracker/database/schema_manifest.py` |
 | [Reporter HTTP API](reporter-http-api.md) | `monthly_report_service.v1` | active, internal | `financetracker.reporting` | [OpenAPI 3.1](reporter.openapi.json) |
 | [Monthly report payload](monthly-report-payload.md) | `monthly_report_payload.v1` | active, internal | `financetracker.reporting` | [JSON Schema](monthly-report-payload.schema.json) |
 | [Конфигурация runtime](configuration.md) | `runtime_configuration.v1` | active | владельцы сервисов | `.env.example`, `compose*.yml`, `src/financetracker/**/runtime.py` |
 | [Внешние интеграции](external-integrations.md) | `external_integrations.v1` | active | владельцы consumers | upstream API + contract tests |
+| [Дневная расшифровка](daily-report.md) | `daily_report.v1` | active, internal | `financetracker.domain`, `financetracker.bot` | `tests/test_daily_reconciliation.py` |
 | [Совместимость и версионирование](versioning.md) | `contract_policy.v1` | active | maintainers | — |
 
 Связанные действующие контракты вне этого каталога:

@@ -26,7 +26,8 @@ COPY src/ ./src/
 RUN pip install --no-deps .
 
 RUN groupadd --system --gid 10001 financetracker \
- && useradd --system --uid 10001 --gid financetracker --home-dir /nonexistent --shell /usr/sbin/nologin financetracker
+ && useradd --system --uid 10001 --gid financetracker --home-dir /nonexistent --shell /usr/sbin/nologin financetracker \
+ && install -d -m 0700 -o financetracker -g financetracker /var/lib/financetracker-bot
 
 USER financetracker
 

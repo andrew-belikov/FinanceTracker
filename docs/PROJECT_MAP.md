@@ -50,7 +50,7 @@
 | `tinvest_client.py` | T-Invest RPC/HTTP calls, retry, pagination и instrument cache |
 | `http_session.py`, `http_policy.py` | Transport factory и чистая retry/backoff policy |
 | `payloads.py` | Безопасный разбор broker JSON, MoneyValue/Quotation и URL metadata |
-| `snapshot_sync.py` | Portfolio snapshot и position persistence |
+| `snapshot_sync.py` | EOD snapshot, временные intraday observations и position persistence |
 | `operations_sync.py`, `income_events.py` | Operations upsert и income reconciliation |
 | `payout_calendar_sync.py` | Coupon/dividend calendar synchronization |
 | `asset_aliases.py` | Стабильная asset identity и alias persistence |
@@ -77,8 +77,8 @@
 | Product services | `summary_service.py`, `performance_service.py`, `year_summary_service.py`, `alerts_service.py`, `payout_service.py`, `rebalance_service.py` | Presentation use cases и orchestration доменных расчётов |
 | Read repositories | `portfolio_repository.py`, `operations_repository.py`, `financials_repository.py`, `payout_repository.py`, `dataset_repository.py`, `reporting_account.py` | Тематические SQL read models и account resolution |
 | Write/delivery repositories | `rebalance_repository.py`, `notification_repository.py`, `scheduled_job_runs.py` | Target weights, notification state, leases и job ledger |
-| Scheduling | `scheduled_jobs.py`, `notification_jobs.py`, `notification_delivery.py`, `polling_watchdog.py` | Плановые задачи, catch-up, tracked delivery и polling recovery |
-| Presentation | `today_templates.py`, `week_templates.py`, `month_templates.py`, `payout_calendar.py`, `charts.py` | Text/chart rendering без владения persistence |
+| Scheduling | `scheduled_jobs.py`, `notification_jobs.py`, `notification_delivery.py`, `polling_watchdog.py` | Плановые задачи, catch-up, tracked delivery, weekday intraday push и polling recovery |
+| Presentation | `today_templates.py`, `week_templates.py`, `month_templates.py`, `payout_calendar.py`, `intraday_daily_push.py`, `charts.py` | Text/chart rendering без владения persistence |
 | Exports/integration | `dataset.py`, `report_client.py`, `proxy_smoke.py` | Dataset archive, reporter HTTP client и Telegram route probe |
 | Compatibility surfaces | `queries.py`, `services.py`, `jobs.py` | Стабильные import surfaces; новая логика размещается у тематического owner |
 
@@ -120,6 +120,7 @@
 |---|---|
 | `database/base.py` | Единый SQLAlchemy declarative base |
 | `database/models.py` | Application ORM mappings и relationships |
+| `database/intraday.py` | Intraday read model, durable summary и controlled raw-data purge |
 | `database/session.py` | Engine/session factory |
 | `database/operations.py` | Канонический deduplicated operations SQL |
 | `database/schema_manifest.py` | Независимый expected catalog для post-migration drift check |
@@ -131,7 +132,8 @@
 - activity: `operations`, `income_events`, compatibility view `deposits`;
 - identity/calendar: `asset_aliases`, `payout_calendar_events`;
 - allocation: `rebalance_targets`, `invest_notifications`;
-- delivery: `bot_daily_job_runs`, `bot_notification_deliveries`;
+- delivery: `intraday_daily_summaries`, `bot_daily_job_runs`, `bot_notification_deliveries`;
+- temporary intraday telemetry: `intraday_portfolio_snapshots`, `intraday_portfolio_positions`;
 - schema control: `schema_migrations`.
 
 Колонки, ключи, индексы, timezone и migration compatibility определены в

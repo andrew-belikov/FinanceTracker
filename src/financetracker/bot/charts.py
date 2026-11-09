@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
+from decimal import Decimal
+from textwrap import fill as wrap_text
+from zoneinfo import ZoneInfo
 
 import matplotlib
 matplotlib.use("Agg")
@@ -51,6 +54,150 @@ CHART_COLORS = {
     "text": "#1f2933",
     "muted": "#67707b",
 }
+
+
+def _intraday_plot_start(timestamps: list[datetime], values: list[float], market_open: datetime) -> int:
+    first_change = next((index for index, value in enumerate(values) if value != values[0]), None)
+    if first_change is None:
+        return 0
+
+    # A midnight adjustment can precede the night plateau. Find the first
+    # sustained pause before the main session, rather than only the first change.
+    pause_start = 0
+    for index in range(1, len(values)):
+        if values[index] == values[index - 1]:
+            continue
+        pause_end = index - 1
+        if (
+            timestamps[pause_end] < market_open
+            and timestamps[pause_end] - timestamps[pause_start] >= timedelta(hours=1)
+        ):
+            return pause_end
+        pause_start = index
+    return max(0, first_change - 1)
+
+
+def _intraday_value_label(value: float) -> str:
+    return f"{value / 1000:,.1f}".replace(",", " ").replace(".", ",") + " тыс. ₽"
+
+
+def build_intraday_daily_push_chart(
+    path: str,
+    *,
+    report_date: date,
+    snapshots: list[dict],
+    positive_movers: list[dict],
+    negative_movers: list[dict],
+    change_components: list[dict] | None = None,
+) -> str | None:
+    """Render the compact PNG attached to the weekday intraday digest."""
+    if len(snapshots) < 2:
+        return None
+
+    timestamps = [row.get("observed_at") or row.get("snapshot_at") for row in snapshots]
+    values = [float(Decimal(str(row.get("total_value") or 0))) for row in snapshots]
+    if any(value is None for value in timestamps):
+        return None
+    # Storage timestamps are UTC, including naive legacy/SQLite values.
+    timestamps = [
+        (stamp if stamp.tzinfo else stamp.replace(tzinfo=timezone.utc)).astimezone(TZ)
+        for stamp in timestamps
+    ]
+    opening = values[0]
+    market_open = datetime(report_date.year, report_date.month, report_date.day, 10, tzinfo=ZoneInfo("Europe/Moscow"))
+    start = _intraday_plot_start(timestamps, values, market_open)
+    timestamps, values = timestamps[start:], values[start:]
+
+    movers = list(positive_movers) + list(negative_movers)
+    movers_height = max(1.45, len(movers) * 0.48)
+
+    heights = [3.1, movers_height]
+    if change_components is not None:
+        heights.append(max(1.5, len(change_components) * 0.65))
+    fig, axes = plt.subplots(
+        len(heights), 1,
+        figsize=(12.8, 7.2 + movers_height - 1.45 + (heights[-1] + 0.8 if len(heights) == 3 else 0)),
+        gridspec_kw={"height_ratios": heights},
+    )
+    ax_value, ax_movers = axes[:2]
+    apply_chart_style(ax_value, y_formatter=lambda value, pos: _intraday_value_label(value))
+    color = CHART_COLORS["positive"] if values[-1] >= opening else CHART_COLORS["negative"]
+    fill = CHART_COLORS["positive_fill"] if values[-1] >= opening else CHART_COLORS["negative_fill"]
+    ax_value.axhline(opening, color=CHART_COLORS["neutral"], linewidth=1, linestyle="--", zorder=1)
+    ax_value.fill_between(timestamps, values, opening, color=fill, alpha=0.85, zorder=1)
+    ax_value.plot(timestamps, values, color=color, linewidth=2.4, zorder=3)
+    low_index = values.index(min(values))
+    high_index = values.index(max(values))
+    label_left_after = timestamps[0] + (timestamps[-1] - timestamps[0]) * 0.8
+    for index, label, point_color, y_offset in (
+        (low_index, "Мин", CHART_COLORS["negative"], -18),
+        (high_index, "Макс", CHART_COLORS["positive"], 18),
+    ):
+        annotate_point(
+            ax_value, timestamps[index], values[index], f"{label} {_intraday_value_label(values[index])}",
+            point_color, x_offset=-8 if timestamps[index] >= label_left_after else 8, y_offset=y_offset,
+        )
+    annotate_series_last_point(ax_value, timestamps, values, f"Закрытие {_intraday_value_label(values[-1])}", color, y_offset=12)
+    ax_value.set_ylabel("Стоимость")
+    ax_value.margins(x=0.025, y=0.22)
+    ax_value.xaxis.set_major_formatter(matplotlib.dates.DateFormatter("%H:%M", tz=TZ))
+    if timestamps[0] <= market_open <= timestamps[-1]:
+        ax_value.axvline(market_open, color=CHART_COLORS["neutral"], linewidth=0.8, alpha=0.35, linestyle="--", zorder=2)
+        ax_value.text(market_open, 1.02, "Основные торги · 10:00 МСК", transform=ax_value.get_xaxis_transform(), ha="center", fontsize=8, color=CHART_COLORS["muted"])
+
+    apply_chart_style(ax_movers, y_formatter=rub_axis_formatter)
+    if movers:
+        labels = [wrap_text(str(row["label"]), width=32, break_long_words=False, break_on_hyphens=False) for row in movers]
+        contributions = [float(Decimal(str(row["contribution"]))) for row in movers]
+        colors = [CHART_COLORS["positive"] if value >= 0 else CHART_COLORS["negative"] for value in contributions]
+        indices = list(range(len(movers)))
+        ax_movers.barh(indices, contributions, color=colors, height=0.58)
+        ax_movers.axvline(0, color=CHART_COLORS["spine"], linewidth=1)
+        ax_movers.set_yticks(indices)
+        ax_movers.set_yticklabels(labels)
+        ax_movers.invert_yaxis()
+        max_abs = max(abs(value) for value in contributions)
+        for index, value in zip(indices, contributions):
+            ax_movers.text(value + max_abs * 0.04 * (1 if value >= 0 else -1), index, fmt_compact_rub(value, signed=True), ha="left" if value >= 0 else "right", va="center", fontsize=8, color=CHART_COLORS["muted"])
+        ax_movers.set_xlim(-max_abs * 1.35, max_abs * 1.35)
+    else:
+        ax_movers.text(0.5, 0.5, "Нет позиций с изменением стоимости", ha="center", va="center", color=CHART_COLORS["muted"], transform=ax_movers.transAxes)
+        ax_movers.set_xticks([])
+        ax_movers.set_yticks([])
+    ax_movers.set_title("Лидеры изменения цен бумаг · без НКД и денежных выплат", loc="left", fontsize=11, fontweight="bold", color=CHART_COLORS["text"], pad=10)
+
+    if change_components is not None:
+        _draw_daily_change_components(axes[2], change_components)
+    fig.tight_layout(rect=(0, 0, 0.91, 0.9), h_pad=3)
+    title = f"Портфель внутри дня — {report_date.strftime('%d.%m.%Y')}"
+    fig.suptitle(title, x=ax_value.get_position().x0, y=0.972, ha="left", fontsize=14, fontweight="bold", color=CHART_COLORS["text"])
+    fig.savefig(path, dpi=170, facecolor=fig.get_facecolor())
+    plt.close(fig)
+    return path
+
+
+def _daily_change_amount(value):
+    return f"{value:+,.2f}".replace(",", " ").replace(".", ",") + " ₽"
+
+
+def _draw_daily_change_components(ax, components):
+    apply_chart_style(ax, y_formatter=rub_axis_formatter)
+    labels = [wrap_text(str(row["label"]), width=35, break_long_words=False) for row in components]
+    values = [float(row["contribution"]) for row in components]
+    indices = list(range(len(values)))
+    ax.barh(indices, values, color=[CHART_COLORS["positive"] if value >= 0 else CHART_COLORS["negative"] for value in values], height=0.58)
+    ax.set_yticks(indices)
+    ax.set_yticklabels(labels)
+    ax.invert_yaxis()
+    ax.axvline(0, color=CHART_COLORS["spine"], linewidth=1)
+    scale = max((abs(value) for value in values), default=1) or 1
+    ax.set_xlim(-scale * 1.45, scale * 1.45)
+    for index, value in enumerate(values):
+        ax.text(value + scale * 0.04 * (1 if value >= 0 else -1), index,
+                _daily_change_amount(value),
+                ha="left" if value >= 0 else "right", va="center", fontsize=8, color=CHART_COLORS["text"])
+    total = sum((Decimal(str(row["contribution"])) for row in components), Decimal("0"))
+    ax.set_title(f"Из чего сложилось изменение · итого {_daily_change_amount(total)}", loc="left", fontsize=11, fontweight="bold", color=CHART_COLORS["text"], pad=10)
 
 
 def format_month_short_label(d: date) -> str:

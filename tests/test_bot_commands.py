@@ -17,6 +17,7 @@ class BotCommandsTests(unittest.TestCase):
         self.assertIn("targets", menu_names)
         self.assertIn("rebalance", menu_names)
         self.assertIn("invest", menu_names)
+        self.assertIn("today_widget", menu_names)
 
     def test_sync_bot_commands_updates_telegram_menu(self):
         set_my_commands = mock.AsyncMock()

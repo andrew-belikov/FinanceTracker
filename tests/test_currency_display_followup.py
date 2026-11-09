@@ -84,26 +84,8 @@ class CurrencySummaryDisplayTests(unittest.TestCase):
         self.assertIn("UNKNOWN", text_value)
         self.assertIn("не включена", text_value.lower())
 
-    def test_today_week_month_show_each_income_currency_and_unknown_warning(self):
+    def test_week_month_show_each_income_currency_and_unknown_warning(self):
         builders = (
-            (
-                services.build_today_summary,
-                (
-                    mock.patch.object(
-                        services,
-                        "get_latest_snapshots",
-                        return_value=[
-                            {
-                                "snapshot_date": date(2026, 4, 15),
-                                "snapshot_at": None,
-                                "total_value": 1000,
-                                "currency": "RUB",
-                            }
-                        ],
-                    ),
-                    mock.patch.object(services, "get_net_external_contributions", return_value=1000),
-                ),
-            ),
             (
                 services.build_week_summary,
                 (

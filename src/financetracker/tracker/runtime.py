@@ -117,8 +117,10 @@ except Exception:
     LOCAL_TZ = ZoneInfo("UTC")
 
 
-# Интервал обновления снапшота в минутах (по умолчанию: каждые 5 минут)
-SNAPSHOT_INTERVAL_MINUTES = int(os.getenv("SNAPSHOT_INTERVAL_MINUTES", "5"))
+# Интервал обновления снапшота в минутах (по умолчанию: каждую минуту).
+SNAPSHOT_INTERVAL_MINUTES = int(os.getenv("SNAPSHOT_INTERVAL_MINUTES", "1"))
+INTRADAY_DAILY_PUSH_HOUR = int(os.getenv("INTRADAY_DAILY_PUSH_HOUR", "19"))
+INTRADAY_DAILY_PUSH_MINUTE = int(os.getenv("INTRADAY_DAILY_PUSH_MINUTE", "10"))
 
 # interval | cron
 SNAPSHOT_MODE = os.getenv("SNAPSHOT_MODE", "interval").strip().lower()
@@ -315,6 +317,12 @@ def take_snapshot_for_account(db, acc_data: dict):
         local_today=local_today,
         portfolio_currency=PORTFOLIO_CURRENCY,
         logger=logger,
+        should_capture_intraday=lambda observed_at: _snapshot_sync.is_intraday_capture_window(
+            observed_at,
+            local_tz=LOCAL_TZ,
+            cutoff_hour=INTRADAY_DAILY_PUSH_HOUR,
+            cutoff_minute=INTRADAY_DAILY_PUSH_MINUTE,
+        ),
     )
 
 

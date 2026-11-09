@@ -65,6 +65,8 @@ TZ = ZoneInfo(TZ_NAME)
 
 DAILY_JOB_HOUR = int(os.getenv("DAILY_SUMMARY_HOUR", "18"))
 DAILY_JOB_MINUTE = int(os.getenv("DAILY_SUMMARY_MINUTE", "0"))
+INTRADAY_DAILY_PUSH_HOUR = int(os.getenv("INTRADAY_DAILY_PUSH_HOUR", "19"))
+INTRADAY_DAILY_PUSH_MINUTE = int(os.getenv("INTRADAY_DAILY_PUSH_MINUTE", "10"))
 YESTERDAY_PEAK_ALERT_HOUR = int(os.getenv("YESTERDAY_PEAK_ALERT_HOUR", "8"))
 YESTERDAY_PEAK_ALERT_MINUTE = int(os.getenv("YESTERDAY_PEAK_ALERT_MINUTE", "0"))
 PAYOUT_WEEKLY_TIMEZONE = (
@@ -98,6 +100,21 @@ def format_daily_job_schedule() -> str:
 
 
 DAILY_JOB_SCHEDULE_LABEL = format_daily_job_schedule()
+
+
+def build_intraday_daily_push_time() -> time:
+    return time(
+        hour=INTRADAY_DAILY_PUSH_HOUR,
+        minute=INTRADAY_DAILY_PUSH_MINUTE,
+        tzinfo=TZ,
+    )
+
+
+def format_intraday_daily_push_schedule() -> str:
+    return f"будни {INTRADAY_DAILY_PUSH_HOUR:02d}:{INTRADAY_DAILY_PUSH_MINUTE:02d} ({TZ_NAME})"
+
+
+INTRADAY_DAILY_PUSH_SCHEDULE_LABEL = format_intraday_daily_push_schedule()
 
 
 def build_yesterday_peak_alert_time() -> time:
@@ -449,6 +466,41 @@ async def safe_send_document(
         {
             "filename": filename,
         },
+    )
+
+
+async def safe_send_photo(
+    bot,
+    chat_id: int,
+    *,
+    file_path: str,
+    filename: str,
+):
+    """Send a generated chart with the same explicit file handling as PDFs."""
+    from telegram import InputFile
+
+    logger.info(
+        "bot_send_photo_started",
+        "Sending Telegram photo.",
+        {"filename": filename},
+    )
+    try:
+        with open(file_path, "rb") as file_obj:
+            await bot.send_photo(
+                chat_id=chat_id,
+                photo=InputFile(file_obj, filename=filename),
+            )
+    except Exception:
+        logger.exception(
+            "bot_send_photo_failed",
+            "Telegram photo send failed.",
+            {"filename": filename},
+        )
+        raise
+    logger.info(
+        "bot_send_photo_succeeded",
+        "Telegram photo sent.",
+        {"filename": filename},
     )
 
 

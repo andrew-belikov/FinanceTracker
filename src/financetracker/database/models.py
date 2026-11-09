@@ -86,6 +86,103 @@ class PortfolioPosition(Base):
     instrument = relationship("Instrument")
 
 
+class IntradayPortfolioSnapshot(Base):
+    """Observation retained until delivery and the next local day's capture."""
+
+    __tablename__ = "intraday_portfolio_snapshots"
+    __table_args__ = (
+        Index(
+            "ix_intraday_portfolio_snapshots_account_date_at",
+            "account_id",
+            "snapshot_date",
+            "snapshot_at",
+        ),
+    )
+
+    id = Column(Integer, primary_key=True)
+    account_id = Column(String, nullable=False)
+    account_name = Column(String, nullable=True)
+    snapshot_at = Column(DateTime(timezone=True), nullable=False)
+    snapshot_date = Column(Date, nullable=False)
+    currency = Column(String, nullable=False)
+    total_value = Column(Numeric(18, 2), nullable=True)
+    total_shares = Column(Numeric(18, 2), nullable=True)
+    total_bonds = Column(Numeric(18, 2), nullable=True)
+    total_etf = Column(Numeric(18, 2), nullable=True)
+    total_currencies = Column(Numeric(18, 2), nullable=True)
+    total_futures = Column(Numeric(18, 2), nullable=True)
+    expected_yield = Column(Numeric(18, 2), nullable=True)
+    expected_yield_pct = Column(Numeric(9, 4), nullable=True)
+    created_at = Column(DateTime(timezone=True), default=utc_now, nullable=False)
+
+    positions = relationship(
+        "IntradayPortfolioPosition",
+        back_populates="snapshot",
+        cascade="all, delete-orphan",
+    )
+
+
+class IntradayPortfolioPosition(Base):
+    __tablename__ = "intraday_portfolio_positions"
+
+    id = Column(Integer, primary_key=True)
+    snapshot_id = Column(
+        Integer,
+        ForeignKey("intraday_portfolio_snapshots.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    figi = Column(String, nullable=False)
+    instrument_id = Column(Integer, ForeignKey("instruments.id"), nullable=True)
+    instrument_uid = Column(String, nullable=True)
+    position_uid = Column(String, nullable=True)
+    asset_uid = Column(String, nullable=True)
+    ticker = Column(String, nullable=True)
+    name = Column(String, nullable=True)
+    instrument_type = Column(String, nullable=True)
+    quantity = Column(Numeric(18, 6), nullable=True)
+    currency = Column(String, nullable=True)
+    current_price = Column(Numeric(18, 4), nullable=True)
+    current_nkd = Column(Numeric, nullable=True)
+    position_value = Column(Numeric(18, 2), nullable=True)
+    expected_yield = Column(Numeric(18, 2), nullable=True)
+    expected_yield_pct = Column(Numeric(9, 4), nullable=True)
+    weight_pct = Column(Numeric(9, 4), nullable=True)
+    raw_payload_json = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), default=utc_now, nullable=False)
+
+    snapshot = relationship("IntradayPortfolioSnapshot", back_populates="positions")
+    instrument = relationship("Instrument")
+
+
+class IntradayDailySummary(Base):
+    """Compact permanent result derived from one day's raw intraday stream."""
+
+    __tablename__ = "intraday_daily_summaries"
+    __table_args__ = (
+        UniqueConstraint(
+            "account_id",
+            "summary_date",
+            name="uq_intraday_daily_summaries_account_date",
+        ),
+    )
+
+    id = Column(Integer, primary_key=True)
+    account_id = Column(String, nullable=False)
+    summary_date = Column(Date, nullable=False)
+    currency = Column(String, nullable=False)
+    first_observed_at = Column(DateTime(timezone=True), nullable=False)
+    last_observed_at = Column(DateTime(timezone=True), nullable=False)
+    first_value = Column(Numeric(18, 2), nullable=False)
+    last_value = Column(Numeric(18, 2), nullable=False)
+    min_value = Column(Numeric(18, 2), nullable=False)
+    max_value = Column(Numeric(18, 2), nullable=False)
+    total_value_delta = Column(Numeric(18, 2), nullable=True)
+    observation_count = Column(Integer, nullable=False)
+    delivered_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), default=utc_now, nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=utc_now, nullable=False)
+
+
 class Operation(Base):
     __tablename__ = "operations"
     __table_args__ = (

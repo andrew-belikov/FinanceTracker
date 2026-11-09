@@ -81,7 +81,10 @@ health probes.
 2. Payload helpers приводят broker values к доменным типам; asset aliases
    стабилизируют identity между FIGI, instrument UID и asset UID.
 3. Use cases `snapshot_sync`, `operations_sync` и `payout_calendar_sync`
-   выполняют idempotent upsert/reconciliation в PostgreSQL.
+   выполняют idempotent upsert/reconciliation в PostgreSQL. До времени
+   будничного вечернего push interval snapshot также append-only сохраняет
+   временные внутридневные наблюдения; после cutoff и в выходные сохраняется
+   только канонический EOD snapshot.
 4. После успешного цикла tracker обновляет readiness marker. Планировщик
    повторяет snapshot/operations sync и отдельно calendar sync.
 
@@ -92,6 +95,10 @@ health probes.
    repository и использует чистые расчёты из `domain`.
 3. Ответ отправляется в Telegram. Плановые job используют PostgreSQL leases и
    delivery records, чтобы отслеживать владение попыткой и итог доставки.
+   Будничный intraday push доставляет отдельно текст и PNG; только подтверждение
+   обеих частей всем target chats отмечает день доставленным. Raw observations
+   сохраняются до первого успешного intraday-сбора следующего дня этого счёта;
+   очистка предыдущих доставленных дней атомарна с записью новой точки.
 4. Команды изменения целевых весов и классификации налогового вычета в операции —
    контролируемые write paths bot; остальные presentation use cases читают
    product data.
@@ -120,11 +127,11 @@ migrations.
 
 | Набор данных | Основной writer | Readers |
 |---|---|---|
-| `instruments`, `portfolio_snapshots`, `portfolio_positions`, `operations`, `asset_aliases`, `payout_calendar_events` | `tracker` | `bot`, `reporter` |
+| `instruments`, `portfolio_snapshots`, `portfolio_positions`, `operations`, `asset_aliases`, `payout_calendar_events`, `intraday_portfolio_snapshots`, `intraday_portfolio_positions` | `tracker` | `bot`, `reporter` |
 | `income_events` | `tracker` (reconciliation), `bot` (notification status) | `bot`, `reporter` |
 | `rebalance_targets` | `bot` | `bot`, `reporter` |
 | `invest_notifications` | `bot` | `bot` |
-| `bot_daily_job_runs`, `bot_notification_deliveries` | `bot` | `bot` |
+| `intraday_daily_summaries`, `bot_daily_job_runs`, `bot_notification_deliveries` | `bot` | `bot` |
 | `schema_migrations` и database objects | `migrate` | `migrate --check`, application runtimes |
 
 Детальная схема, инварианты identity, timezone и compatibility находятся в

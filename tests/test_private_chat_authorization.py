@@ -95,6 +95,7 @@ class PrivateChatAuthorizationTests(unittest.TestCase):
         sensitive = {
             "handle_iis_tax_deduction_callback",
             "cmd_today",
+            "cmd_today_widget",
             "cmd_week",
             "cmd_month",
             "cmd_calendar",

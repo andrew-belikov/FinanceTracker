@@ -4,6 +4,7 @@ Telegram-бот для проекта iis_tracker.
 Функции:
 - Команды:
     /today      — сводка по портфелю "Семейный капитал" на сегодня
+    /today_widget — новый виджет дневной сводки
     /week       — сводка по текущей неделе
     /month      — отчёт по текущему месяцу
     /monthpdf   — PDF-отчёт по текущему месяцу
@@ -56,6 +57,7 @@ from financetracker.bot.handlers import (
     cmd_structure,
     cmd_targets,
     cmd_today,
+    cmd_today_widget,
     cmd_twr,
     cmd_week,
     cmd_year,
@@ -80,9 +82,16 @@ from financetracker.bot.jobs import (
     yesterday_peak_alert_startup_catchup,
     YESTERDAY_PEAK_ALERT_STARTUP_CATCHUP_DELAY_SECONDS,
 )
+from financetracker.bot.intraday_daily_push_job import (
+    INTRADAY_DAILY_PUSH_STARTUP_CATCHUP_DELAY_SECONDS,
+    intraday_daily_push_job,
+    intraday_daily_push_startup_catchup,
+)
+from financetracker.bot.today_widget import refresh_today_widgets
 from financetracker.bot.runtime import (
     BOT_PROXY_ENABLED,
     DAILY_JOB_SCHEDULE_LABEL,
+    INTRADAY_DAILY_PUSH_SCHEDULE_LABEL,
     JOBQUEUE_SMOKE_TEST_DELAY_SECONDS,
     JOBQUEUE_SMOKE_TEST_ON_START,
     POLLING_WATCHDOG_INTERVAL_SECONDS,
@@ -108,6 +117,7 @@ from financetracker.bot.runtime import (
     DB_PASSWORD,
     RuntimeConfigurationError,
     build_daily_job_time,
+    build_intraday_daily_push_time,
     build_payout_weekly_job_time,
     build_yesterday_peak_alert_time,
     build_telegram_request_kwargs,
@@ -122,6 +132,7 @@ COMMAND_SPECS = (
     ("start", "Приветствие и быстрый старт", cmd_start),
     ("help", "Список всех команд", cmd_help),
     ("today", "Сводка по портфелю на сегодня", cmd_today),
+    ("today_widget", "Показать виджет «Сегодня»", cmd_today_widget),
     ("week", "Сводка по текущей неделе", cmd_week),
     ("month", "Отчёт по текущему месяцу", cmd_month),
     ("monthpdf", "PDF-отчёт по текущему месяцу", cmd_monthpdf),
@@ -176,8 +187,15 @@ def configure_jobs(app: Application) -> None:
     job_time = build_daily_job_time()
     peak_alert_time = build_yesterday_peak_alert_time()
     payout_weekly_time = build_payout_weekly_job_time()
+    intraday_daily_push_time = build_intraday_daily_push_time()
     job_queue.run_daily(daily_job, time=job_time, name="daily_summary")
     job_queue.run_daily(yesterday_peak_alert_job, time=peak_alert_time, name="yesterday_peak_alert")
+    job_queue.run_daily(
+        intraday_daily_push_job,
+        time=intraday_daily_push_time,
+        days=(1, 2, 3, 4, 5),
+        name="intraday_daily_push",
+    )
     job_queue.run_daily(
         payout_weekly_job,
         time=payout_weekly_time,
@@ -199,8 +217,14 @@ def configure_jobs(app: Application) -> None:
         when=PAYOUT_WEEKLY_STARTUP_CATCHUP_DELAY_SECONDS,
         name="weekly_payout_digest_startup_catchup",
     )
+    job_queue.run_once(
+        intraday_daily_push_startup_catchup,
+        when=INTRADAY_DAILY_PUSH_STARTUP_CATCHUP_DELAY_SECONDS,
+        name="intraday_daily_push_startup_catchup",
+    )
     job_queue.run_repeating(check_income_events, interval=60, first=10, name="income_events_notifier")
     job_queue.run_repeating(check_invest_notifications, interval=60, first=15, name="invest_notifier")
+    job_queue.run_repeating(refresh_today_widgets, interval=60, first=20, name="today_widget")
     job_queue.run_repeating(
         polling_watchdog_job,
         interval=POLLING_WATCHDOG_INTERVAL_SECONDS,
@@ -214,11 +238,13 @@ def configure_jobs(app: Application) -> None:
             "daily_job_schedule": DAILY_JOB_SCHEDULE_LABEL,
             "yesterday_peak_alert_schedule": YESTERDAY_PEAK_ALERT_SCHEDULE_LABEL,
             "payout_weekly_schedule": PAYOUT_WEEKLY_SCHEDULE_LABEL,
+            "intraday_daily_push_schedule": INTRADAY_DAILY_PUSH_SCHEDULE_LABEL,
             "schedule_timezone": TZ_NAME,
             "target_chat_count": len(TARGET_CHAT_IDS),
             "daily_job_startup_catchup_delay_seconds": DAILY_JOB_STARTUP_CATCHUP_DELAY_SECONDS,
             "yesterday_peak_alert_startup_catchup_delay_seconds": YESTERDAY_PEAK_ALERT_STARTUP_CATCHUP_DELAY_SECONDS,
             "payout_weekly_startup_catchup_delay_seconds": PAYOUT_WEEKLY_STARTUP_CATCHUP_DELAY_SECONDS,
+            "intraday_daily_push_startup_catchup_delay_seconds": INTRADAY_DAILY_PUSH_STARTUP_CATCHUP_DELAY_SECONDS,
             "income_events_interval_seconds": 60,
             "invest_interval_seconds": 60,
             "polling_watchdog_interval_seconds": POLLING_WATCHDOG_INTERVAL_SECONDS,

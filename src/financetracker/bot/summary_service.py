@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import random
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 
 from financetracker.bot.month_templates import MonthContext, render_month_text
@@ -20,14 +20,14 @@ from financetracker.bot.financials_repository import (
     get_income_for_period,
     get_iis_tax_deductions_for_period,
     get_net_external_flow_for_period,
-    get_net_external_contributions,
+    get_net_external_contributions,  # noqa: F401 - services compatibility seam
     get_taxes_for_period,
     get_tax_refunds_for_period,
 )
 from financetracker.bot.portfolio_repository import (
     get_last_snapshot_before_date,
     get_latest_snapshot_with_id,
-    get_latest_snapshots,
+    get_latest_snapshots,  # noqa: F401 - services compatibility seam
     get_month_snapshots,
     get_positions_for_snapshot,
     get_positions_diff_rows,
@@ -48,7 +48,7 @@ from financetracker.bot.runtime import (
     normalize_decimal,
     local_reporting_bounds_utc,
 )
-from financetracker.bot.today_templates import TodayContext, render_today_text
+from financetracker.bot.today_report import build_today_report
 from financetracker.bot.week_templates import WeekContext, render_week_text
 
 
@@ -85,6 +85,7 @@ def build_help_text() -> str:
     return (
         "Доступные команды:\n\n"
         "/today — сводка по портфелю на сегодня\n"
+        "/today_widget — показать обновляемый виджет «Сегодня»\n"
         "/week — сводка по текущей неделе\n"
         "/month — отчёт по текущему месяцу\n"
         "/monthpdf — PDF-отчёт по текущему месяцу\n"
@@ -292,93 +293,7 @@ def compute_positions_diff_grouped(
 
 
 def build_today_summary() -> str:
-    now_local = datetime.now(TZ)
-    day_start, day_end_exclusive = local_reporting_bounds_utc(
-        now_local.date(),
-        now_local.date() + timedelta(days=1),
-    )
-    day_end = day_end_exclusive - timedelta(microseconds=1)
-
-    with db_session() as session:
-        account_id = resolve_reporting_account_id(session)
-        if account_id is None:
-            return REPORTING_ACCOUNT_UNAVAILABLE_TEXT
-
-        snaps = get_latest_snapshots(session, account_id, limit=2)
-        net_external_flow_today = 0.0
-        if len(snaps) >= 2:
-            interval_start, interval_end_exclusive = local_reporting_bounds_utc(
-                snaps[1]["snapshot_date"] + timedelta(days=1),
-                snaps[0]["snapshot_date"] + timedelta(days=1),
-            )
-            net_external_flow_today = get_net_external_flow_for_period(
-                session,
-                account_id,
-                interval_start,
-                interval_end_exclusive,
-            )
-        net_external_contributions = get_net_external_contributions(session, account_id)
-        coupons, dividends = get_income_for_period(session, account_id, day_start, day_end)
-        iis_tax_deductions = get_iis_tax_deductions_for_period(
-            session, account_id, day_start, day_end_exclusive
-        )
-        commissions = get_commissions_for_period(session, account_id, day_start, day_end)
-        taxes = get_taxes_for_period(session, account_id, day_start, day_end)
-        tax_refunds = get_tax_refunds_for_period(session, account_id, day_start, day_end)
-        income_by_currency = get_income_currency_breakdown_for_period(
-            session, account_id, day_start, day_end
-        )
-
-    if not snaps:
-        return "Пока нет ни одного снапшота портфеля."
-
-    last = snaps[0]
-    last_value = float(last["total_value"]) if last["total_value"] is not None else None
-    if last["snapshot_at"]:
-        dt = last["snapshot_at"]
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        snapshot_dt_local = dt.astimezone(TZ)
-        snapshot_dt_str = snapshot_dt_local.strftime("%d.%m.%y %H:%M")
-    else:
-        snapshot_dt_str = last["snapshot_date"].strftime("%d.%m.%y")
-
-    prev_value = None
-    if len(snaps) >= 2:
-        prev = snaps[1]
-        prev_value = float(prev["total_value"]) if prev["total_value"] is not None else None
-
-    delta_abs, delta_pct = compute_period_delta_excluding_external_flow(
-        prev_value,
-        last_value,
-        net_external_flow_today,
-    )
-
-    pnl_abs = None
-    pnl_pct = None
-    if last_value is not None:
-        pnl_abs = last_value - net_external_contributions
-    if pnl_abs is not None and net_external_contributions > 0:
-        pnl_pct = pnl_abs / net_external_contributions * 100.0
-
-    ctx = TodayContext(
-        snapshot_dt=snapshot_dt_str,
-        current_value=fmt_rub(last_value),
-        delta_abs=fmt_rub(delta_abs) if delta_abs is not None else "—",
-        delta_pct=fmt_pct(delta_pct) if delta_pct is not None else "—",
-        pnl_abs=fmt_rub(pnl_abs) if pnl_abs is not None else "—",
-        pnl_pct=fmt_pct(pnl_pct) if pnl_pct is not None else "—",
-        coupons=fmt_decimal_rub(coupons),
-        dividends=fmt_decimal_rub(dividends),
-        iis_tax_deductions=fmt_decimal_rub(iis_tax_deductions),
-        commissions=fmt_decimal_rub(commissions),
-        taxes=fmt_decimal_rub(taxes),
-    )
-
-    return append_income_currency_breakdown(
-        append_tax_refund_line(render_today_text(ctx), tax_refunds),
-        income_by_currency,
-    )
+    return build_today_report()
 
 
 def build_week_summary() -> str:

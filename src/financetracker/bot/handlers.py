@@ -7,6 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 
 from telegram import InputFile, Update
+from telegram.error import TelegramError
 from telegram.ext import ContextTypes
 
 from financetracker.bot.charts import (
@@ -61,6 +62,7 @@ from financetracker.bot.summary_service import (
     build_today_summary,
     build_week_summary,
 )
+from financetracker.bot.today_widget import send_today_widget
 from financetracker.bot.year_summary_service import build_year_summary, get_year_period
 
 
@@ -343,7 +345,22 @@ async def cmd_today(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await require_authorized_private_chat(update):
         return
     text = await run_blocking_command(build_today_summary)
-    await safe_send_message(context.bot, update.effective_chat.id, text, parse_mode="Markdown")
+    await safe_send_message(context.bot, update.effective_chat.id, text, parse_mode=None)
+
+
+async def cmd_today_widget(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    log_update_received(update, command_name="/today_widget")
+    if not await require_authorized_private_chat(update):
+        return
+    try:
+        await send_today_widget(context, update.effective_chat.id)
+    except TelegramError as exc:
+        logger.warning("today_widget_open_failed", "Failed to open the Telegram widget.", {
+            "error_type": type(exc).__name__,
+        })
+        await update.effective_message.reply_text(
+            "Виджет временно недоступен. Посмотреть сводку можно через /today."
+        )
 
 
 async def cmd_week(update: Update, context: ContextTypes.DEFAULT_TYPE):

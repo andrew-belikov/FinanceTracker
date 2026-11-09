@@ -1,6 +1,6 @@
 # Схема PostgreSQL
 
-- **Contract ID / версия:** `schema_manifest.v2`
+- **Contract ID / версия:** `schema_manifest.v3`
 - **Статус:** active
 - **Владелец:** `financetracker.database`
 - **Writers:** `tracker`, migration runner, bot delivery/lease repositories
@@ -63,6 +63,64 @@ Ledger применённых migration: `filename text ! PK`, `checksum_sha256 
 - `FK portfolio_positions_instrument_id_fkey(instrument_id) → instruments(id)`.
 - ORM удаляет positions каскадно вместе с parent snapshot; DB manifest не
   обещает отдельный `ON DELETE` contract.
+
+### `intraday_portfolio_snapshots`
+
+Временные append-only observations одного локального торгового дня:
+`id integer ! PK default nextval`, `account_id text !`, `account_name text ?`,
+`snapshot_at timestamptz !`, `snapshot_date date !`, `currency text !`,
+`total_value numeric(18,2) ?`, `total_shares numeric(18,2) ?`,
+`total_bonds numeric(18,2) ?`, `total_etf numeric(18,2) ?`,
+`total_currencies numeric(18,2) ?`, `total_futures numeric(18,2) ?`,
+`expected_yield numeric(18,2) ?`, `expected_yield_pct numeric(9,4) ?`,
+`created_at timestamptz ! default now()`.
+
+- `IX ix_intraday_portfolio_snapshots_account_date_at(account_id,
+  snapshot_date, snapshot_at)`.
+- Строки создаёт `tracker` из уже существующего interval poll только по будням
+  и строго до времени daily push. Они не имеют UQ по дате: несколько точек за
+  день являются намеренной частью контракта.
+- Это не историческая замена `portfolio_snapshots`: raw observations удаляются
+  при первом успешном intraday-сборе следующего локального дня, только для
+  более ранних дат этого же счёта с `intraday_daily_summaries.delivered_at IS NOT NULL`.
+  Очистка позиций и наблюдений атомарна с новой точкой; summaries сохраняются.
+  После рассылки текущий день остаётся доступным для повторной проверки.
+  Недоставленные дни не очищаются. EOD/TWR-команды эти строки не читают.
+
+### `intraday_portfolio_positions`
+
+Состав одной временной intraday-точки: `id integer ! PK default nextval`,
+`snapshot_id integer !`, `figi text !`, `instrument_id integer ?`,
+`instrument_uid text ?`, `position_uid text ?`, `asset_uid text ?`,
+`ticker text ?`, `name text ?`, `instrument_type text ?`,
+`quantity numeric(18,6) ?`, `currency text ?`, `current_price numeric(18,4) ?`,
+`current_nkd numeric ?`, `position_value numeric(18,2) ?`,
+`expected_yield numeric(18,2) ?`, `expected_yield_pct numeric(9,4) ?`,
+`weight_pct numeric(9,4) ?`, `raw_payload_json text ?`,
+`created_at timestamptz ! default now()`.
+
+- `FK intraday_portfolio_positions_snapshot_id_fkey(snapshot_id) →
+  intraday_portfolio_snapshots(id) ON DELETE CASCADE`.
+- `FK intraday_portfolio_positions_instrument_id_fkey(instrument_id) →
+  instruments(id)`.
+
+### `intraday_daily_summaries`
+
+Компактный постоянный факт дневного intraday-итога: `id integer ! PK default
+nextval`, `account_id text !`, `summary_date date !`, `currency text !`,
+`first_observed_at timestamptz !`, `last_observed_at timestamptz !`,
+`first_value numeric(18,2) !`, `last_value numeric(18,2) !`,
+`min_value numeric(18,2) !`, `max_value numeric(18,2) !`,
+`total_value_delta numeric(18,2) ?`, `observation_count integer !`,
+`delivered_at timestamptz ?`, `created_at timestamptz ! default now()`,
+`updated_at timestamptz ! default now()`.
+
+- `UQ uq_intraday_daily_summaries_account_date(account_id, summary_date)`.
+- `delivered_at` заполняется только после подтверждённой доставки text и chart
+  всем target chats; детальная идемпотентность каждой части остаётся в
+  `bot_notification_deliveries`.
+- Summary сохраняется независимо от очистки raw observations. Отдельная
+  семантика полноты ряда или торгового календаря в этой таблице не определена.
 
 ### `operations`
 
@@ -198,6 +256,7 @@ macOS resource-fork `._*` исключены. Актуальный ordered set:
 14. `20260915_currency_unknown_sentinel.sql`
 15. `20260915_schema_contract_alignment.sql`
 16. `20260915_timezone_aware_utc.sql`
+17. `20260916_intraday_portfolio_snapshots.sql`
 
 Одна migration и запись ledger коммитятся атомарно под PostgreSQL advisory lock
 `1731904221`. Session-local timezone берётся из `TIMEZONE`, затем legacy
