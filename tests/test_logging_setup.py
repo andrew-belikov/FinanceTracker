@@ -88,7 +88,7 @@ class LoggingSetupTests(unittest.TestCase):
         with captured_logger("redaction") as (logger, _raw_logger, stream):
             logger.info(
                 "secret_event",
-                "Bearer abc.def.ghi",
+                "Bearer abc.def.ghi; request-bot123456:abcdefghijklmnopqrstuvwxyz",
                 {
                     "token": "12345",
                     "url": "https://api.telegram.org/bot123456:abcdefghijklmnopqrstuvwxyz/getMe",
@@ -97,7 +97,7 @@ class LoggingSetupTests(unittest.TestCase):
 
         payload = read_payloads(stream)[0]
         self.assertEqual(payload["event"], "secret_event")
-        self.assertIn("***REDACTED***", payload["msg"])
+        self.assertEqual(payload["msg"], "Bearer ***REDACTED***; request-***REDACTED***")
         self.assertEqual(payload["ctx"]["token"], "***REDACTED***")
         self.assertIn("***REDACTED***", payload["ctx"]["url"])
 
@@ -120,6 +120,36 @@ class LoggingSetupTests(unittest.TestCase):
         self.assertIn(" in log", error["where"])
         self.assertNotIn("db-secret", error["message"])
         self.assertNotIn("db-secret", error["stack"])
+
+    def test_free_text_credentials_are_masked_in_logs_and_tracebacks(self):
+        telegram_token = "123456789:" + "A" * 34 + "-"
+        password = 'test password with an escaped \\"quote'
+        query_token = "test%26token=="
+        vless_id = "00000000-1111-4222-8333-444444444444"
+        message = (
+            f'Telegram {telegram_token}, PASSWORD = "{password}", '
+            f'https://example.invalid/?token={query_token}&retry=1, '
+            f'VLESS://{vless_id}@192.0.2.1:443?type=tcp'
+        )
+        masked = "***REDACTED***"
+        expected = (
+            f"Telegram {masked}, PASSWORD = {masked}, "
+            f"https://example.invalid/?token={masked}&retry=1, "
+            f"VLESS://{masked}@192.0.2.1:443?type=tcp"
+        )
+        with captured_logger("free_text_credentials") as (logger, _raw_logger, stream):
+            try:
+                raise RuntimeError(message)
+            except RuntimeError:
+                logger.exception("credential_probe_failed", message, {"detail": [message]})
+
+        payload = read_payloads(stream)[0]
+        self.assertEqual(payload["msg"], expected)
+        self.assertEqual(payload["ctx"]["detail"], [expected])
+        self.assertEqual(payload["error"]["message"], expected)
+        self.assertIn(expected, payload["error"]["stack"])
+        for secret in (telegram_token, password, query_token, vless_id):
+            self.assertNotIn(secret, payload["error"]["stack"])
 
     def test_formatter_survives_malformed_stdlib_record(self):
         with captured_logger("malformed") as (_logger, raw_logger, stream):

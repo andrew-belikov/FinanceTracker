@@ -125,8 +125,18 @@ _RE_BEARER = _re.compile(r"(Bearer)\s+[A-Za-z0-9\-\._~\+\/]+=*", _re.IGNORECASE)
 # Telegram bot token in URL: https://api.telegram.org/bot<token>/method
 _RE_TG_URL = _re.compile(r"(https?://api\.telegram\.org/bot)([^/\s\"']+)", _re.IGNORECASE)
 
-# Telegram token as standalone: bot<id>:<secret>
-_RE_TG_TOKEN = _re.compile(r"\bbot\d{6,}:[A-Za-z0-9_-]{20,}\b")
+# Telegram token in free text, with or without the API path prefix.
+_RE_TG_TOKEN = _re.compile(r"\b(?:bot)?\d{6,}+:[A-Za-z0-9_-]{20,}")
+
+# Free-text assignments also appear in exception messages and URL queries.
+_RE_SECRET_ASSIGNMENT = _re.compile(
+    r"(\b(?:password|token)\b[ \t]*=[ \t]*)"
+    r"""(?:"(?:\\[^\r\n]|[^"\\\r\n])*+"?|'(?:\\[^\r\n]|[^'\\\r\n])*+'?|[^\s"'&,;]+)""",
+    _re.IGNORECASE,
+)
+
+# In VLESS links the user-info itself is the credential.
+_RE_VLESS_USER_INFO = _re.compile(r"""(vless://)[^/\s@?#"'<>]+(@)""", _re.IGNORECASE)
 
 # Password in a URI user-info component, for example a database DSN.  This is
 # applied to every emitted string, including exception messages and tracebacks.
@@ -158,8 +168,9 @@ def _sanitize_string(s: str) -> str:
     s = _RE_BEARER.sub(r"\1 " + _REDACTED, s)
     s = _RE_TG_URL.sub(r"\1" + _REDACTED, s)
     s = _RE_TG_TOKEN.sub(_REDACTED, s)
+    s = _RE_VLESS_USER_INFO.sub(r"\1" + _REDACTED + r"\2", s)
     s = _RE_URI_PASSWORD.sub(r"\1" + _REDACTED + r"\3", s)
-    return s
+    return _RE_SECRET_ASSIGNMENT.sub(r"\1" + _REDACTED, s)
 
 
 def _is_bounded_structural_count(value: Any) -> bool:

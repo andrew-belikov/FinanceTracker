@@ -177,6 +177,8 @@
 - `refresh_token`
 - `authorization`
 - service-specific API tokens в URL и в standalone-виде
+- значения password и token в текстовых присваиваниях, включая параметры URL
+- идентификатор доступа в пользовательской части ссылки VLESS
 - Bearer tokens в строках
 
 Редакция выполняется рекурсивно для строк, списков, словарей и fallback-stringification объектов.
