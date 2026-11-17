@@ -83,11 +83,20 @@ def take_snapshot_for_account(
     acc_name = acc_data.get("name") or "IIS"
 
     portfolio = api_get_portfolio(acc_id)
+    total_value = money_to_float(portfolio.get("totalAmountPortfolio"))
+    if total_value == 0 and not portfolio.get("positions"):
+        logger.warning(
+            "empty_portfolio_recheck",
+            "Rechecking an empty portfolio response before saving a snapshot.",
+        )
+        portfolio = api_get_portfolio(acc_id)
+        total_value = money_to_float(portfolio.get("totalAmountPortfolio"))
+        if total_value is None:
+            raise ValueError("Portfolio recheck returned no total value")
 
     snapshot_at_utc = utc_now()
     snap_date = local_today()
 
-    total_value = money_to_float(portfolio.get("totalAmountPortfolio"))
     total_shares = money_to_float(portfolio.get("totalAmountShares"))
     total_bonds = money_to_float(portfolio.get("totalAmountBonds"))
     total_etf = money_to_float(portfolio.get("totalAmountEtf"))
