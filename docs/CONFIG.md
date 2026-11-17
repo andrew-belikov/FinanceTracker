@@ -38,8 +38,8 @@
 
 - GitHub environment обязан задать `FINANCETRACKER_BACKUP_DIR`: существующий
   каталог вне checkout и Docker volumes с правами только deploy-пользователя.
-- Deploy прекращается до migrations и startup, если custom dump, SHA-256 либо
-  restore drill во временную PostgreSQL database не прошли.
+- Deploy прекращается до рабочих миграций и запуска сервисов, если создание
+  копии, расчёт SHA-256 или восстановление в отдельном PostgreSQL завершается ошибкой.
 - Retention: не менее 30 дней и 10 последних успешных deploy backup. Удаление
   выполняется отдельной проверяемой процедурой, не deploy script.
 

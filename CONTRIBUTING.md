@@ -41,6 +41,8 @@ GitHub Actions workflow `CI` дублирует базовую проверку 
 миграция, повторный запуск и `migrate --check`) и собирают все first-party
 образы. Compose smoke запускает изолированные `db`/`migrate` через
 `compose.ci.yml`; production external volume и сети при этом не используются.
+В этом же стеке `tests/check_restore_drill.sh` проверяет успешное восстановление,
+отказ на повреждённой копии, штатную отмену и удаление временных ресурсов.
 
 Workflow `Deploy FinanceTracker` запускается только после успешного `CI` для
 `push` в `main`. Он берёт `head_sha` завершившегося CI, создаёт одноразовый чистый

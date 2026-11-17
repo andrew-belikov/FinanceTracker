@@ -19,19 +19,22 @@ class PredeployBackupContractTests(unittest.TestCase):
             "pg_dump --format=custom --no-owner --no-privileges",
             "schema_migrations.txt",
             "sha256sum",
-            "createdb -U",
-            "pg_restore -U",
-            'run --rm --no-deps -e DB_DSN= -e "DB_NAME=$restore_database" migrate',
-            '"${compose[@]}" "${restore[@]}" --check',
+            'docker network create --internal "$restore_network"',
+            'docker volume create "$restore_volume"',
+            'pg_restore --exit-on-error --no-owner --no-privileges',
+            '--entrypoint financetracker-migrate "$TRACKER_IMAGE"',
+            '300s "${restore[@]}" --check',
             '"restore_drill":"passed"',
         ):
             with self.subTest(required=required):
                 self.assertIn(required, SCRIPT)
-        self.assertLess(SCRIPT.index("pg_restore -U"), SCRIPT.index('"restore_drill":"passed"'))
+        self.assertLess(SCRIPT.index("pg_restore --exit-on-error"), SCRIPT.index('"restore_drill":"passed"'))
         self.assertLess(
-            SCRIPT.index('"${compose[@]}" "${restore[@]}"\n'),
-            SCRIPT.index('"${compose[@]}" "${restore[@]}" --check'),
+            SCRIPT.index('300s "${restore[@]}"\n'),
+            SCRIPT.index('300s "${restore[@]}" --check'),
         )
+        self.assertNotIn("createdb", SCRIPT)
+        self.assertNotIn("dropdb", SCRIPT)
         self.assertNotIn("pg_restore --clean", SCRIPT)
 
 
