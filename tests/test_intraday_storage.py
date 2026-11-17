@@ -1,6 +1,7 @@
 from datetime import date, datetime, timezone
 from decimal import Decimal
 import unittest
+from unittest.mock import Mock
 from zoneinfo import ZoneInfo
 
 from financetracker.database.base import Base
@@ -27,6 +28,8 @@ from financetracker.tracker.snapshot_sync import (
 class _Logger:
     def info(self, *_args, **_kwargs):
         pass
+
+    warning = info
 
 
 class IntradayStorageTests(unittest.TestCase):
@@ -112,10 +115,37 @@ class IntradayStorageTests(unittest.TestCase):
             self.assertEqual(session.query(IntradayPortfolioPosition).count(), 0)
             self.assertEqual(session.query(IntradayDailySummary).count(), 1)
 
-    def _take_snapshot(self, session, account_id, day, value=100):
+    def test_empty_zero_snapshot_is_rechecked_before_writing(self):
+        empty = {"totalAmountPortfolio": {"units": "0"}, "positions": []}
+        for confirmation, expected in (
+            (self._portfolio(125), Decimal("125.00")),
+            (empty, Decimal("0.00")),
+            ({}, None),
+            (TimeoutError("recheck failed"), None),
+        ):
+            with self.subTest(confirmation=confirmation), self.session_factory() as session:
+                self._take_snapshot(session, "account-1", self.observed_date)
+                portfolio = Mock(side_effect=[empty, confirmation])
+                if expected is None:
+                    with self.assertRaises((TimeoutError, ValueError)):
+                        self._take_snapshot(session, "account-1", self.observed_date, portfolio=portfolio)
+                else:
+                    self._take_snapshot(session, "account-1", self.observed_date, portfolio=portfolio)
+
+                self.assertEqual(portfolio.call_count, 2)
+                snapshots = session.query(IntradayPortfolioSnapshot).order_by(IntradayPortfolioSnapshot.id)
+                self.assertEqual(
+                    [row.total_value for row in snapshots],
+                    [Decimal("100.00")] if expected is None else [Decimal("100.00"), expected],
+                )
+                daily = session.query(PortfolioSnapshot).one()
+                self.assertEqual(daily.total_value, Decimal("100.00") if expected is None else expected)
+                self.assertEqual(session.query(PortfolioPosition).count(), 0 if expected == 0 else 1)
+
+    def _take_snapshot(self, session, account_id, day, value=100, *, portfolio=None):
         take_snapshot_for_account(
             session, {"id": account_id, "name": "Тест"},
-            api_get_portfolio=lambda _: self._portfolio(value),
+            api_get_portfolio=portfolio or (lambda _: self._portfolio(value)),
             api_get_instrument_by_figi=lambda _: {"ticker": "TEST", "name": "Тест"},
             utc_now=lambda: datetime(day.year, day.month, day.day, 7, tzinfo=timezone.utc),
             local_today=lambda: day, portfolio_currency="RUB", logger=_Logger(),

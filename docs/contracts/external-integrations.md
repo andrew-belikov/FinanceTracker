@@ -32,6 +32,7 @@
 
 - `UsersService/GetAccounts` — выбор доступного счёта;
 - `OperationsService/GetPortfolio` — текущий портфель;
+  перед сохранением пустого портфеля с нулевой оценкой трекер запрашивает портфель повторно. Если повторный запрос завершается ошибкой или не возвращает оценку, снимок не записывается.
 - `OperationsService/GetOperationsByCursor` — синхронизация операций;
 - `InstrumentsService/GetInstrumentBy` — метаданные инструмента;
 - `InstrumentsService/GetBondCoupons` — календарь купонов;
