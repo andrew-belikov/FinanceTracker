@@ -48,7 +48,7 @@ for service in "${services[@]}"; do
   previous_images[$service]="$(docker inspect --format '{{.Image}}' "$container_id")"
 done
 
-./scripts/predeploy_backup.sh
+RESTORE_POSTGRES_IMAGE="$db_image_id" ./scripts/predeploy_backup.sh
 assert_current_main
 
 if ! "${compose[@]}" run --rm --no-deps -e 'PGOPTIONS=-c default_transaction_read_only=on' migrate --check; then

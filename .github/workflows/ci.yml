@@ -168,3 +168,4 @@ jobs:
           trap cleanup EXIT
           "${compose[@]}" up -d --wait --wait-timeout 120 db migrate tracker reporter xray-client bot
           "${compose[@]}" run --rm migrate --check
+          COMPOSE_FILE=compose.yml:compose.ci.yml bash tests/check_restore_drill.sh
